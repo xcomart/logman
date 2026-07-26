@@ -1,0 +1,23 @@
+# Store every text file with LF in the repository and check it out with LF on
+# every platform. Rust, cargo, rustfmt and clippy are all indifferent to line
+# endings, so there is nothing to gain from native CRLF on Windows and plenty to
+# lose: without this, a Windows checkout rewrites every file and the next commit
+# from macOS or Linux shows the whole tree as modified.
+* text=auto eol=lf
+
+# Files git must never rewrite or try to diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.exe binary
+*.dll binary
+*.pdb binary
+*.so binary
+*.dylib binary
