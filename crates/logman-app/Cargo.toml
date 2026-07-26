@@ -1,0 +1,27 @@
+[package]
+name = "logman-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "logman"
+path = "src/main.rs"
+
+[dependencies]
+logman-core.workspace = true
+logman-ssh.workspace = true
+logman-term.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+russh.workspace = true
+log.workspace = true
+env_logger.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+parking_lot.workspace = true
+unicode-segmentation.workspace = true
+futures.workspace = true
+gpui.workspace = true
