@@ -1,0 +1,70 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["logman contributors"]
+repository = "https://github.com/logman/logman"
+
+[workspace.dependencies]
+# --- shared utilities ---
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+directories = "6"
+keyring = "4"
+parking_lot = "0.12"
+smallvec = "1"
+unicode-segmentation = "1"
+futures = "0.3"
+async-trait = "0.1"
+bitflags = "2"
+tempfile = "3"
+
+# --- async runtime (SSH transport only) ---
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+] }
+
+# --- SSH.  NOTE: default features pull in `aws-lc-rs`, whose build requires
+# NASM on Windows.  The `ring` backend builds everywhere with no extra tooling. ---
+russh = { version = "0.62", default-features = false, features = [
+    "ring",
+    "flate2",
+    "rsa",
+] }
+
+# --- terminal emulation (same engine Zed uses) ---
+alacritty_terminal = "0.26"
+
+# --- GUI: Zed's GPU-accelerated UI framework ---
+gpui = "0.2.2"
+
+# --- internal crates ---
+logman-core = { path = "crates/logman-core" }
+logman-ssh = { path = "crates/logman-ssh" }
+logman-term = { path = "crates/logman-term" }
+
+[profile.dev]
+# gpui + its dependency tree is large; keep debug builds usable.
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
