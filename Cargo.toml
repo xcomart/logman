@@ -1,6 +1,26 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# `vendor/gpui` is a patched dependency, not a member: it keeps its own
+# manifest and must not inherit workspace settings.
+exclude = ["vendor/gpui"]
+
+# gpui 0.2.2 pins the process at 100% CPU, permanently unresponsive, when a
+# Korean IME ends a composition mid-word (the Han/Yeong key) and the user then
+# keeps typing. gpui's Windows message loop never calls `TranslateMessage`;
+# instead it fabricates a `MSG` and translates it re-entrantly from inside the
+# window procedure. TSF depends on the documented loop order, and the
+# violation leaves CTF regenerating `WM_IME_COMPOSITION` forever from inside a
+# `GetMessageW` callback — where no application code can intervene.
+#
+# The fix is two lines in `vendor/gpui`, both marked `LOGMAN PATCH`:
+#   * `platform/windows/platform.rs` — translate in the loop, on the real MSG.
+#   * `platform/windows/events.rs`   — drop the in-procedure translations.
+#
+# crates.io has no newer gpui (0.2.2 is current), so vendoring is the only
+# route. Delete this patch and `vendor/gpui` once a release carries the fix.
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
 
 [workspace.package]
 version = "0.1.0"
