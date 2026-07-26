@@ -312,6 +312,19 @@ impl Platform for WindowsPlatform {
         let mut msg = MSG::default();
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                // LOGMAN PATCH: translate here, on the real message, as the
+                // Win32 message-loop contract requires.
+                //
+                // Upstream instead synthesised a MSG and called
+                // TranslateMessage re-entrantly from inside the window
+                // procedure. TSF correlates translated keys with the message
+                // queue, and a translation issued during dispatch leaves CTF
+                // believing the composition was never consumed: after a Korean
+                // Han/Yeong toggle it regenerates WM_IME_COMPOSITION from the
+                // GetMessageW callback without end, pinning the process at
+                // 100% CPU. The matching in-procedure calls are removed in
+                // `events.rs`.
+                let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }

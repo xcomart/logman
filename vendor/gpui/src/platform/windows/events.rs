@@ -381,12 +381,14 @@ impl WindowsWindowInner {
         };
         drop(lock);
 
+        // LOGMAN PATCH: the message loop already translated this key, so the
+        // IME has seen it. All that is left is to decide whether the
+        // application also gets a KeyDown event.
         let is_composing = self
             .with_input_handler(|input_handler| input_handler.marked_text_range())
             .flatten()
             .is_some();
         if is_composing {
-            translate_message(handle, wparam, lparam);
             return Some(0);
         }
 
@@ -398,12 +400,7 @@ impl WindowsWindowInner {
 
         self.state.borrow_mut().callbacks.input = Some(func);
 
-        if handled {
-            Some(0)
-        } else {
-            translate_message(handle, wparam, lparam);
-            Some(1)
-        }
+        if handled { Some(0) } else { Some(1) }
     }
 
     fn handle_keyup_msg(&self, handle: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
@@ -1281,21 +1278,6 @@ impl WindowsWindowInner {
     }
 }
 
-#[inline]
-fn translate_message(handle: HWND, wparam: WPARAM, lparam: LPARAM) {
-    let msg = MSG {
-        hwnd: handle,
-        message: WM_KEYDOWN,
-        wParam: wparam,
-        lParam: lparam,
-        // It seems like leaving the following two parameters empty doesn't break key events, they still work as expected.
-        // But if any bugs pop up after this PR, this is probably the place to look first.
-        time: 0,
-        pt: POINT::default(),
-    };
-    unsafe { TranslateMessage(&msg).ok().log_err() };
-}
-
 fn handle_key_event<F>(
     handle: HWND,
     wparam: WPARAM,
@@ -1323,10 +1305,9 @@ where
                 capslock: current_capslock(),
             }))
         }
-        VK_PACKET => {
-            translate_message(handle, wparam, lparam);
-            None
-        }
+        // LOGMAN PATCH: the message loop translates this now; translating a
+        // second time here would inject the character twice.
+        VK_PACKET => None,
         VK_CAPITAL => {
             let capslock = current_capslock();
             if state
