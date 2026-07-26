@@ -1,0 +1,13 @@
+[package]
+name = "logman-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
+
+anyhow.workspace = true
+bitflags.workspace = true
+log.workspace = true
+smallvec.workspace = true

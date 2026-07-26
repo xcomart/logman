@@ -1,0 +1,33 @@
+//! Terminal emulation for logman.
+//!
+//! This crate owns everything that turns a raw byte stream coming from an SSH
+//! channel into something a GUI can draw, and everything that turns user input
+//! back into the bytes a remote shell expects. It is intentionally free of any
+//! GUI or transport dependency:
+//!
+//! * [`TerminalModel`] wraps `alacritty_terminal` and consumes bytes with
+//!   [`TerminalModel::feed`].
+//! * [`TerminalSnapshot`] is an `alacritty`-free description of one frame,
+//!   produced by [`TerminalModel::snapshot`].
+//! * [`TerminalTheme`] resolves the abstract cell colors into RGB.
+//! * [`encode_key`] / [`encode_paste`] encode user input.
+//!
+//! ```
+//! use logman_term::{TerminalModel, TerminalTheme};
+//!
+//! let mut term = TerminalModel::new(80, 24, 1000, TerminalTheme::dark());
+//! term.feed(b"hello");
+//! assert_eq!(term.snapshot().lines[0].text(), "hello");
+//! ```
+
+#![deny(missing_docs)]
+
+pub mod keys;
+pub mod model;
+pub mod snapshot;
+pub mod theme;
+
+pub use keys::{KeyCode, KeyInput, TermModes, encode_key, encode_paste};
+pub use model::TerminalModel;
+pub use snapshot::{CursorPos, RunFlags, StyledRun, TerminalLine, TerminalSnapshot};
+pub use theme::{Rgb, TerminalTheme};
