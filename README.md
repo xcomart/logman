@@ -27,6 +27,21 @@ The SSH layer deliberately uses russh's `ring` backend instead of the default
 clean checkout fail to compile there; `ring` builds everywhere with no extra
 tooling. Do not re-enable russh's default features.
 
+### gpui is vendored and patched
+
+`vendor/gpui` is gpui 0.2.2 with a three-line fix, wired in through
+`[patch.crates-io]`. Upstream's Windows message pump calls
+`DispatchMessageW` without `TranslateMessage` and compensates by calling
+`TranslateMessage` re-entrantly from inside the window procedure. TSF correlates
+translated keys against the message queue, so ending a Korean composition with
+the Han/Yeong key leaves CTF regenerating `WM_IME_COMPOSITION` forever and the
+process pinned at 100% CPU.
+
+The vendored source is otherwise identical to the published crate, so
+`diff -r` against the registry copy shows exactly the patched files. Drop
+`vendor/gpui`, the `[patch.crates-io]` entry and the `exclude` line once a
+released gpui carries the fix — nothing under `crates/` depends on the patch.
+
 ### Release builds on Windows need `fxc.exe`
 
 gpui precompiles its HLSL shaders only in release builds — debug builds compile
@@ -132,6 +147,9 @@ and no external server is needed.
   and says so; it is not silently ignored.
 - **No keyboard-interactive authentication**, so MFA-protected servers cannot be
   reached yet.
+- **IME support depends on the vendored gpui patch** described above. Building
+  against an unpatched gpui 0.2.2 on Windows will hang the process the first
+  time a Korean composition is ended with the Han/Yeong key.
 - **IME composition is only verified on Windows.** Text input goes through
   gpui's `EntityInputHandler`, so composing Korean or Japanese in a session
   works — the preedit is drawn at the cursor and nothing reaches the remote
