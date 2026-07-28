@@ -11,16 +11,14 @@
 use std::fmt;
 
 use futures::StreamExt;
-use gpui::{Context, SharedString, Task};
-use logman_core::SessionProfile;
+use gpui::{App, Context, SharedString, Task};
+use logman_core::{EffectiveTerminal, SessionProfile};
 use logman_ssh::{SshAuth, SshConfig, SshErrorKind, SshEvent, SshSession};
 use logman_term::{TerminalModel, TerminalTheme};
 
+use crate::app_settings;
 use crate::ui::TabStatus;
 use crate::verifier::host_key_verifier;
-
-/// Lines of history kept above the visible screen.
-const SCROLLBACK_LINES: usize = 5_000;
 
 /// Columns a session starts with, until the view reports its real size.
 const INITIAL_COLS: u16 = 80;
@@ -97,7 +95,12 @@ impl fmt::Debug for Session {
 
 impl Session {
     /// Builds a session for `profile` and starts connecting straight away.
+    ///
+    /// The terminal is created from the effective settings — the global defaults
+    /// with the profile's overrides applied — so the scheme and scrollback depth
+    /// are correct from the very first frame.
     pub fn new(profile: SessionProfile, auth: SshAuth, cx: &mut Context<Self>) -> Self {
+        let effective = app_settings::current(cx).effective_terminal(&profile.overrides);
         let mut session = Self {
             profile,
             auth,
@@ -105,14 +108,38 @@ impl Session {
             terminal: TerminalModel::new(
                 INITIAL_COLS,
                 INITIAL_ROWS,
-                SCROLLBACK_LINES,
-                TerminalTheme::dark(),
+                effective.scrollback_lines,
+                TerminalTheme::by_name_or_default(&effective.scheme),
             ),
             status: SessionStatus::Connecting,
             _pump: None,
         };
         session.start(cx);
         session
+    }
+
+    /// The effective terminal settings for this session: the global defaults
+    /// with this profile's overrides layered on top.
+    ///
+    /// Exposed so the view can honor per-session values such as the font size
+    /// and the copy-on-select behaviour without re-reading the global settings.
+    pub fn effective(&self, cx: &App) -> EffectiveTerminal {
+        app_settings::current(cx).effective_terminal(&self.profile.overrides)
+    }
+
+    /// Re-reads the settings and applies the ones that can change on a live
+    /// session.
+    ///
+    /// Only the color scheme takes effect immediately. The scrollback depth is
+    /// fixed when the terminal model is built — changing it would rebuild the
+    /// grid and clear the screen — and the `TERM` value has already been
+    /// negotiated with the remote pty, so both are picked up only on the next
+    /// reconnect instead.
+    pub fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        let effective = self.effective(cx);
+        self.terminal
+            .set_theme(TerminalTheme::by_name_or_default(&effective.scheme));
+        cx.notify();
     }
 
     /// The current life cycle state.
@@ -215,7 +242,18 @@ impl Session {
     }
 
     /// Opens the transport and spawns the event pump.
+    ///
+    /// Settings are read here rather than only in [`Session::new`] so that a
+    /// reconnect naturally picks up a scheme, `TERM` or timeout changed since the
+    /// session was first opened.
     fn start(&mut self, cx: &mut Context<Self>) {
+        let settings = app_settings::current(cx);
+        let effective = settings.effective_terminal(&self.profile.overrides);
+        // Re-applied here, not just in `new`, so a reconnect adopts a scheme the
+        // user changed while the session was live.
+        self.terminal
+            .set_theme(TerminalTheme::by_name_or_default(&effective.scheme));
+
         let (cols, rows) = self.terminal.size();
         let mut config = SshConfig::new(
             self.profile.host.clone(),
@@ -225,6 +263,9 @@ impl Session {
         );
         config.cols = cols;
         config.rows = rows;
+        config.term = effective.term;
+        config.keepalive_secs = settings.connection.keepalive_secs;
+        config.connect_timeout_secs = settings.connection.connect_timeout_secs;
 
         let (ssh, mut events) = SshSession::connect(config, host_key_verifier());
         self.ssh = Some(ssh);

@@ -40,11 +40,13 @@ use gpui::{
     Style, Subscription, TextRun, UTF16Selection, UnderlineStyle, Window, actions, black, div,
     fill, font, outline, point, prelude::*, px, relative, rgb, size,
 };
+use logman_core::EffectiveTerminal;
 use logman_term::{
     KeyCode, KeyInput, Rgb, RunFlags, StyledRun, TerminalLine, TerminalTheme, encode_key,
     encode_paste,
 };
 
+use crate::app_settings;
 use crate::session::{Session, SessionStatus};
 use crate::ui::{Button, ButtonVariant, theme};
 
@@ -61,8 +63,12 @@ actions!(
 /// Key context the terminal bindings are scoped to.
 const KEY_CONTEXT: &str = "Terminal";
 
-/// Font size of the terminal grid.
-const FONT_SIZE: Pixels = px(14.);
+/// Terminal font size used before the session's effective settings are known.
+///
+/// The real size comes from [`EffectiveTerminal::font_size`]; this only backs
+/// the rare code paths (such as a scroll before the first paint) that run
+/// without a session snapshot to hand.
+const DEFAULT_FONT_SIZE: Pixels = px(14.);
 
 /// Line height as a multiple of the font size.
 const LINE_HEIGHT_RATIO: f32 = 1.3;
@@ -96,6 +102,17 @@ fn terminal_font(cx: &App) -> Font {
     cx.try_global::<TerminalFont>()
         .map(|global| global.0.clone())
         .unwrap_or_else(|| font(MONOSPACE_CANDIDATES[0]))
+}
+
+/// Resolves the font a session renders with.
+///
+/// An explicit [`EffectiveTerminal::font_family`] wins; otherwise the per-OS
+/// monospace default resolved by [`TerminalView::init`] is used.
+fn resolve_font(effective: &EffectiveTerminal, cx: &App) -> Font {
+    match &effective.font_family {
+        Some(family) => font(family),
+        None => terminal_font(cx),
+    }
 }
 
 /// Converts a terminal color into the color space gpui paints with.
@@ -407,7 +424,7 @@ impl TerminalView {
     ) {
         let line_height = self
             .geometry
-            .map_or(FONT_SIZE * LINE_HEIGHT_RATIO, |geometry| {
+            .map_or(DEFAULT_FONT_SIZE * LINE_HEIGHT_RATIO, |geometry| {
                 geometry.cell.height
             });
         let pixels = event.delta.pixel_delta(line_height).y;
@@ -458,18 +475,26 @@ impl TerminalView {
         }
     }
 
-    /// Ends a selection drag.
-    fn on_mouse_up(
-        &mut self,
-        _event: &MouseUpEvent,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
+    /// Ends a selection drag, copying the selection to the clipboard when the
+    /// session has copy-on-select enabled.
+    ///
+    /// The selection is left in place: copy-on-select mirrors it to the
+    /// clipboard, it does not consume it.
+    fn on_mouse_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.selecting = false;
+        if self.session.read(cx).effective(cx).copy_on_select {
+            self.write_selection_to_clipboard(cx);
+        }
     }
 
     /// Copies the selected cells to the clipboard.
     fn copy_selection(&mut self, _: &CopySelection, _window: &mut Window, cx: &mut Context<Self>) {
+        self.write_selection_to_clipboard(cx);
+    }
+
+    /// Writes the current selection to the system clipboard, leaving it
+    /// selected. A no-op when nothing is selected.
+    fn write_selection_to_clipboard(&self, cx: &mut Context<Self>) {
         let Some((start, end)) = self.normalized_selection() else {
             return;
         };
@@ -685,15 +710,23 @@ impl EntityInputHandler for TerminalView {
         cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let geometry = self.geometry?;
-        let base_font = terminal_font(cx);
+        let effective = self.session.read(cx).effective(cx);
+        let base_font = resolve_font(&effective, cx);
+        let font_size = px(effective.font_size);
 
-        let total = measure_text(&self.preedit.text, &base_font, window);
+        let total = measure_text(&self.preedit.text, &base_font, font_size, window);
         let before = measure_text(
             self.preedit.prefix_utf16(range_utf16.start),
             &base_font,
+            font_size,
             window,
         );
-        let width = measure_text(self.preedit.slice_utf16(&range_utf16), &base_font, window);
+        let width = measure_text(
+            self.preedit.slice_utf16(&range_utf16),
+            &base_font,
+            font_size,
+            window,
+        );
 
         let origin = preedit_origin(&geometry, element_bounds, total);
         Some(Bounds::new(
@@ -723,6 +756,21 @@ impl Render for TerminalView {
                 to_hsla(session.terminal().theme().background),
                 session.status().clone(),
             )
+        };
+        // The window itself is transparent or blurred whenever the opacity is
+        // below 1.0, so tinting the surface background lets the desktop show
+        // through the default-background cells. Non-default cell backgrounds,
+        // text and the cursor stay opaque; only this base fill carries the alpha.
+        let background = {
+            let opacity = app_settings::current(cx).window.background_opacity;
+            if opacity < 1.0 {
+                Hsla {
+                    a: opacity,
+                    ..background
+                }
+            } else {
+                background
+            }
         };
         let overlay = self.render_overlay(&status, cx);
         let element = TerminalElement {
@@ -998,9 +1046,11 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let base_font = terminal_font(cx);
-        let line_height = FONT_SIZE * LINE_HEIGHT_RATIO;
-        let cell_width = measure_cell(&base_font, window);
+        let effective = self.session.read(cx).effective(cx);
+        let base_font = resolve_font(&effective, cx);
+        let font_size = px(effective.font_size);
+        let line_height = font_size * LINE_HEIGHT_RATIO;
+        let cell_width = measure_cell(&base_font, font_size, window);
         let cell = size(cell_width, line_height);
 
         let cols = grid_extent(bounds.size.width, cell_width);
@@ -1029,7 +1079,7 @@ impl Element for TerminalElement {
                 let text_run = text_run_for(run, &base_font);
                 let shaped = window.text_system().shape_line(
                     SharedString::from(run.text.clone()),
-                    FONT_SIZE,
+                    font_size,
                     &[text_run],
                     None,
                 );
@@ -1089,7 +1139,7 @@ impl Element for TerminalElement {
                         };
                         let shaped = window
                             .text_system()
-                            .shape_line(text, FONT_SIZE, &[run], None);
+                            .shape_line(text, font_size, &[run], None);
                         (origin, shaped)
                     });
                 (Some(fill(rect, color)), glyph)
@@ -1109,7 +1159,7 @@ impl Element for TerminalElement {
         };
 
         let (preedit_background, preedit_text, preedit_caret) = if preedit.is_active() {
-            let shaped = shape_preedit(&preedit.text, &base_font, &palette, window);
+            let shaped = shape_preedit(&preedit.text, &base_font, font_size, &palette, window);
             let origin = preedit_origin(&geometry, bounds, shaped.width);
             let caret_x = origin.x
                 + measure_text(
@@ -1118,6 +1168,7 @@ impl Element for TerminalElement {
                         .get(..preedit.selection.end)
                         .unwrap_or_default(),
                     &base_font,
+                    font_size,
                     window,
                 );
             (
@@ -1198,8 +1249,8 @@ impl Element for TerminalElement {
     }
 }
 
-/// Measures the advance of one cell in `base_font`.
-fn measure_cell(base_font: &Font, window: &mut Window) -> Pixels {
+/// Measures the advance of one cell in `base_font` at `font_size`.
+fn measure_cell(base_font: &Font, font_size: Pixels, window: &mut Window) -> Pixels {
     let run = TextRun {
         len: SAMPLE_GLYPH.len(),
         font: base_font.clone(),
@@ -1211,7 +1262,7 @@ fn measure_cell(base_font: &Font, window: &mut Window) -> Pixels {
     let line =
         window
             .text_system()
-            .shape_line(SharedString::from(SAMPLE_GLYPH), FONT_SIZE, &[run], None);
+            .shape_line(SharedString::from(SAMPLE_GLYPH), font_size, &[run], None);
     line.width.max(px(1.))
 }
 
@@ -1227,6 +1278,7 @@ fn grid_extent(available: Pixels, cell: Pixels) -> u16 {
 fn shape_preedit(
     text: &str,
     base_font: &Font,
+    font_size: Pixels,
     palette: &TerminalTheme,
     window: &mut Window,
 ) -> ShapedLine {
@@ -1245,14 +1297,14 @@ fn shape_preedit(
     };
     window
         .text_system()
-        .shape_line(SharedString::from(text.to_owned()), FONT_SIZE, &[run], None)
+        .shape_line(SharedString::from(text.to_owned()), font_size, &[run], None)
 }
 
 /// Width `text` occupies in the terminal font.
 ///
 /// Composed text is usually full width (Hangul, Kana, Han), so the advance has
 /// to come from the shaper rather than from a cell count.
-fn measure_text(text: &str, base_font: &Font, window: &mut Window) -> Pixels {
+fn measure_text(text: &str, base_font: &Font, font_size: Pixels, window: &mut Window) -> Pixels {
     if text.is_empty() {
         return px(0.);
     }
@@ -1266,7 +1318,7 @@ fn measure_text(text: &str, base_font: &Font, window: &mut Window) -> Pixels {
     };
     window
         .text_system()
-        .shape_line(SharedString::from(text.to_owned()), FONT_SIZE, &[run], None)
+        .shape_line(SharedString::from(text.to_owned()), font_size, &[run], None)
         .width
 }
 

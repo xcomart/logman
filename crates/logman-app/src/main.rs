@@ -11,8 +11,10 @@
 //! rendered on top of everything else. Session state lives in [`session`], the
 //! terminal surface in [`terminal_view`], and every reusable widget in [`ui`].
 
+mod app_settings;
 mod connection;
 mod session;
+mod settings_dialog;
 mod terminal_view;
 // The widget layer is written as a self-contained toolkit rather than for one
 // call site, so it deliberately offers variants no current call site uses (the
@@ -24,16 +26,17 @@ mod verifier;
 
 use gpui::{
     AnyElement, App, Application, Bounds, Context, ElementId, Entity, FocusHandle, Focusable,
-    KeyBinding, SharedString, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    actions, div, prelude::*, px, size,
+    KeyBinding, SharedString, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
-use logman_core::SessionProfile;
+use logman_core::{SessionProfile, UiTheme, WindowSettings};
 use logman_ssh::SshAuth;
 
 use connection::{ConnectionDialog, ConnectionDialogEvent};
 use session::Session;
+use settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use terminal_view::TerminalView;
-use ui::{Button, ButtonVariant, TabBar, TabItem, theme};
+use ui::{Button, ButtonVariant, TabBar, TabItem, Theme, set_theme, theme};
 
 actions!(
     logman,
@@ -44,7 +47,9 @@ actions!(
         NewSession,
         /// Close the active session tab.
         CloseSession,
-        /// Close the connection dialog, if it is open.
+        /// Open the settings dialog.
+        OpenSettings,
+        /// Close the connection or settings dialog, if one is open.
         DismissDialog,
     ]
 );
@@ -88,8 +93,12 @@ struct Workspace {
     active: usize,
     /// The connection dialog, rendered only while it reports itself open.
     dialog: Entity<ConnectionDialog>,
-    /// Keeps the dialog subscription alive.
+    /// The settings dialog, rendered only while it reports itself open.
+    settings: Entity<SettingsDialog>,
+    /// Keeps the connection dialog subscription alive.
     _dialog_events: Subscription,
+    /// Keeps the settings dialog subscription alive.
+    _settings_events: Subscription,
     /// Disconnects every session before the process exits.
     _quit: Subscription,
 }
@@ -114,6 +123,31 @@ impl Workspace {
                 },
             );
 
+        let settings = cx.new(SettingsDialog::new);
+        let settings_events = cx.subscribe_in(
+            &settings,
+            window,
+            |this, dialog, event, window, cx| match event {
+                // The dialog has already replaced and persisted the settings
+                // global by the time it emits this; the shell re-applies the
+                // parts that touch live windows and sessions.
+                SettingsDialogEvent::Applied => {
+                    let settings = app_settings::current(cx);
+                    apply_ui_theme(settings.ui_theme, cx);
+                    cx.refresh_windows();
+                    window.set_background_appearance(window_appearance(&settings.window));
+                    for tab in &this.tabs {
+                        tab.session(cx)
+                            .update(cx, |session, cx| session.apply_settings(cx));
+                    }
+                }
+                SettingsDialogEvent::Dismissed => {
+                    dialog.update(cx, |dialog, cx| dialog.close(cx));
+                    this.focus_active(window, cx);
+                }
+            },
+        );
+
         let quit = cx.on_app_quit(|this, cx| {
             for tab in &this.tabs {
                 tab.session(cx)
@@ -127,7 +161,9 @@ impl Workspace {
             tabs: Vec::new(),
             active: 0,
             dialog,
+            settings,
             _dialog_events: dialog_events,
+            _settings_events: settings_events,
             _quit: quit,
         }
     }
@@ -199,16 +235,36 @@ impl Workspace {
 
     /// Shows the connection dialog with an empty form.
     fn open_dialog(&mut self, cx: &mut Context<Self>) {
+        self.close_settings(cx);
         self.dialog.update(cx, |dialog, cx| dialog.open_new(cx));
         cx.notify();
     }
 
     /// Shows the connection dialog pre-filled from a saved profile.
     fn open_profile(&mut self, profile: &SessionProfile, cx: &mut Context<Self>) {
+        self.close_settings(cx);
         let id = profile.id;
         self.dialog
             .update(cx, |dialog, cx| dialog.open_profile(id, cx));
         cx.notify();
+    }
+
+    /// Shows the settings dialog, closing the connection dialog first so the two
+    /// are never open at once.
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        if self.dialog.read(cx).is_open() {
+            self.dialog.update(cx, |dialog, cx| dialog.close(cx));
+        }
+        self.settings.update(cx, |dialog, cx| dialog.open(cx));
+        cx.notify();
+    }
+
+    /// Closes the settings dialog if it is open. Used before opening the
+    /// connection dialog so only one modal is ever visible.
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        if self.settings.read(cx).is_open() {
+            self.settings.update(cx, |dialog, cx| dialog.close(cx));
+        }
     }
 
     /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>T</kbd>.
@@ -227,6 +283,16 @@ impl Workspace {
         self.close_tab(active, window, cx);
     }
 
+    /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>,</kbd>.
+    fn open_settings_action(
+        &mut self,
+        _: &OpenSettings,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings(cx);
+    }
+
     /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + a digit.
     fn select_tab_action(
         &mut self,
@@ -237,24 +303,31 @@ impl Workspace {
         self.select_tab(action.0, window, cx);
     }
 
-    /// Handles <kbd>Esc</kbd>: closes the dialog, or lets the key through to
-    /// the terminal when no dialog is open.
+    /// Handles <kbd>Esc</kbd>: closes whichever dialog is open, or lets the key
+    /// through to the terminal when neither is.
     fn dismiss_dialog_action(
         &mut self,
         _: &DismissDialog,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.dialog.read(cx).is_open() {
-            cx.propagate();
+        if self.dialog.read(cx).is_open() {
+            // Route through `dismiss` rather than closing directly: the dialog
+            // also binds `Escape` internally, and going through one path keeps
+            // `Dismissed` firing exactly once no matter which handler wins the
+            // dispatch. Closing and restoring focus is then the subscription's
+            // job.
+            self.dialog.update(cx, |dialog, cx| dialog.dismiss(cx));
+            cx.notify();
             return;
         }
-        // Route through `dismiss` rather than closing directly: the dialog also
-        // binds `Escape` internally, and going through one path keeps
-        // `Dismissed` firing exactly once no matter which handler wins the
-        // dispatch. Closing and restoring focus is then the subscription's job.
-        self.dialog.update(cx, |dialog, cx| dialog.dismiss(cx));
-        cx.notify();
+        if self.settings.read(cx).is_open() {
+            self.settings.update(cx, |dialog, cx| dialog.close(cx));
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        cx.propagate();
     }
 
     /// Renders the tab strip.
@@ -444,6 +517,11 @@ impl Render for Workspace {
             .read(cx)
             .is_open()
             .then(|| div().absolute().inset_0().child(self.dialog.clone()));
+        let settings = self
+            .settings
+            .read(cx)
+            .is_open()
+            .then(|| div().absolute().inset_0().child(self.settings.clone()));
 
         div()
             .key_context(KEY_CONTEXT)
@@ -457,12 +535,37 @@ impl Render for Workspace {
             .text_size(px(13.))
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::close_session_action))
+            .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::select_tab_action))
             .on_action(cx.listener(Self::dismiss_dialog_action))
             .child(tab_bar)
             .child(body)
             .child(status_bar)
             .children(dialog)
+            .children(settings)
+    }
+}
+
+/// Installs the widget theme matching the configured UI theme.
+fn apply_ui_theme(ui_theme: UiTheme, cx: &mut App) {
+    let theme = match ui_theme {
+        UiTheme::Light => Theme::light(),
+        UiTheme::Dark => Theme::dark(),
+    };
+    set_theme(theme, cx);
+}
+
+/// Maps the window settings onto a gpui background appearance.
+///
+/// Blur wins when requested; failing that, any opacity below fully opaque asks
+/// for a plain transparent window; otherwise the window stays opaque.
+fn window_appearance(window: &WindowSettings) -> WindowBackgroundAppearance {
+    if window.background_blur {
+        WindowBackgroundAppearance::Blurred
+    } else if window.background_opacity < 1.0 {
+        WindowBackgroundAppearance::Transparent
+    } else {
+        WindowBackgroundAppearance::Opaque
     }
 }
 
@@ -478,6 +581,7 @@ fn bind_shortcuts(cx: &mut App) {
         KeyBinding::new(&format!("{modifier}-q"), Quit, None),
         KeyBinding::new(&format!("{modifier}-t"), NewSession, Some(KEY_CONTEXT)),
         KeyBinding::new(&format!("{modifier}-w"), CloseSession, Some(KEY_CONTEXT)),
+        KeyBinding::new(&format!("{modifier}-,"), OpenSettings, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", DismissDialog, Some(KEY_CONTEXT)),
     ];
     for index in 0..QUICK_SELECT_TABS {
@@ -499,9 +603,15 @@ fn main() {
             log::warn!("the OS keychain is unavailable: {error}");
         }
 
+        // Load settings before the widget layer installs its default theme, then
+        // override that theme to match what the user configured.
+        app_settings::init(cx);
         ui::init(cx);
         TerminalView::init(cx);
         bind_shortcuts(cx);
+
+        let settings = app_settings::current(cx);
+        apply_ui_theme(settings.ui_theme, cx);
 
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
         cx.on_window_closed(|cx| {
@@ -522,6 +632,9 @@ fn main() {
                 // Wayland compositors and X11 docks match this against
                 // logman.desktop to pick up the application icon.
                 app_id: Some("logman".into()),
+                // A translucent or blurred window needs the platform surface to
+                // permit alpha; the terminal view then tints its background.
+                window_background: window_appearance(&settings.window),
                 ..Default::default()
             },
             |window, cx| {

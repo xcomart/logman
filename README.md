@@ -101,6 +101,24 @@ Credential Manager, the macOS Keychain, or the freedesktop Secret Service, and
 only when "Remember … in the system keychain" is ticked. Without a usable
 keychain the application still runs; it just asks for the secret every time.
 
+### Settings
+
+<kbd>Ctrl</kbd>+<kbd>,</kbd> (<kbd>Cmd</kbd>+<kbd>,</kbd> on macOS) opens the
+settings dialog: UI theme, terminal color scheme (One Dark, One Light,
+Solarized Dark/Light, Gruvbox Dark, Dracula — each shown with a live
+preview), font family and size, scrollback depth, `TERM`, copy-on-select,
+window background opacity and blur, and the defaults applied to new
+connections. Everything lands in `settings.json` next to the profiles, is
+safe to edit by hand, and out-of-range values are clamped on load rather
+than breaking the app.
+
+A profile can override the scheme, font size, scrollback and `TERM` for just
+that session — the "Session overrides" section of the connection dialog;
+empty fields inherit the global value. Theme and scheme changes apply to open
+sessions immediately; a changed scrollback or `TERM` takes effect on the next
+reconnect, since the first would clear the screen and the second has already
+been sent to the server.
+
 ### Host key policy
 
 The first time a host is seen its key is recorded and trusted. On later

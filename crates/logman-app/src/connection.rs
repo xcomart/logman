@@ -22,17 +22,32 @@ use gpui::{
     KeyBinding, KeyDownEvent, MouseButton, PathPromptOptions, Render, SharedString, Window,
     actions, div, prelude::*, px,
 };
-use logman_core::{AuthMethod, ProfileStore, SecretStore, SessionProfile};
+use logman_core::{AuthMethod, ProfileStore, SecretStore, SessionOverrides, SessionProfile};
 use logman_ssh::SshAuth;
 use uuid::Uuid;
 
-use crate::ui::{Button, ButtonVariant, Checkbox, Segmented, TextInput, form_row, modal, theme};
+use crate::ui::{
+    Button, ButtonVariant, Checkbox, SchemePicker, SchemeSwatch, Segmented, TextInput, form_row,
+    modal, theme,
+};
 
 /// Port pre-filled into the form and used when the port field is left empty.
 const DEFAULT_PORT: u16 = 22;
 
 /// Widest port number that still fits in a `u16`, in digits.
 const MAX_PORT_DIGITS: usize = 5;
+
+/// Widest scrollback override the field accepts, in characters.
+const MAX_SCROLLBACK_DIGITS: usize = 6;
+
+/// Widest font size override the field accepts, in characters.
+const MAX_FONT_SIZE_DIGITS: usize = 5;
+
+/// Id used by the "inherit the global scheme" card in the overrides picker.
+const INHERIT_SCHEME_ID: &str = "";
+
+/// Cards per row in the per-session color scheme picker.
+const OVERRIDE_SCHEME_COLUMNS: usize = 4;
 
 /// Width of the dialog panel.
 ///
@@ -105,6 +120,16 @@ mod tab {
     pub const PASSPHRASE: isize = 70;
     /// "Remember ... in the system keychain".
     pub const REMEMBER: isize = 80;
+    /// The "Session overrides" disclosure button.
+    pub const OVERRIDES: isize = 82;
+    /// Per-session color scheme. Only a stop while the section is expanded.
+    pub const OVERRIDE_SCHEME: isize = 84;
+    /// Per-session font size.
+    pub const OVERRIDE_FONT_SIZE: isize = 86;
+    /// Per-session scrollback depth.
+    pub const OVERRIDE_SCROLLBACK: isize = 87;
+    /// Per-session `TERM`.
+    pub const OVERRIDE_TERM: isize = 88;
     /// Cancel.
     pub const CANCEL: isize = 90;
     /// Connect.
@@ -112,6 +137,13 @@ mod tab {
 }
 
 /// Emitted by [`ConnectionDialog`] when the user acts on it.
+///
+/// `Connect` is far larger than `Dismissed` — a [`SessionProfile`] grew past
+/// clippy's threshold once it gained per-session overrides. Boxing the payload
+/// is the usual remedy, but the shell is written against these exact field
+/// types, and the event is emitted once per user action, so the size difference
+/// costs nothing worth an API break.
+#[allow(clippy::large_enum_variant)]
 pub enum ConnectionDialogEvent {
     /// Open a session. The dialog has already persisted the profile and any
     /// secret the user asked to remember.
@@ -239,6 +271,16 @@ pub struct ConnectionDialog {
     key_path_input: Entity<TextInput>,
     /// Private key passphrase, masked.
     passphrase_input: Entity<TextInput>,
+    /// Whether the "Session overrides" section is expanded.
+    overrides_open: bool,
+    /// Color scheme id for this session, or `None` to inherit the global one.
+    override_scheme: Option<SharedString>,
+    /// Per-session font size; blank inherits.
+    override_font_size_input: Entity<TextInput>,
+    /// Per-session scrollback depth; blank inherits.
+    override_scrollback_input: Entity<TextInput>,
+    /// Per-session `TERM`; blank inherits.
+    override_term_input: Entity<TextInput>,
 }
 
 impl ConnectionDialog {
@@ -292,26 +334,23 @@ impl ConnectionDialog {
         let password_input = field(cx, "password", true, tab::SECRET_OR_KEY);
         let key_path_input = field(cx, "~/.ssh/id_ed25519", false, tab::SECRET_OR_KEY);
         let passphrase_input = field(cx, "optional", true, tab::PASSPHRASE);
+        // Placeholders are rewritten from the live global settings on every
+        // open, so these are only what a first paint shows.
+        let override_font_size_input = field(cx, "inherit", false, tab::OVERRIDE_FONT_SIZE);
+        let override_scrollback_input = field(cx, "inherit", false, tab::OVERRIDE_SCROLLBACK);
+        let override_term_input = field(cx, "inherit", false, tab::OVERRIDE_TERM);
 
         port_input.update(cx, |input, cx| {
             input.set_content(DEFAULT_PORT.to_string(), cx);
         });
 
+        digits_only(cx, &override_scrollback_input, false, MAX_SCROLLBACK_DIGITS);
+        digits_only(cx, &override_font_size_input, true, MAX_FONT_SIZE_DIGITS);
+
         // The text field has no input filter, so the port is sanitised after the
         // fact. Rewriting only when the text actually changes stops the observer
         // from re-triggering itself.
-        cx.observe(&port_input, |_this, input, cx| {
-            let content = input.read(cx).content().to_owned();
-            let digits: String = content
-                .chars()
-                .filter(char::is_ascii_digit)
-                .take(MAX_PORT_DIGITS)
-                .collect();
-            if digits != content {
-                input.update(cx, |input, cx| input.set_content(digits, cx));
-            }
-        })
-        .detach();
+        digits_only(cx, &port_input, false, MAX_PORT_DIGITS);
 
         let store = ProfileStore::load().unwrap_or_else(|err| {
             log::warn!("starting with an empty profile store: {err:#}");
@@ -334,6 +373,11 @@ impl ConnectionDialog {
             password_input,
             key_path_input,
             passphrase_input,
+            overrides_open: false,
+            override_scheme: None,
+            override_font_size_input,
+            override_scrollback_input,
+            override_term_input,
         }
     }
 
@@ -433,6 +477,15 @@ impl ConnectionDialog {
         self.port_input.update(cx, |input, cx| {
             input.set_content(DEFAULT_PORT.to_string(), cx);
         });
+
+        self.overrides_open = false;
+        self.override_scheme = None;
+        self.override_font_size_input
+            .update(cx, |input, cx| input.clear(cx));
+        self.override_scrollback_input
+            .update(cx, |input, cx| input.clear(cx));
+        self.override_term_input
+            .update(cx, |input, cx| input.clear(cx));
     }
 
     /// Copy `profile` into the form and remember that it is being edited.
@@ -471,8 +524,66 @@ impl ConnectionDialog {
             }
         }
 
+        // Restore the per-session overrides, and reveal the section when the
+        // profile actually has any — otherwise they would be invisible.
+        let overrides = &profile.overrides;
+        self.overrides_open = !overrides.is_empty();
+        self.override_scheme = overrides
+            .scheme
+            .as_deref()
+            .filter(|scheme| !scheme.trim().is_empty())
+            .map(|scheme| SharedString::from(scheme.to_owned()));
+        let font_size = overrides.font_size.map(format_number).unwrap_or_default();
+        let scrollback = overrides
+            .scrollback_lines
+            .map(|lines| lines.to_string())
+            .unwrap_or_default();
+        let term = overrides.term.clone().unwrap_or_default();
+        self.override_font_size_input
+            .update(cx, |input, cx| input.set_content(font_size, cx));
+        self.override_scrollback_input
+            .update(cx, |input, cx| input.set_content(scrollback, cx));
+        self.override_term_input
+            .update(cx, |input, cx| input.set_content(term, cx));
+
         self.save_secret = profile.save_secret;
         self.editing = Some(profile.id);
+    }
+
+    /// The per-session overrides described by the form.
+    ///
+    /// A blank field means "inherit", so it maps to `None` rather than to an
+    /// empty string — that is what keeps `overrides` out of `profiles.json`
+    /// entirely for a profile that overrides nothing.
+    fn collect_overrides(&self, cx: &App) -> SessionOverrides {
+        SessionOverrides {
+            scheme: self
+                .override_scheme
+                .as_ref()
+                .map(|scheme| scheme.to_string()),
+            font_size: Self::text(&self.override_font_size_input, cx)
+                .parse::<f32>()
+                .ok(),
+            scrollback_lines: Self::text(&self.override_scrollback_input, cx)
+                .parse::<usize>()
+                .ok(),
+            term: {
+                let term = Self::text(&self.override_term_input, cx);
+                (!term.is_empty()).then_some(term)
+            },
+        }
+    }
+
+    /// Expand or collapse the "Session overrides" section.
+    fn toggle_overrides(&mut self, cx: &mut Context<Self>) {
+        self.overrides_open = !self.overrides_open;
+        cx.notify();
+    }
+
+    /// Pick the per-session scheme, or clear it back to "inherit".
+    fn set_override_scheme(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.override_scheme = (id != INHERIT_SCHEME_ID).then(|| SharedString::from(id.to_owned()));
+        cx.notify();
     }
 
     /// Replace the message strip.
@@ -676,6 +787,7 @@ impl ConnectionDialog {
             None => SessionProfile::new(name, host, port, username, auth_method),
         };
         profile.save_secret = self.save_secret;
+        profile.overrides = self.collect_overrides(cx);
 
         let mut problems: Vec<String> = Vec::new();
 
@@ -1067,6 +1179,125 @@ impl ConnectionDialog {
             )
     }
 
+    /// The collapsible "Session overrides" section.
+    ///
+    /// Collapsed by default. Nothing inside a collapsed section is painted, so
+    /// its controls drop out of the tab ring on their own.
+    fn render_overrides(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = theme(cx);
+        let this = cx.entity();
+        let open = self.overrides_open;
+        let defaults = crate::app_settings::current(cx).terminal;
+
+        let caret = if open { "\u{25be}" } else { "\u{25b8}" };
+        let overrides = self.collect_overrides(cx);
+        let set = [
+            overrides.scheme.is_some(),
+            overrides.font_size.is_some(),
+            overrides.scrollback_lines.is_some(),
+            overrides.term.is_some(),
+        ]
+        .iter()
+        .filter(|value| **value)
+        .count();
+        let summary = match set {
+            0 => "inherits every global setting".to_owned(),
+            1 => "1 setting overridden".to_owned(),
+            many => format!("{many} settings overridden"),
+        };
+
+        let toggle = Button::new(
+            "connection-overrides-toggle",
+            format!("{caret}  Session overrides"),
+        )
+        .variant(ButtonVariant::Ghost)
+        .tab_index(tab::OVERRIDES)
+        .on_click({
+            let this = this.clone();
+            move |_, _window, cx| {
+                this.update(cx, |dialog, cx| dialog.toggle_overrides(cx));
+            }
+        });
+
+        let mut swatches = vec![SchemeSwatch::new(INHERIT_SCHEME_ID, "Default")];
+        swatches.extend(crate::settings_dialog::scheme_swatches());
+
+        let picker = SchemePicker::new("connection-override-scheme")
+            .options(swatches)
+            .selected(Some(
+                self.override_scheme
+                    .clone()
+                    .unwrap_or_else(|| SharedString::from(INHERIT_SCHEME_ID)),
+            ))
+            .columns(OVERRIDE_SCHEME_COLUMNS)
+            .tab_index(tab::OVERRIDE_SCHEME)
+            .on_select({
+                let this = this.clone();
+                move |id, _window, cx| {
+                    let id = id.to_owned();
+                    this.update(cx, |dialog, cx| dialog.set_override_scheme(&id, cx));
+                }
+            });
+
+        // Each field says which global value it would inherit, so a blank field
+        // is self-explanatory.
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .pt(px(10.))
+            .child(form_row("Color scheme", picker))
+            .child(form_row(
+                "Font size",
+                inherit_hint(
+                    self.override_font_size_input.clone(),
+                    format!("inherits {}", format_number(defaults.font_size)),
+                    cx,
+                ),
+            ))
+            .child(form_row(
+                "Scrollback",
+                inherit_hint(
+                    self.override_scrollback_input.clone(),
+                    format!("inherits {} lines", defaults.scrollback_lines),
+                    cx,
+                ),
+            ))
+            .child(form_row(
+                "TERM",
+                inherit_hint(
+                    self.override_term_input.clone(),
+                    format!("inherits {}", defaults.term),
+                    cx,
+                ),
+            ));
+
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(div().h(px(1.)).w_full().flex_none().bg(theme.border))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .pt(px(8.))
+                    .child(toggle)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(theme.text_muted)
+                            .child(summary),
+                    ),
+            )
+            .children(open.then_some(body))
+    }
+
     /// Move focus into the field recorded by the last `open_*` call.
     fn apply_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.pending_focus.take() else {
@@ -1117,6 +1348,7 @@ impl Render for ConnectionDialog {
                     .child(self.render_profile_list(cx))
                     .child(self.render_form(cx)),
             )
+            .child(self.render_overrides(cx))
             .child(self.render_footer(cx));
 
         let on_dismiss = {
@@ -1149,6 +1381,70 @@ impl Render for ConnectionDialog {
                 on_dismiss,
             ))
     }
+}
+
+/// Lays a "what this field inherits" hint out to the right of a control.
+fn inherit_hint<E: IntoElement>(control: E, hint: String, cx: &App) -> impl IntoElement + use<E> {
+    let theme = theme(cx);
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .w_full()
+        .child(div().flex_1().min_w_0().child(control))
+        .child(
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_size(px(11.))
+                .text_color(theme.text_muted)
+                .child(hint),
+        )
+}
+
+/// Renders `value` without a trailing `.0`, so 14.0 shows as "14".
+fn format_number(value: f32) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value}")
+    }
+}
+
+/// Installs an observer that keeps `input` numeric.
+///
+/// The text field has no input filter, so the content is rewritten after every
+/// edit. Rewriting only when the text actually changes stops the observer from
+/// re-triggering itself.
+fn digits_only(
+    cx: &mut Context<ConnectionDialog>,
+    input: &Entity<TextInput>,
+    decimals: bool,
+    max_len: usize,
+) {
+    cx.observe(input, move |_this, input, cx| {
+        let content = input.read(cx).content().to_owned();
+        let mut seen_dot = false;
+        let filtered: String = content
+            .chars()
+            .filter(|c| {
+                if c.is_ascii_digit() {
+                    true
+                } else if decimals && *c == '.' && !seen_dot {
+                    seen_dot = true;
+                    true
+                } else {
+                    false
+                }
+            })
+            .take(max_len)
+            .collect();
+        if filtered != content {
+            input.update(cx, |input, cx| input.set_content(filtered, cx));
+        }
+    })
+    .detach();
 }
 
 /// A compact text button used inside the profile rows.

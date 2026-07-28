@@ -10,6 +10,7 @@
 pub mod button;
 pub mod checkbox;
 pub mod modal;
+pub mod scheme_picker;
 pub mod segmented;
 pub mod tab_bar;
 pub mod text_input;
@@ -18,6 +19,7 @@ pub mod theme;
 pub use button::{Button, ButtonVariant};
 pub use checkbox::Checkbox;
 pub use modal::{form_row, modal};
+pub use scheme_picker::{SchemePicker, SchemePreview, SchemeSwatch};
 pub use segmented::Segmented;
 pub use tab_bar::{TabBar, TabItem, TabStatus};
 pub use text_input::TextInput;
