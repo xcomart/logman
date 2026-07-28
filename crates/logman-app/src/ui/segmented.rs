@@ -29,6 +29,7 @@ pub struct Segmented {
     id: ElementId,
     options: Vec<(SharedString, SharedString)>,
     selected: usize,
+    tab_index: Option<isize>,
     on_select: Option<SelectHandler>,
 }
 
@@ -41,6 +42,7 @@ impl Segmented {
             id: id.into(),
             options: Vec::new(),
             selected: 0,
+            tab_index: None,
             on_select: None,
         }
     }
@@ -66,6 +68,17 @@ impl Segmented {
         self
     }
 
+    /// Places the whole control at `index` in the window's tab order.
+    ///
+    /// The group takes a single tab stop rather than one per segment, so `Tab`
+    /// steps past the control instead of through it. While focused, `Left` and
+    /// `Right` (and `Up`/`Down`) move the selection, wrapping at either end —
+    /// the behaviour WAI-ARIA prescribes for a radio group.
+    pub fn tab_index(mut self, index: isize) -> Self {
+        self.tab_index = Some(index);
+        self
+    }
+
     /// Sets the callback invoked with the index of the clicked segment.
     ///
     /// Never fired for the segment that is already selected.
@@ -79,8 +92,12 @@ impl RenderOnce for Segmented {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = theme(cx);
         let selected = self.selected;
+        let count = self.options.len();
         let on_select = self.on_select;
         let container_id = self.id;
+        let outer_id = container_id.clone();
+        let tab_index = self.tab_index;
+        let arrow_handler = on_select.clone();
 
         let segments = self
             .options
@@ -123,6 +140,7 @@ impl RenderOnce for Segmented {
             });
 
         div()
+            .id(outer_id)
             .flex()
             .flex_row()
             .items_center()
@@ -133,6 +151,29 @@ impl RenderOnce for Segmented {
             .border_1()
             .border_color(theme.border)
             .bg(theme.surface)
+            .when_some(tab_index.filter(|_| count > 0), |this, index| {
+                let accent = theme.accent;
+                this.tab_index(index)
+                    .focus(move |style| style.border_color(accent))
+                    .on_key_down(move |event, window, cx| {
+                        if event.keystroke.modifiers.modified() {
+                            return;
+                        }
+                        let delta = match event.keystroke.key.as_str() {
+                            "left" | "up" => -1isize,
+                            "right" | "down" => 1,
+                            _ => return,
+                        };
+                        let Some(handler) = arrow_handler.as_ref() else {
+                            return;
+                        };
+                        let next = (selected as isize + delta).rem_euclid(count as isize) as usize;
+                        if next != selected {
+                            cx.stop_propagation();
+                            handler(next, window, cx);
+                        }
+                    })
+            })
             .children(segments)
     }
 }

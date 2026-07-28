@@ -46,6 +46,7 @@ pub struct Button {
     variant: ButtonVariant,
     disabled: bool,
     full_width: bool,
+    tab_index: Option<isize>,
     on_click: Option<ClickHandler>,
 }
 
@@ -60,6 +61,7 @@ impl Button {
             variant: ButtonVariant::default(),
             disabled: false,
             full_width: false,
+            tab_index: None,
             on_click: None,
         }
     }
@@ -79,6 +81,16 @@ impl Button {
     /// Stretches the button across the width of its parent.
     pub fn full_width(mut self, full_width: bool) -> Self {
         self.full_width = full_width;
+        self
+    }
+
+    /// Places the button at `index` in the window's tab order.
+    ///
+    /// A focused button draws an accent outline and is activated by `Enter` or
+    /// `Space`, which gpui turns into an ordinary click. Disabled buttons are
+    /// skipped, mirroring how the platform treats a disabled control.
+    pub fn tab_index(mut self, index: isize) -> Self {
+        self.tab_index = Some(index);
         self
     }
 
@@ -129,12 +141,20 @@ fn colors_for(variant: ButtonVariant, cx: &App) -> ButtonColors {
 
 impl RenderOnce for Button {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let accent = theme(cx).accent;
         let colors = colors_for(self.variant, cx);
         let disabled = self.disabled;
         let label_color = if disabled {
             colors.label.opacity(0.5)
         } else {
             colors.label
+        };
+        // The outline is always present, merely transparent, so that gaining
+        // focus recolours it instead of resizing the button.
+        let border = match colors.border {
+            Some(border) if disabled => border.opacity(0.5),
+            Some(border) => border,
+            None => gpui::transparent_black(),
         };
 
         div()
@@ -154,12 +174,11 @@ impl RenderOnce for Button {
                 colors.background
             })
             .text_color(label_color)
-            .when_some(colors.border, |this, border| {
-                this.border_1().border_color(if disabled {
-                    border.opacity(0.5)
-                } else {
-                    border
-                })
+            .border_1()
+            .border_color(border)
+            .when_some(self.tab_index.filter(|_| !disabled), |this, index| {
+                this.tab_index(index)
+                    .focus(move |style| style.border_color(accent))
             })
             .when(self.full_width, |this| this.w_full())
             .when(!disabled, |this| {
@@ -167,12 +186,9 @@ impl RenderOnce for Button {
                     .hover(|style| style.bg(colors.hover))
                     .active(|style| style.bg(colors.active))
             })
-            .when_some(
-                self.on_click.filter(|_| !disabled),
-                |this, handler| {
-                    this.on_click(move |event, window, cx| handler(event, window, cx))
-                },
-            )
+            .when_some(self.on_click.filter(|_| !disabled), |this, handler| {
+                this.on_click(move |event, window, cx| handler(event, window, cx))
+            })
             .child(self.label)
     }
 }

@@ -15,11 +15,12 @@
 //! them either.
 
 use std::path::PathBuf;
+use std::sync::Once;
 
 use gpui::{
     App, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    KeyDownEvent, MouseButton, PathPromptOptions, Render, SharedString, Window, div, prelude::*,
-    px,
+    KeyBinding, KeyDownEvent, MouseButton, PathPromptOptions, Render, SharedString, Window,
+    actions, div, prelude::*, px,
 };
 use logman_core::{AuthMethod, ProfileStore, SecretStore, SessionProfile};
 use logman_ssh::SshAuth;
@@ -34,7 +35,10 @@ const DEFAULT_PORT: u16 = 22;
 const MAX_PORT_DIGITS: usize = 5;
 
 /// Width of the dialog panel.
-const DIALOG_WIDTH: f32 = 700.;
+///
+/// Wide enough that the longest control label — the "Remember passphrase in the
+/// system keychain" checkbox, plus its focus ring — still fits on one line.
+const DIALOG_WIDTH: f32 = 724.;
 
 /// Width of the saved-profile column.
 const LIST_WIDTH: f32 = 260.;
@@ -55,6 +59,57 @@ const EMPTY_LIST_HINT: &str = "No saved profiles yet. Fill in the form and conne
 
 /// Explanation shown while the unsupported agent method is selected.
 const AGENT_UNSUPPORTED: &str = "SSH agent authentication is not supported yet.";
+
+/// Key context the dialog's own shortcuts are scoped to.
+///
+/// `Tab` **must** stay scoped to this context. The terminal forwards `Tab` to
+/// the remote shell for completion, so a binding registered against the global
+/// (`None`) context would silently break it.
+const KEY_CONTEXT: &str = "ConnectionDialog";
+
+/// Guards the one-time registration of the dialog's key bindings.
+static BIND_KEYS: Once = Once::new();
+
+actions!(
+    logman_connection,
+    [
+        /// Move focus to the next control in the dialog.
+        FocusNext,
+        /// Move focus to the previous control in the dialog.
+        FocusPrev,
+    ]
+);
+
+/// Tab order of the form, in visual order.
+///
+/// Indices are spaced so that the controls which only exist in one
+/// authentication mode can be numbered without renumbering their neighbours;
+/// a control that is not rendered is never painted and therefore never enters
+/// the tab ring at all, so the gaps are harmless.
+mod tab {
+    /// Connection name.
+    pub const NAME: isize = 10;
+    /// Host name or address.
+    pub const HOST: isize = 20;
+    /// TCP port.
+    pub const PORT: isize = 30;
+    /// Remote login name.
+    pub const USERNAME: isize = 40;
+    /// Authentication method picker.
+    pub const AUTH: isize = 50;
+    /// Password, or the key path in private key mode.
+    pub const SECRET_OR_KEY: isize = 60;
+    /// The key file browser button.
+    pub const BROWSE: isize = 65;
+    /// Private key passphrase.
+    pub const PASSPHRASE: isize = 70;
+    /// "Remember ... in the system keychain".
+    pub const REMEMBER: isize = 80;
+    /// Cancel.
+    pub const CANCEL: isize = 90;
+    /// Connect.
+    pub const CONNECT: isize = 100;
+}
 
 /// Emitted by [`ConnectionDialog`] when the user acts on it.
 pub enum ConnectionDialogEvent {
@@ -191,15 +246,28 @@ impl ConnectionDialog {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let weak = cx.weak_entity();
 
+        // Scoped to the dialog's key context on purpose: a global `tab` binding
+        // would stop the terminal from sending `\t` to the remote shell.
+        BIND_KEYS.call_once(|| {
+            cx.bind_keys([
+                KeyBinding::new("tab", FocusNext, Some(KEY_CONTEXT)),
+                KeyBinding::new("shift-tab", FocusPrev, Some(KEY_CONTEXT)),
+            ]);
+        });
+
         // Every field submits the whole form, so `Enter` connects from anywhere.
         let field = {
             let weak = weak.clone();
-            move |cx: &mut Context<Self>, placeholder: &'static str, masked: bool| {
+            move |cx: &mut Context<Self>,
+                  placeholder: &'static str,
+                  masked: bool,
+                  tab_index: isize| {
                 let weak = weak.clone();
                 cx.new(move |cx| {
                     TextInput::new(cx)
                         .placeholder(placeholder)
                         .masked(masked)
+                        .tab_index(tab_index)
                         .on_submit(move |_, _window, cx| {
                             // `on_submit` fires from inside the TextInput's own
                             // `update`, which means gpui has leased that entity
@@ -217,13 +285,13 @@ impl ConnectionDialog {
             }
         };
 
-        let name_input = field(cx, "web-01", false);
-        let host_input = field(cx, "web-01.example.com", false);
-        let port_input = field(cx, "22", false);
-        let username_input = field(cx, "alice", false);
-        let password_input = field(cx, "password", true);
-        let key_path_input = field(cx, "~/.ssh/id_ed25519", false);
-        let passphrase_input = field(cx, "optional", true);
+        let name_input = field(cx, "web-01", false, tab::NAME);
+        let host_input = field(cx, "web-01.example.com", false, tab::HOST);
+        let port_input = field(cx, "22", false, tab::PORT);
+        let username_input = field(cx, "alice", false, tab::USERNAME);
+        let password_input = field(cx, "password", true, tab::SECRET_OR_KEY);
+        let key_path_input = field(cx, "~/.ssh/id_ed25519", false, tab::SECRET_OR_KEY);
+        let passphrase_input = field(cx, "optional", true, tab::PASSPHRASE);
 
         port_input.update(cx, |input, cx| {
             input.set_content(DEFAULT_PORT.to_string(), cx);
@@ -682,6 +750,19 @@ impl ConnectionDialog {
         self.close(cx);
     }
 
+    /// `Tab`: move focus to the next control.
+    ///
+    /// gpui's tab ring wraps on its own — [`Window::focus_next`] falls back to
+    /// the first stop once it runs off the end — so there is nothing to add here.
+    fn focus_next(&mut self, _: &FocusNext, window: &mut Window, _cx: &mut Context<Self>) {
+        window.focus_next();
+    }
+
+    /// `Shift+Tab`: move focus to the previous control, wrapping to the last.
+    fn focus_prev(&mut self, _: &FocusPrev, window: &mut Window, _cx: &mut Context<Self>) {
+        window.focus_prev();
+    }
+
     /// `Escape` dismisses the dialog from anywhere inside it.
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.open && event.keystroke.key == "escape" {
@@ -853,6 +934,7 @@ impl ConnectionDialog {
         let auth_control = Segmented::new("connection-auth")
             .options(AUTH_OPTIONS)
             .selected(auth_kind.index())
+            .tab_index(tab::AUTH)
             .on_select({
                 let this = this.clone();
                 move |index, _window, cx| {
@@ -877,6 +959,7 @@ impl ConnectionDialog {
             .child(
                 Button::new("connection-browse", "Browse\u{2026}")
                     .variant(ButtonVariant::Secondary)
+                    .tab_index(tab::BROWSE)
                     .on_click({
                         let this = this.clone();
                         move |_, _window, cx| browse_for_key(this.clone(), cx)
@@ -890,6 +973,7 @@ impl ConnectionDialog {
 
         let remember = Checkbox::new("connection-remember", secret_label)
             .checked(self.save_secret)
+            .tab_index(tab::REMEMBER)
             .on_toggle({
                 let this = this.clone();
                 move |checked, _window, cx| {
@@ -960,6 +1044,7 @@ impl ConnectionDialog {
                     .child(
                         Button::new("connection-cancel", "Cancel")
                             .variant(ButtonVariant::Secondary)
+                            .tab_index(tab::CANCEL)
                             .on_click({
                                 let this = this.clone();
                                 move |_, _window, cx| {
@@ -971,6 +1056,7 @@ impl ConnectionDialog {
                         Button::new("connection-connect", "Connect")
                             .variant(ButtonVariant::Primary)
                             .disabled(!connectable)
+                            .tab_index(tab::CONNECT)
                             .on_click({
                                 let this = this.clone();
                                 move |_, _window, cx| {
@@ -1047,10 +1133,13 @@ impl Render for ConnectionDialog {
         // with it.
         div()
             .id("connection-dialog")
+            .key_context(KEY_CONTEXT)
             .absolute()
             .inset_0()
             .size_full()
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::focus_next))
+            .on_action(cx.listener(Self::focus_prev))
             .on_key_down(cx.listener(Self::on_key_down))
             .child(modal(
                 "connection-modal",
