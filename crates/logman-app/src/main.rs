@@ -13,6 +13,7 @@
 
 mod about_dialog;
 mod app_settings;
+mod caption;
 mod connection;
 mod session;
 mod settings_dialog;
@@ -34,6 +35,7 @@ use logman_core::{SessionProfile, UiTheme, WindowSettings};
 use logman_ssh::SshAuth;
 
 use about_dialog::{AboutDialog, AboutDialogEvent};
+use caption::apply_caption_theme;
 use connection::{ConnectionDialog, ConnectionDialogEvent};
 use session::Session;
 use settings_dialog::{SettingsDialog, SettingsDialogEvent};
@@ -162,6 +164,10 @@ impl Workspace {
                     apply_ui_theme(settings.ui_theme, cx);
                     cx.refresh_windows();
                     window.set_background_appearance(window_appearance(&settings.window));
+                    // After the background appearance, never before: on Windows
+                    // that call re-arms the accent policy that would otherwise
+                    // repaint the caption out from under us.
+                    apply_caption_theme(window, settings.ui_theme, &theme(cx));
                     for tab in &this.tabs {
                         tab.session(cx)
                             .update(cx, |session, cx| session.apply_settings(cx));
@@ -564,6 +570,9 @@ impl Workspace {
             .items_center()
             .justify_center()
             .gap(px(14.))
+            // The only fill covering the body while no session is open, so this
+            // is where the window opacity lands on the empty state.
+            .bg(app_settings::window_tint(theme.background, cx))
             .child(
                 div()
                     .text_size(px(30.))
@@ -669,6 +678,12 @@ impl Render for Workspace {
             .is_open()
             .then(|| div().absolute().inset_0().child(self.about.clone()));
 
+        // No background fill here on purpose. The three bands below — toolbar,
+        // body and status bar — cover the window between them, and each paints
+        // its own. A fill at this level would sit *under* the translucent
+        // terminal and empty-state fills and compose back to opaque, which is
+        // exactly what made `window.background_opacity` and `background_blur`
+        // look like they did nothing.
         div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -676,7 +691,6 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.background)
             .text_color(theme.text)
             .text_size(px(13.))
             .on_action(cx.listener(Self::new_session_action))
@@ -823,6 +837,7 @@ fn main() {
             |window, cx| {
                 let workspace = cx.new(|cx| Workspace::new(window, cx));
                 window.focus(&workspace.read(cx).focus_handle);
+                apply_caption_theme(window, settings.ui_theme, &theme(cx));
                 workspace
             },
         )

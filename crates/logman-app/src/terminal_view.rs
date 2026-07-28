@@ -761,17 +761,7 @@ impl Render for TerminalView {
         // below 1.0, so tinting the surface background lets the desktop show
         // through the default-background cells. Non-default cell backgrounds,
         // text and the cursor stay opaque; only this base fill carries the alpha.
-        let background = {
-            let opacity = app_settings::current(cx).window.background_opacity;
-            if opacity < 1.0 {
-                Hsla {
-                    a: opacity,
-                    ..background
-                }
-            } else {
-                background
-            }
-        };
+        let background = app_settings::window_tint(background, cx);
         let overlay = self.render_overlay(&status, cx);
         let element = TerminalElement {
             view: cx.entity(),
