@@ -8,6 +8,14 @@ license.workspace = true
 name = "logman"
 path = "src/main.rs"
 
+build = "build.rs"
+
+# Embeds assets/icon.ico into the Windows executable. gpui loads icon
+# resource ID 1 for the window class, so one embedded icon covers Explorer,
+# the taskbar and the window itself.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 logman-core.workspace = true
 logman-ssh.workspace = true

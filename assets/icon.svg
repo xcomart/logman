@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!--
+    logman app icon.
+
+    A terminal prompt on a One Dark tile, in the application's own palette:
+    the chevron in accent blue (#61afef), the cursor in green (#98c379), and
+    the small dot echoing the "connected" status dot in the tab strip.
+    Master file; assets/icon.ico is rasterized from this.
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#262b33"/>
+      <stop offset="1" stop-color="#1b1f24"/>
+    </linearGradient>
+  </defs>
+
+  <!-- tile -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <rect x="11" y="11" width="234" height="234" rx="53" fill="none"
+        stroke="#4b5263" stroke-opacity="0.55" stroke-width="4"/>
+
+  <!-- prompt chevron -->
+  <path d="M 74 88 L 124 128 L 74 168" fill="none" stroke="#61afef"
+        stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- block cursor -->
+  <rect x="140" y="150" width="58" height="22" rx="10" fill="#98c379"/>
+
+  <!-- connected-session dot, same green as the tab status dot -->
+  <circle cx="194" cy="64" r="13" fill="#98c379"/>
+  <circle cx="194" cy="64" r="13" fill="none" stroke="#1b1f24"
+          stroke-opacity="0.35" stroke-width="3"/>
+</svg>
