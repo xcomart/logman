@@ -2,13 +2,15 @@
 //!
 //! The module is deliberately free of SSH or terminal concepts: it only knows
 //! about colors ([`theme`]), text entry ([`text_input`]), buttons ([`button`]),
-//! session tabs ([`tab_bar`]) and dialogs ([`modal`]).
+//! session tabs ([`tab_bar`]), dropdown menus ([`menu`]) and dialogs
+//! ([`modal`]).
 //!
 //! Call [`init`] once during application start-up so the widgets that need key
 //! bindings get them.
 
 pub mod button;
 pub mod checkbox;
+pub mod menu;
 pub mod modal;
 pub mod scheme_picker;
 pub mod segmented;
@@ -18,6 +20,7 @@ pub mod theme;
 
 pub use button::{Button, ButtonVariant};
 pub use checkbox::Checkbox;
+pub use menu::{MenuButton, MenuEntry};
 pub use modal::{form_row, modal};
 pub use scheme_picker::{SchemePicker, SchemePreview, SchemeSwatch};
 pub use segmented::Segmented;
