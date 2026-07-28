@@ -1,3 +1,9 @@
+// Rust links Windows binaries with the console subsystem by default, which
+// flashes a console window before the GUI appears. Release builds use the GUI
+// subsystem instead; debug builds keep the console so that env_logger output
+// stays visible while developing.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! logman — a multi-platform GUI SSH terminal.
 //!
 //! The binary owns the application shell: a tab strip of open [`Session`]s, the
