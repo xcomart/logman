@@ -3687,7 +3687,7 @@ dependencies = [
 
 [[package]]
 name = "logman-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3709,7 +3709,7 @@ dependencies = [
 
 [[package]]
 name = "logman-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -3724,7 +3724,7 @@ dependencies = [
 
 [[package]]
 name = "logman-ssh"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3741,7 +3741,7 @@ dependencies = [
 
 [[package]]
 name = "logman-term"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
