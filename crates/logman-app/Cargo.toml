@@ -3,12 +3,11 @@ name = "logman-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "logman"
 path = "src/main.rs"
-
-build = "build.rs"
 
 # Embeds assets/icon.ico into the Windows executable. gpui loads icon
 # resource ID 1 for the window class, so one embedded icon covers Explorer,
