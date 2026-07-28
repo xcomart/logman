@@ -1,0 +1,61 @@
+# Build, lint and test on every platform logman ships on.
+#
+# Things this repository already does that keep CI simple:
+# - russh is pinned to its `ring` backend, so no NASM is needed anywhere.
+# - The OS-keychain tests are `#[ignore]`d; everything that runs here is
+#   hermetic or loopback-only (the SSH e2e suite starts its own server).
+# - gpui is vendored under vendor/, so the [patch.crates-io] entry resolves
+#   from the checkout with no network access beyond crates.io.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Native libraries gpui links against on Linux. The crate graph binds
+      # xkbcommon (+ its X11 half), wayland-client and fontconfig; fontconfig's
+      # dev package pulls in the freetype headers that freetype-sys wants.
+      - name: Install Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Formatting is platform-independent; checking it once is enough.
+      - name: rustfmt
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --locked
