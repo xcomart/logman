@@ -1,0 +1,691 @@
+//! Global application settings and how a session resolves them.
+//!
+//! Everything here is persisted to `settings.json` next to the profile
+//! database. The file is meant to be hand-editable, so loading is deliberately
+//! forgiving: unknown keys are ignored (a file written by a newer logman still
+//! opens), missing keys fall back to the documented defaults, and out-of-range
+//! numbers are clamped rather than rejected. See [`AppSettings::sanitize`].
+
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+use crate::paths::{settings_file, strip_bom, write_atomic};
+use crate::profile::SessionOverrides;
+
+/// Lowest window opacity the UI accepts; below this the chrome is unreadable.
+const MIN_BACKGROUND_OPACITY: f32 = 0.5;
+/// Fully opaque window, and the default.
+const MAX_BACKGROUND_OPACITY: f32 = 1.0;
+/// Smallest legible terminal font size.
+const MIN_FONT_SIZE: f32 = 6.0;
+/// Largest terminal font size worth offering.
+const MAX_FONT_SIZE: f32 = 32.0;
+/// Terminal font size used when none is configured.
+const DEFAULT_FONT_SIZE: f32 = 14.0;
+/// Upper bound on scrollback, to keep a runaway session from eating memory.
+const MAX_SCROLLBACK_LINES: usize = 100_000;
+/// Scrollback depth used when none is configured.
+const DEFAULT_SCROLLBACK_LINES: usize = 5_000;
+/// Color scheme used when none is configured.
+const DEFAULT_SCHEME: &str = "one-dark";
+/// `TERM` value advertised when none is configured.
+const DEFAULT_TERM: &str = "xterm-256color";
+/// SSH port offered by the connection form.
+const DEFAULT_PORT: u16 = 22;
+/// Seconds between SSH keepalive probes.
+const DEFAULT_KEEPALIVE_SECS: u64 = 30;
+/// Seconds to wait for a TCP connection before giving up.
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 15;
+
+/// Clamp `value` into `min ..= max`, replacing NaN with `fallback`.
+fn clamp_f32(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
+    if value.is_nan() {
+        fallback
+    } else {
+        value.clamp(min, max)
+    }
+}
+
+/// Clamp a terminal font size into the supported range.
+fn clamp_font_size(value: f32) -> f32 {
+    clamp_f32(value, MIN_FONT_SIZE, MAX_FONT_SIZE, DEFAULT_FONT_SIZE)
+}
+
+/// Clamp a scrollback depth into the supported range.
+fn clamp_scrollback_lines(value: usize) -> usize {
+    value.min(MAX_SCROLLBACK_LINES)
+}
+
+/// Fall back to `default` when a hand-edited string is blank.
+fn non_blank(value: &str, default: &str) -> String {
+    if value.trim().is_empty() {
+        default.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+/// UI chrome theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UiTheme {
+    /// Dark chrome; the default.
+    #[default]
+    Dark,
+    /// Light chrome.
+    Light,
+}
+
+/// Window background treatment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowSettings {
+    /// 0.5 ..= 1.0; values below the floor are clamped on load.
+    pub background_opacity: f32,
+    /// Acrylic/blur behind the window when the platform supports it.
+    pub background_blur: bool,
+}
+
+impl Default for WindowSettings {
+    fn default() -> Self {
+        Self {
+            background_opacity: MAX_BACKGROUND_OPACITY,
+            background_blur: false,
+        }
+    }
+}
+
+impl WindowSettings {
+    /// Force every field back into its supported range.
+    fn sanitize(&mut self) {
+        self.background_opacity = clamp_f32(
+            self.background_opacity,
+            MIN_BACKGROUND_OPACITY,
+            MAX_BACKGROUND_OPACITY,
+            MAX_BACKGROUND_OPACITY,
+        );
+    }
+}
+
+/// Terminal appearance and behaviour defaults for every session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalSettings {
+    /// Color scheme id, e.g. `"one-dark"`. Resolution lives in `logman-term`.
+    pub scheme: String,
+    /// `None` = the per-OS monospace default chosen by the app layer.
+    pub font_family: Option<String>,
+    /// Points/pixels; clamped to 6.0 ..= 32.0 on load.
+    pub font_size: f32,
+    /// Lines of scrollback kept above the screen; clamped to 0 ..= 100_000.
+    pub scrollback_lines: usize,
+    /// `TERM` advertised to the remote host.
+    pub term: String,
+    /// Copy the selection to the clipboard as soon as the mouse releases.
+    pub copy_on_select: bool,
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        Self {
+            scheme: DEFAULT_SCHEME.to_string(),
+            font_family: None,
+            font_size: DEFAULT_FONT_SIZE,
+            scrollback_lines: DEFAULT_SCROLLBACK_LINES,
+            term: DEFAULT_TERM.to_string(),
+            copy_on_select: false,
+        }
+    }
+}
+
+impl TerminalSettings {
+    /// Force every field back into its supported range.
+    fn sanitize(&mut self) {
+        self.scheme = non_blank(&self.scheme, DEFAULT_SCHEME);
+        self.font_size = clamp_font_size(self.font_size);
+        self.scrollback_lines = clamp_scrollback_lines(self.scrollback_lines);
+        self.term = non_blank(&self.term, DEFAULT_TERM);
+        if let Some(family) = &self.font_family
+            && family.trim().is_empty()
+        {
+            self.font_family = None;
+        }
+    }
+}
+
+/// Defaults applied to the connection form and new sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConnectionSettings {
+    /// Port pre-filled in the connection form.
+    pub default_port: u16,
+    /// Login name pre-filled in the connection form, if any.
+    pub default_username: Option<String>,
+    /// Seconds between SSH keepalive probes; 0 disables them.
+    pub keepalive_secs: u64,
+    /// Seconds to wait for the TCP connection before giving up.
+    pub connect_timeout_secs: u64,
+}
+
+impl Default for ConnectionSettings {
+    fn default() -> Self {
+        Self {
+            default_port: DEFAULT_PORT,
+            default_username: None,
+            keepalive_secs: DEFAULT_KEEPALIVE_SECS,
+            connect_timeout_secs: DEFAULT_CONNECT_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl ConnectionSettings {
+    /// Force every field back into its supported range.
+    fn sanitize(&mut self) {
+        if self.default_port == 0 {
+            self.default_port = DEFAULT_PORT;
+        }
+        if self.connect_timeout_secs == 0 {
+            self.connect_timeout_secs = DEFAULT_CONNECT_TIMEOUT_SECS;
+        }
+        if let Some(username) = &self.default_username
+            && username.trim().is_empty()
+        {
+            self.default_username = None;
+        }
+    }
+}
+
+/// Everything logman persists in `settings.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppSettings {
+    /// Schema version of the file; see [`AppSettings::CURRENT_VERSION`].
+    pub version: u32,
+    /// UI chrome theme.
+    pub ui_theme: UiTheme,
+    /// Window background treatment.
+    pub window: WindowSettings,
+    /// Terminal defaults shared by every session.
+    pub terminal: TerminalSettings,
+    /// Defaults for new connections.
+    pub connection: ConnectionSettings,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            version: Self::CURRENT_VERSION,
+            ui_theme: UiTheme::default(),
+            window: WindowSettings::default(),
+            terminal: TerminalSettings::default(),
+            connection: ConnectionSettings::default(),
+        }
+    }
+}
+
+impl AppSettings {
+    /// Schema version written by this build.
+    ///
+    /// A file carrying a different number still loads: unknown keys are ignored
+    /// and missing ones default, so the version is informational until a real
+    /// migration is needed.
+    pub const CURRENT_VERSION: u32 = 1;
+
+    /// Load the settings from the default configuration file.
+    ///
+    /// A missing file yields [`AppSettings::default`], and the result is always
+    /// passed through [`AppSettings::sanitize`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the configuration directory cannot be determined, the file
+    /// cannot be read, or its contents are not valid JSON.
+    pub fn load() -> Result<Self> {
+        Self::load_from(&settings_file()?)
+    }
+
+    /// Load the settings from an explicit path.
+    ///
+    /// A missing file yields [`AppSettings::default`]. A leading UTF-8 byte
+    /// order mark is tolerated, unknown keys are ignored, and every value is
+    /// clamped by [`AppSettings::sanitize`] before being returned.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be read or does not contain valid JSON.
+    pub fn load_from(path: &Path) -> Result<Self> {
+        let data = match fs::read(path) {
+            Ok(data) => data,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(err) => {
+                return Err(err).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
+        let mut settings: Self = serde_json::from_slice(strip_bom(&data))
+            .with_context(|| format!("failed to parse settings from {}", path.display()))?;
+        settings.sanitize();
+        Ok(settings)
+    }
+
+    /// Write the settings to the default configuration file.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the configuration directory cannot be determined or created,
+    /// or when the file cannot be written.
+    pub fn save(&self) -> Result<()> {
+        self.save_to(&settings_file()?)
+    }
+
+    /// Write the settings to an explicit path, creating parent directories.
+    ///
+    /// The write is atomic: the data lands in a temporary sibling file that is
+    /// then renamed over `path`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the parent directory cannot be created or the file cannot be
+    /// written.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        let json = serde_json::to_vec_pretty(self).context("failed to serialize settings")?;
+        write_atomic(path, &json)
+    }
+
+    /// Force every value into its supported range.
+    ///
+    /// Called on every load so a hand-edited `settings.json` cannot break the
+    /// app: opacities are clamped to 0.5 ..= 1.0 (NaN becomes 1.0), font sizes
+    /// to 6.0 ..= 32.0 (NaN becomes 14.0), scrollback to at most 100 000 lines,
+    /// and blank strings fall back to their defaults. The UI should call it
+    /// again after editing values.
+    pub fn sanitize(&mut self) {
+        self.window.sanitize();
+        self.terminal.sanitize();
+        self.connection.sanitize();
+    }
+
+    /// Global terminal defaults with a profile's overrides applied on top.
+    ///
+    /// Overridden numbers go through the same clamps as the global ones, and a
+    /// blank overridden string is treated as "not overridden", so a hand-edited
+    /// profile cannot produce a session the terminal cannot render.
+    pub fn effective_terminal(&self, overrides: &SessionOverrides) -> EffectiveTerminal {
+        let base = &self.terminal;
+        let scheme = match overrides.scheme.as_deref() {
+            Some(scheme) if !scheme.trim().is_empty() => scheme.to_string(),
+            _ => base.scheme.clone(),
+        };
+        let term = match overrides.term.as_deref() {
+            Some(term) if !term.trim().is_empty() => term.to_string(),
+            _ => base.term.clone(),
+        };
+        EffectiveTerminal {
+            scheme,
+            font_family: base.font_family.clone(),
+            font_size: clamp_font_size(overrides.font_size.unwrap_or(base.font_size)),
+            scrollback_lines: clamp_scrollback_lines(
+                overrides.scrollback_lines.unwrap_or(base.scrollback_lines),
+            ),
+            term,
+            copy_on_select: base.copy_on_select,
+        }
+    }
+}
+
+/// The settings a single session actually runs with.
+///
+/// Produced by [`AppSettings::effective_terminal`]; every field is resolved, so
+/// consumers never have to look at the global settings again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectiveTerminal {
+    /// Color scheme id to resolve in `logman-term`.
+    pub scheme: String,
+    /// `None` = the per-OS monospace default chosen by the app layer.
+    pub font_family: Option<String>,
+    /// Font size, already clamped to the supported range.
+    pub font_size: f32,
+    /// Scrollback depth, already clamped to the supported range.
+    pub scrollback_lines: usize,
+    /// `TERM` to advertise to the remote host.
+    pub term: String,
+    /// Copy the selection to the clipboard as soon as the mouse releases.
+    pub copy_on_select: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_match_the_documented_values() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.version, 1);
+        assert_eq!(settings.ui_theme, UiTheme::Dark);
+        assert_eq!(settings.window.background_opacity, 1.0);
+        assert!(!settings.window.background_blur);
+        assert_eq!(settings.terminal.scheme, "one-dark");
+        assert_eq!(settings.terminal.font_family, None);
+        assert_eq!(settings.terminal.font_size, 14.0);
+        assert_eq!(settings.terminal.scrollback_lines, 5_000);
+        assert_eq!(settings.terminal.term, "xterm-256color");
+        assert!(!settings.terminal.copy_on_select);
+        assert_eq!(settings.connection.default_port, 22);
+        assert_eq!(settings.connection.default_username, None);
+        assert_eq!(settings.connection.keepalive_secs, 30);
+        assert_eq!(settings.connection.connect_timeout_secs, 15);
+    }
+
+    #[test]
+    fn ui_theme_serializes_in_snake_case() {
+        assert_eq!(
+            serde_json::to_value(UiTheme::Light).unwrap(),
+            serde_json::json!("light")
+        );
+        assert_eq!(
+            serde_json::from_str::<UiTheme>("\"dark\"").unwrap(),
+            UiTheme::Dark
+        );
+    }
+
+    #[test]
+    fn save_to_load_from_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cfg").join("settings.json");
+
+        let settings = AppSettings {
+            ui_theme: UiTheme::Light,
+            window: WindowSettings {
+                background_opacity: 0.8,
+                background_blur: true,
+            },
+            terminal: TerminalSettings {
+                scheme: "solarized".to_string(),
+                font_family: Some("Cascadia Mono".to_string()),
+                font_size: 16.5,
+                scrollback_lines: 20_000,
+                term: "xterm".to_string(),
+                copy_on_select: true,
+            },
+            connection: ConnectionSettings {
+                default_port: 2222,
+                default_username: Some("alice".to_string()),
+                keepalive_secs: 60,
+                connect_timeout_secs: 5,
+            },
+            ..AppSettings::default()
+        };
+
+        settings.save_to(&path).expect("save");
+        assert_eq!(AppSettings::load_from(&path).expect("load"), settings);
+
+        // Saving over an existing file must work too.
+        settings.save_to(&path).expect("overwrite");
+        assert_eq!(AppSettings::load_from(&path).expect("reload"), settings);
+    }
+
+    #[test]
+    fn load_from_missing_file_is_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings =
+            AppSettings::load_from(&dir.path().join("absent.json")).expect("load missing");
+        assert_eq!(settings, AppSettings::default());
+    }
+
+    #[test]
+    fn load_from_tolerates_a_utf8_bom() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+
+        let mut with_bom = b"\xEF\xBB\xBF".to_vec();
+        with_bom.extend_from_slice(br#"{"ui_theme":"light"}"#);
+        fs::write(&path, with_bom).expect("write");
+
+        let settings = AppSettings::load_from(&path).expect("load");
+        assert_eq!(settings.ui_theme, UiTheme::Light);
+        // Everything else falls back to the defaults.
+        assert_eq!(settings.terminal, TerminalSettings::default());
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            br#"{
+                "version": 99,
+                "ui_theme": "light",
+                "future_top_level": {"anything": [1, 2, 3]},
+                "terminal": {"font_size": 18.0, "future_terminal_key": "hi"}
+            }"#,
+        )
+        .expect("write");
+
+        let settings = AppSettings::load_from(&path).expect("load");
+        assert_eq!(settings.version, 99);
+        assert_eq!(settings.ui_theme, UiTheme::Light);
+        assert_eq!(settings.terminal.font_size, 18.0);
+        // Unspecified keys of a partially specified section still default.
+        assert_eq!(settings.terminal.scheme, "one-dark");
+    }
+
+    #[test]
+    fn empty_object_loads_as_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        fs::write(&path, b"{}").expect("write");
+        assert_eq!(
+            AppSettings::load_from(&path).expect("load"),
+            AppSettings::default()
+        );
+    }
+
+    #[test]
+    fn load_from_invalid_json_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        fs::write(&path, b"{ nope").expect("write");
+        assert!(AppSettings::load_from(&path).is_err());
+    }
+
+    #[test]
+    fn sanitize_clamps_font_size() {
+        let mut settings = AppSettings::default();
+
+        settings.terminal.font_size = 500.0;
+        settings.sanitize();
+        assert_eq!(settings.terminal.font_size, 32.0);
+
+        settings.terminal.font_size = 0.0;
+        settings.sanitize();
+        assert_eq!(settings.terminal.font_size, 6.0);
+
+        settings.terminal.font_size = -20.0;
+        settings.sanitize();
+        assert_eq!(settings.terminal.font_size, 6.0);
+
+        settings.terminal.font_size = f32::NAN;
+        settings.sanitize();
+        assert_eq!(settings.terminal.font_size, 14.0);
+    }
+
+    #[test]
+    fn sanitize_clamps_background_opacity() {
+        let mut settings = AppSettings::default();
+
+        settings.window.background_opacity = 1.5;
+        settings.sanitize();
+        assert_eq!(settings.window.background_opacity, 1.0);
+
+        settings.window.background_opacity = -1.0;
+        settings.sanitize();
+        assert_eq!(settings.window.background_opacity, 0.5);
+
+        settings.window.background_opacity = 0.0;
+        settings.sanitize();
+        assert_eq!(settings.window.background_opacity, 0.5);
+
+        settings.window.background_opacity = f32::NAN;
+        settings.sanitize();
+        assert_eq!(settings.window.background_opacity, 1.0);
+
+        settings.window.background_opacity = f32::INFINITY;
+        settings.sanitize();
+        assert_eq!(settings.window.background_opacity, 1.0);
+
+        settings.window.background_opacity = 0.75;
+        settings.sanitize();
+        assert_eq!(settings.window.background_opacity, 0.75);
+    }
+
+    #[test]
+    fn sanitize_clamps_scrollback() {
+        let mut settings = AppSettings::default();
+
+        settings.terminal.scrollback_lines = 1_000_000_000;
+        settings.sanitize();
+        assert_eq!(settings.terminal.scrollback_lines, 100_000);
+
+        settings.terminal.scrollback_lines = 0;
+        settings.sanitize();
+        assert_eq!(settings.terminal.scrollback_lines, 0);
+    }
+
+    #[test]
+    fn sanitize_restores_blank_strings() {
+        let mut settings = AppSettings::default();
+        settings.terminal.scheme = "   ".to_string();
+        settings.terminal.term = String::new();
+        settings.terminal.font_family = Some("  ".to_string());
+        settings.connection.default_username = Some(String::new());
+        settings.connection.default_port = 0;
+        settings.connection.connect_timeout_secs = 0;
+
+        settings.sanitize();
+
+        assert_eq!(settings.terminal.scheme, "one-dark");
+        assert_eq!(settings.terminal.term, "xterm-256color");
+        assert_eq!(settings.terminal.font_family, None);
+        assert_eq!(settings.connection.default_username, None);
+        assert_eq!(settings.connection.default_port, 22);
+        assert_eq!(settings.connection.connect_timeout_secs, 15);
+    }
+
+    #[test]
+    fn load_applies_sanitize() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            br#"{
+                "window": {"background_opacity": 0.1},
+                "terminal": {"font_size": 500.0, "scrollback_lines": 1000000000}
+            }"#,
+        )
+        .expect("write");
+
+        let settings = AppSettings::load_from(&path).expect("load");
+        assert_eq!(settings.window.background_opacity, 0.5);
+        assert_eq!(settings.terminal.font_size, 32.0);
+        assert_eq!(settings.terminal.scrollback_lines, 100_000);
+    }
+
+    #[test]
+    fn effective_terminal_without_overrides_is_the_global_default() {
+        let settings = AppSettings::default();
+        let effective = settings.effective_terminal(&SessionOverrides::default());
+
+        assert_eq!(effective.scheme, settings.terminal.scheme);
+        assert_eq!(effective.font_family, settings.terminal.font_family);
+        assert_eq!(effective.font_size, settings.terminal.font_size);
+        assert_eq!(
+            effective.scrollback_lines,
+            settings.terminal.scrollback_lines
+        );
+        assert_eq!(effective.term, settings.terminal.term);
+        assert_eq!(effective.copy_on_select, settings.terminal.copy_on_select);
+    }
+
+    #[test]
+    fn effective_terminal_applies_partial_overrides() {
+        let mut settings = AppSettings::default();
+        settings.terminal.font_family = Some("Fira Code".to_string());
+        settings.terminal.copy_on_select = true;
+
+        let overrides = SessionOverrides {
+            font_size: Some(20.0),
+            term: Some("xterm".to_string()),
+            ..SessionOverrides::default()
+        };
+        let effective = settings.effective_terminal(&overrides);
+
+        // Overridden.
+        assert_eq!(effective.font_size, 20.0);
+        assert_eq!(effective.term, "xterm");
+        // Inherited.
+        assert_eq!(effective.scheme, "one-dark");
+        assert_eq!(effective.scrollback_lines, 5_000);
+        assert_eq!(effective.font_family, Some("Fira Code".to_string()));
+        assert!(effective.copy_on_select);
+    }
+
+    #[test]
+    fn effective_terminal_applies_every_override() {
+        let settings = AppSettings::default();
+        let overrides = SessionOverrides {
+            scheme: Some("solarized".to_string()),
+            font_size: Some(11.0),
+            scrollback_lines: Some(100),
+            term: Some("vt100".to_string()),
+        };
+        let effective = settings.effective_terminal(&overrides);
+
+        assert_eq!(effective.scheme, "solarized");
+        assert_eq!(effective.font_size, 11.0);
+        assert_eq!(effective.scrollback_lines, 100);
+        assert_eq!(effective.term, "vt100");
+    }
+
+    #[test]
+    fn effective_terminal_clamps_overrides() {
+        let settings = AppSettings::default();
+
+        let huge = SessionOverrides {
+            font_size: Some(500.0),
+            scrollback_lines: Some(1_000_000_000),
+            ..SessionOverrides::default()
+        };
+        let effective = settings.effective_terminal(&huge);
+        assert_eq!(effective.font_size, 32.0);
+        assert_eq!(effective.scrollback_lines, 100_000);
+
+        let tiny = SessionOverrides {
+            font_size: Some(-3.0),
+            ..SessionOverrides::default()
+        };
+        assert_eq!(settings.effective_terminal(&tiny).font_size, 6.0);
+
+        let nan = SessionOverrides {
+            font_size: Some(f32::NAN),
+            ..SessionOverrides::default()
+        };
+        assert_eq!(settings.effective_terminal(&nan).font_size, 14.0);
+    }
+
+    #[test]
+    fn effective_terminal_ignores_blank_overrides() {
+        let settings = AppSettings::default();
+        let overrides = SessionOverrides {
+            scheme: Some("  ".to_string()),
+            term: Some(String::new()),
+            ..SessionOverrides::default()
+        };
+        let effective = settings.effective_terminal(&overrides);
+
+        assert_eq!(effective.scheme, "one-dark");
+        assert_eq!(effective.term, "xterm-256color");
+    }
+}
