@@ -9,7 +9,9 @@
 //!   [`TerminalModel::feed`].
 //! * [`TerminalSnapshot`] is an `alacritty`-free description of one frame,
 //!   produced by [`TerminalModel::snapshot`].
-//! * [`TerminalTheme`] resolves the abstract cell colors into RGB.
+//! * [`TerminalTheme`] resolves the abstract cell colors into RGB, and ships a
+//!   registry of built-in schemes selectable by id ([`TerminalTheme::builtin`],
+//!   [`TerminalTheme::by_name`]).
 //! * [`encode_key`] / [`encode_paste`] encode user input.
 //!
 //! ```
@@ -30,4 +32,4 @@ pub mod theme;
 pub use keys::{KeyCode, KeyInput, TermModes, encode_key, encode_paste};
 pub use model::TerminalModel;
 pub use snapshot::{CursorPos, RunFlags, StyledRun, TerminalLine, TerminalSnapshot};
-pub use theme::{Rgb, TerminalTheme};
+pub use theme::{Rgb, SchemeInfo, TerminalTheme};
