@@ -8,6 +8,15 @@
 A multi-platform GUI SSH terminal written in Rust, built on
 [gpui](https://gpui.rs) — the GPU-accelerated UI framework behind the Zed editor.
 
+![logman running two SSH sessions in the One Dark theme](docs/screenshots/main-dark.png)
+
+<details>
+<summary>The settings dialog, with live previews of the six built-in color schemes</summary>
+
+![The settings dialog](docs/screenshots/settings.png)
+
+</details>
+
 - **Multiple sessions** in one window, as tabs, each with its own connection and
   scrollback.
 - **Password and private key authentication**, with secrets kept in the OS
@@ -150,6 +159,42 @@ russh.** `logman-term` turns bytes into a `TerminalSnapshot` of styled runs, and
 that is all the renderer sees. Both lower crates are testable without a window:
 of the 105 tests in the workspace, 68 need neither a GUI nor a network, and the
 rest need only loopback.
+
+### Third-party libraries
+
+The heavy lifting is done by these projects:
+
+| Library | Role |
+| --- | --- |
+| [gpui](https://github.com/zed-industries/zed/tree/main/crates/gpui) | GPU-accelerated UI framework, from the Zed editor (vendored 0.2.2, [patched](#gpui-is-vendored-and-patched)) |
+| [russh](https://github.com/warp-tech/russh) | Pure-Rust SSH client: transport, authentication, pty and shell channels |
+| [alacritty_terminal](https://github.com/alacritty/alacritty) | Terminal emulation: grid, VTE parsing, scrollback |
+| [tokio](https://github.com/tokio-rs/tokio) | Async runtime for the SSH transport thread |
+| [keyring](https://github.com/open-source-cooperative/keyring-rs) | OS credential store: Windows Credential Manager, macOS Keychain, Secret Service |
+| [directories](https://github.com/soc/directories-rs) | Per-platform configuration paths |
+
+Supporting crates:
+[serde](https://github.com/serde-rs/serde) /
+[serde_json](https://github.com/serde-rs/json) (profiles and settings),
+[uuid](https://github.com/uuid-rs/uuid) (profile identity),
+[anyhow](https://github.com/dtolnay/anyhow) /
+[thiserror](https://github.com/dtolnay/thiserror) (errors),
+[log](https://github.com/rust-lang/log) /
+[env_logger](https://github.com/rust-cli/env_logger) (logging),
+[futures](https://github.com/rust-lang/futures-rs) /
+[async-trait](https://github.com/dtolnay/async-trait) (async glue),
+[parking_lot](https://github.com/Amanieu/parking_lot),
+[smallvec](https://github.com/servo/rust-smallvec),
+[bitflags](https://github.com/bitflags/bitflags),
+[unicode-segmentation](https://github.com/unicode-rs/unicode-segmentation)
+(grapheme-safe text editing).
+
+Windows only: [windows-rs](https://github.com/microsoft/windows-rs) (DWM
+caption colors), [raw-window-handle](https://github.com/rust-windowing/raw-window-handle)
+(HWND access), [winresource](https://github.com/BenjaminRi/winresource)
+(icon embedding). Tests additionally use
+[tempfile](https://github.com/Stebalien/tempfile) and
+[rand](https://github.com/rust-random/rand).
 
 ### Testing
 
