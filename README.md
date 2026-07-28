@@ -1,5 +1,10 @@
 # logman
 
+[![CI](https://github.com/xcomart/logman/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/xcomart/logman/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/xcomart/logman)](https://github.com/xcomart/logman/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-informational)
+
 A multi-platform GUI SSH terminal written in Rust, built on
 [gpui](https://gpui.rs) — the GPU-accelerated UI framework behind the Zed editor.
 
@@ -169,4 +174,5 @@ and no external server is needed.
 
 ## License
 
-Apache-2.0.
+Apache-2.0 — see [LICENSE](LICENSE). The vendored gpui keeps its own
+Apache-2.0 notice under `vendor/gpui/`.
