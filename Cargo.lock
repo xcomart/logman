@@ -3699,11 +3699,13 @@ dependencies = [
  "logman-ssh",
  "logman-term",
  "parking_lot",
+ "raw-window-handle",
  "russh",
  "serde",
  "serde_json",
  "unicode-segmentation",
  "uuid",
+ "windows 0.61.3",
  "winresource",
 ]
 
