@@ -61,13 +61,38 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p logman-app --target ${{ matrix.target }}
 
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      # A bare Mach-O binary cannot carry an icon; macOS wants an .app bundle
+      # with an Info.plist and an .icns. The app is unsigned, so first launch
+      # needs right-click -> Open.
+      - name: Package (macos)
+        if: runner.os == 'macOS'
         run: |
+          version="${GITHUB_REF_NAME#v}"
+          app="logman.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp "target/${{ matrix.target }}/release/logman" "$app/Contents/MacOS/"
+          cp assets/icon.icns "$app/Contents/Resources/logman.icns"
+          sed "s/__VERSION__/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
           staging="logman-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir "$staging"
+          cp -R "$app" README.md "$staging/"
+          tar czf "$staging.tar.gz" "$staging"
+          echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
+
+      # Linux gets the binary plus a desktop entry, hicolor icons and a
+      # per-user install script; install.sh puts everything under ~/.local.
+      - name: Package (linux)
+        if: runner.os == 'Linux'
+        run: |
+          staging="logman-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "$staging/icons"
           cp "target/${{ matrix.target }}/release/logman" "$staging/"
-          cp README.md "$staging/"
+          cp README.md packaging/linux/logman.desktop "$staging/"
+          install -m755 packaging/linux/install.sh "$staging/install.sh"
+          cp assets/icon-128.png "$staging/icons/logman-128.png"
+          cp assets/icon-256.png "$staging/icons/logman-256.png"
+          cp assets/icon.svg "$staging/icons/logman.svg"
           tar czf "$staging.tar.gz" "$staging"
           echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
 

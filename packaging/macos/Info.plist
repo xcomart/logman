@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for the release workflow; __VERSION__ is replaced by the tag. -->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>logman</string>
+    <key>CFBundleDisplayName</key>
+    <string>logman</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.logman.logman</string>
+    <key>CFBundleExecutable</key>
+    <string>logman</string>
+    <key>CFBundleIconFile</key>
+    <string>logman</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+</dict>
+</plist>
