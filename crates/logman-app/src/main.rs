@@ -519,6 +519,9 @@ fn main() {
                     title: Some("logman".into()),
                     ..Default::default()
                 }),
+                // Wayland compositors and X11 docks match this against
+                // logman.desktop to pick up the application icon.
+                app_id: Some("logman".into()),
                 ..Default::default()
             },
             |window, cx| {
