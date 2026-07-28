@@ -3,8 +3,7 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ElementId, Hsla, MouseButton, SharedString, Window, div, prelude::*, px,
-    transparent_black,
+    App, ElementId, Hsla, MouseButton, SharedString, Window, div, prelude::*, px, transparent_black,
 };
 
 use super::theme::{Theme, theme};

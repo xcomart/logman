@@ -60,7 +60,12 @@ pub struct KeyInput {
 impl KeyInput {
     /// A key press without any modifier.
     pub fn new(code: KeyCode) -> Self {
-        Self { code, ctrl: false, alt: false, shift: false }
+        Self {
+            code,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
     }
 
     /// Builder style setter for the control modifier.
@@ -122,11 +127,11 @@ pub fn encode_key(input: KeyInput, modes: TermModes) -> Option<Vec<u8>> {
             } else {
                 Some(with_alt(input, b"\t"))
             }
-        },
+        }
         KeyCode::Backspace => {
             let byte = if input.ctrl { 0x08 } else { 0x7f };
             Some(with_alt(input, &[byte]))
-        },
+        }
         KeyCode::Escape => Some(with_alt(input, &[0x1b])),
         KeyCode::Up => Some(cursor_key(b'A', input, modes)),
         KeyCode::Down => Some(cursor_key(b'B', input, modes)),
@@ -196,7 +201,7 @@ fn encode_char(c: char, input: KeyInput) -> Vec<u8> {
         None => {
             let mut buf = [0u8; 4];
             out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-        },
+        }
     }
 
     out
@@ -268,7 +273,10 @@ mod tests {
     #[test]
     fn plain_characters_are_utf8() {
         assert_eq!(encode(KeyCode::Char('a'), TermModes::default()), b"a");
-        assert_eq!(encode(KeyCode::Char('가'), TermModes::default()), "가".as_bytes());
+        assert_eq!(
+            encode(KeyCode::Char('가'), TermModes::default()),
+            "가".as_bytes()
+        );
     }
 
     #[test]
@@ -293,7 +301,11 @@ mod tests {
         let cases = [(' ', 0x00u8), ('[', 0x1b), ('\\', 0x1c), (']', 0x1d)];
         for (c, expected) in cases {
             let input = KeyInput::new(KeyCode::Char(c)).with_ctrl(true);
-            assert_eq!(encode_key(input, modes).unwrap(), vec![expected], "ctrl+{c:?}");
+            assert_eq!(
+                encode_key(input, modes).unwrap(),
+                vec![expected],
+                "ctrl+{c:?}"
+            );
         }
     }
 
@@ -306,10 +318,18 @@ mod tests {
     #[test]
     fn alt_prefixes_escape() {
         let input = KeyInput::new(KeyCode::Char('a')).with_alt(true);
-        assert_eq!(encode_key(input, TermModes::default()).unwrap(), vec![0x1b, b'a']);
+        assert_eq!(
+            encode_key(input, TermModes::default()).unwrap(),
+            vec![0x1b, b'a']
+        );
 
-        let ctrl_alt = KeyInput::new(KeyCode::Char('c')).with_alt(true).with_ctrl(true);
-        assert_eq!(encode_key(ctrl_alt, TermModes::default()).unwrap(), vec![0x1b, 0x03]);
+        let ctrl_alt = KeyInput::new(KeyCode::Char('c'))
+            .with_alt(true)
+            .with_ctrl(true);
+        assert_eq!(
+            encode_key(ctrl_alt, TermModes::default()).unwrap(),
+            vec![0x1b, 0x03]
+        );
     }
 
     #[test]
@@ -330,7 +350,10 @@ mod tests {
     #[test]
     fn arrow_keys_respect_app_cursor_mode() {
         let normal = TermModes::default();
-        let app = TermModes { app_cursor: true, ..TermModes::default() };
+        let app = TermModes {
+            app_cursor: true,
+            ..TermModes::default()
+        };
 
         assert_eq!(encode(KeyCode::Up, normal), b"\x1b[A");
         assert_eq!(encode(KeyCode::Down, normal), b"\x1b[B");
@@ -345,24 +368,39 @@ mod tests {
 
     #[test]
     fn modified_arrows_use_csi_with_modifier_parameter() {
-        let app = TermModes { app_cursor: true, ..TermModes::default() };
+        let app = TermModes {
+            app_cursor: true,
+            ..TermModes::default()
+        };
         let ctrl_up = KeyInput::new(KeyCode::Up).with_ctrl(true);
         assert_eq!(encode_key(ctrl_up, app).unwrap(), b"\x1b[1;5A");
 
         let shift_left = KeyInput::new(KeyCode::Left).with_shift(true);
-        assert_eq!(encode_key(shift_left, TermModes::default()).unwrap(), b"\x1b[1;2D");
+        assert_eq!(
+            encode_key(shift_left, TermModes::default()).unwrap(),
+            b"\x1b[1;2D"
+        );
 
         let alt_right = KeyInput::new(KeyCode::Right).with_alt(true);
-        assert_eq!(encode_key(alt_right, TermModes::default()).unwrap(), b"\x1b[1;3C");
+        assert_eq!(
+            encode_key(alt_right, TermModes::default()).unwrap(),
+            b"\x1b[1;3C"
+        );
 
-        let all = KeyInput::new(KeyCode::Down).with_ctrl(true).with_alt(true).with_shift(true);
+        let all = KeyInput::new(KeyCode::Down)
+            .with_ctrl(true)
+            .with_alt(true)
+            .with_shift(true);
         assert_eq!(encode_key(all, TermModes::default()).unwrap(), b"\x1b[1;8B");
     }
 
     #[test]
     fn home_and_end() {
         let normal = TermModes::default();
-        let app = TermModes { app_cursor: true, ..TermModes::default() };
+        let app = TermModes {
+            app_cursor: true,
+            ..TermModes::default()
+        };
         assert_eq!(encode(KeyCode::Home, normal), b"\x1b[H");
         assert_eq!(encode(KeyCode::End, normal), b"\x1b[F");
         assert_eq!(encode(KeyCode::Home, app), b"\x1bOH");
@@ -403,9 +441,15 @@ mod tests {
 
     #[test]
     fn paste_with_bracketed_mode_is_wrapped_and_sanitized() {
-        let modes = TermModes { bracketed_paste: true, ..TermModes::default() };
+        let modes = TermModes {
+            bracketed_paste: true,
+            ..TermModes::default()
+        };
         assert_eq!(encode_paste("hi", modes), b"\x1b[200~hi\x1b[201~");
         // An embedded terminator must not be able to end the paste early.
-        assert_eq!(encode_paste("a\x1b[201~b", modes), b"\x1b[200~a[201~b\x1b[201~");
+        assert_eq!(
+            encode_paste("a\x1b[201~b", modes),
+            b"\x1b[200~a[201~b\x1b[201~"
+        );
     }
 }

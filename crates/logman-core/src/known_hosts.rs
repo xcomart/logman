@@ -352,7 +352,10 @@ mod tests {
 
         // Saving again over an existing file must work.
         loaded.save_to(&path).expect("overwrite");
-        assert_eq!(KnownHosts::load_from(&path).expect("reload").entries.len(), 2);
+        assert_eq!(
+            KnownHosts::load_from(&path).expect("reload").entries.len(),
+            2
+        );
     }
 
     #[test]
@@ -360,8 +363,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("known_hosts");
         // Exactly what a Windows editor writes when it saves as "UTF-8 with BOM".
-        fs::write(&path, format!("\u{feff}example.com 22 {ED25519} {FP_A}\n"))
-            .expect("write");
+        fs::write(&path, format!("\u{feff}example.com 22 {ED25519} {FP_A}\n")).expect("write");
 
         let hosts = KnownHosts::load_from(&path).expect("load");
         assert_eq!(

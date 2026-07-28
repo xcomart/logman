@@ -165,7 +165,7 @@ impl TerminalTheme {
                 } else {
                     self.ansi[base]
                 }
-            },
+            }
             // Bright ANSI colors.
             8..=15 => self.ansi[index as usize],
             // 6x6x6 color cube.
@@ -173,27 +173,25 @@ impl TerminalTheme {
                 let index = index - 16;
                 let level = |value: u8| if value == 0 { 0 } else { value * 40 + 55 };
                 Rgb::new(level(index / 36), level((index / 6) % 6), level(index % 6))
-            },
+            }
             // Grayscale ramp.
             232..=255 => {
                 let level = (index - 232) * 10 + 8;
                 Rgb::new(level, level, level)
-            },
+            }
         }
     }
 
     fn resolve_named(&self, named: NamedColor, is_foreground: bool, flags: RunFlags) -> Rgb {
         match named {
             NamedColor::Foreground => {
-                if is_foreground
-                    && flags.contains(RunFlags::DIM)
-                    && !flags.contains(RunFlags::BOLD)
+                if is_foreground && flags.contains(RunFlags::DIM) && !flags.contains(RunFlags::BOLD)
                 {
                     self.foreground.dimmed()
                 } else {
                     self.foreground
                 }
-            },
+            }
             NamedColor::Background => self.background,
             NamedColor::Cursor => self.cursor,
             NamedColor::BrightForeground => self.foreground,
@@ -229,7 +227,10 @@ mod tests {
     fn spec_colors_pass_through() {
         let theme = TerminalTheme::dark();
         let color = Color::Spec(VteRgb { r: 1, g: 2, b: 3 });
-        assert_eq!(theme.resolve(color, true, RunFlags::empty()), Rgb::new(1, 2, 3));
+        assert_eq!(
+            theme.resolve(color, true, RunFlags::empty()),
+            Rgb::new(1, 2, 3)
+        );
     }
 
     #[test]
@@ -267,7 +268,10 @@ mod tests {
     #[test]
     fn indexed_grayscale_ramp() {
         let theme = TerminalTheme::dark();
-        assert_eq!(theme.resolve(Color::Indexed(232), true, RunFlags::empty()), Rgb::new(8, 8, 8));
+        assert_eq!(
+            theme.resolve(Color::Indexed(232), true, RunFlags::empty()),
+            Rgb::new(8, 8, 8)
+        );
         assert_eq!(
             theme.resolve(Color::Indexed(255), true, RunFlags::empty()),
             Rgb::new(238, 238, 238)
@@ -282,6 +286,9 @@ mod tests {
             theme.resolve(Color::Named(NamedColor::Background), false, flags),
             theme.background
         );
-        assert_eq!(theme.resolve(Color::Named(NamedColor::Cursor), true, flags), theme.cursor);
+        assert_eq!(
+            theme.resolve(Color::Named(NamedColor::Cursor), true, flags),
+            theme.cursor
+        );
     }
 }
