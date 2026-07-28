@@ -30,6 +30,7 @@ pub struct Checkbox {
     id: ElementId,
     label: SharedString,
     checked: bool,
+    tab_index: Option<isize>,
     on_toggle: Option<ToggleHandler>,
 }
 
@@ -42,6 +43,7 @@ impl Checkbox {
             id: id.into(),
             label: label.into(),
             checked: false,
+            tab_index: None,
             on_toggle: None,
         }
     }
@@ -49,6 +51,15 @@ impl Checkbox {
     /// Sets whether the box is ticked.
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
+        self
+    }
+
+    /// Places the checkbox at `index` in the window's tab order.
+    ///
+    /// A focused checkbox draws an accent outline and toggles on `Space` or
+    /// `Enter`, which gpui delivers as an ordinary click.
+    pub fn tab_index(mut self, index: isize) -> Self {
+        self.tab_index = Some(index);
         self
     }
 
@@ -77,9 +88,19 @@ impl RenderOnce for Checkbox {
             .flex_row()
             .items_center()
             .gap(px(8.))
+            .py(px(1.))
+            .rounded_sm()
+            // Transparent until focused, so the ring costs no layout.
+            .border_1()
+            .border_color(gpui::transparent_black())
             .cursor_pointer()
             .text_size(px(13.))
             .text_color(theme.text)
+            .when_some(self.tab_index, |this, index| {
+                let accent = theme.accent;
+                this.tab_index(index)
+                    .focus(move |style| style.border_color(accent))
+            })
             .when_some(self.on_toggle, |this, handler| {
                 this.on_click(move |_: &ClickEvent, window, cx| handler(next, window, cx))
             })

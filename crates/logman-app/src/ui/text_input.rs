@@ -225,6 +225,16 @@ impl TextInput {
         self
     }
 
+    /// Places the field at `index` in the window's tab order and makes it a tab
+    /// stop.
+    ///
+    /// Fields without an explicit index stay out of the tab ring entirely, which
+    /// is what keeps `Tab` from wandering into views that never opted in.
+    pub fn tab_index(mut self, index: isize) -> Self {
+        self.focus_handle = self.focus_handle.clone().tab_index(index).tab_stop(true);
+        self
+    }
+
     /// Sets the callback invoked when the user presses `Enter`.
     pub fn on_submit(mut self, handler: impl Fn(&str, &mut Window, &mut App) + 'static) -> Self {
         self.on_submit = Some(Rc::new(handler));
