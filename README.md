@@ -1,4 +1,4 @@
-# logman
+# <img src="assets/icon.svg" width="28" alt=""> logman
 
 [![CI](https://github.com/xcomart/logman/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/xcomart/logman/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/xcomart/logman)](https://github.com/xcomart/logman/releases)
