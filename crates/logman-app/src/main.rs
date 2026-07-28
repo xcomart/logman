@@ -11,6 +11,7 @@
 //! rendered on top of everything else. Session state lives in [`session`], the
 //! terminal surface in [`terminal_view`], and every reusable widget in [`ui`].
 
+mod about_dialog;
 mod app_settings;
 mod connection;
 mod session;
@@ -26,17 +27,18 @@ mod verifier;
 
 use gpui::{
     AnyElement, App, Application, Bounds, Context, ElementId, Entity, FocusHandle, Focusable,
-    KeyBinding, SharedString, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
+    KeyBinding, Menu, MenuItem, SharedString, Subscription, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
 use logman_core::{SessionProfile, UiTheme, WindowSettings};
 use logman_ssh::SshAuth;
 
+use about_dialog::{AboutDialog, AboutDialogEvent};
 use connection::{ConnectionDialog, ConnectionDialogEvent};
 use session::Session;
 use settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use terminal_view::TerminalView;
-use ui::{Button, ButtonVariant, TabBar, TabItem, Theme, set_theme, theme};
+use ui::{Button, ButtonVariant, MenuButton, MenuEntry, TabBar, TabItem, Theme, set_theme, theme};
 
 actions!(
     logman,
@@ -49,7 +51,9 @@ actions!(
         CloseSession,
         /// Open the settings dialog.
         OpenSettings,
-        /// Close the connection or settings dialog, if one is open.
+        /// Open the about dialog.
+        ShowAbout,
+        /// Close the open dialog or dropdown menu, if there is one.
         DismissDialog,
     ]
 );
@@ -67,6 +71,22 @@ const KEY_CONTEXT: &str = "Workspace";
 
 /// Number of tabs reachable through the `Ctrl`/`Cmd` + digit shortcuts.
 const QUICK_SELECT_TABS: usize = 9;
+
+/// Height of the toolbar row holding the application menu and the tab strip.
+///
+/// Must match the height [`TabBar`] gives itself, otherwise the menu button cell
+/// and the tab strip would not line up.
+const TOOLBAR_HEIGHT: f32 = 36.;
+
+/// Modifier key named in the dropdown menu's shortcut hints.
+///
+/// The dropdown is only drawn where gpui builds no native menu bar, but the
+/// hints follow [`bind_shortcuts`] on every platform so the two never drift.
+const SHORTCUT_MODIFIER: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Ctrl"
+};
 
 /// One open session together with the view rendering it.
 struct SessionTab {
@@ -95,10 +115,16 @@ struct Workspace {
     dialog: Entity<ConnectionDialog>,
     /// The settings dialog, rendered only while it reports itself open.
     settings: Entity<SettingsDialog>,
+    /// The about dialog, rendered only while it reports itself open.
+    about: Entity<AboutDialog>,
+    /// Whether the application dropdown menu is showing.
+    menu_open: bool,
     /// Keeps the connection dialog subscription alive.
     _dialog_events: Subscription,
     /// Keeps the settings dialog subscription alive.
     _settings_events: Subscription,
+    /// Keeps the about dialog subscription alive.
+    _about_events: Subscription,
     /// Disconnects every session before the process exits.
     _quit: Subscription,
 }
@@ -148,6 +174,19 @@ impl Workspace {
             },
         );
 
+        let about = cx.new(AboutDialog::new);
+        let about_events =
+            cx.subscribe_in(
+                &about,
+                window,
+                |this, dialog, event, window, cx| match event {
+                    AboutDialogEvent::Dismissed => {
+                        dialog.update(cx, |dialog, cx| dialog.close(cx));
+                        this.focus_active(window, cx);
+                    }
+                },
+            );
+
         let quit = cx.on_app_quit(|this, cx| {
             for tab in &this.tabs {
                 tab.session(cx)
@@ -162,8 +201,11 @@ impl Workspace {
             active: 0,
             dialog,
             settings,
+            about,
+            menu_open: false,
             _dialog_events: dialog_events,
             _settings_events: settings_events,
+            _about_events: about_events,
             _quit: quit,
         }
     }
@@ -233,38 +275,61 @@ impl Workspace {
         }
     }
 
+    /// Closes every dialog and the dropdown menu.
+    ///
+    /// Every `open_*` method starts here, which is what keeps the three modals
+    /// mutually exclusive: only one of them can ever be on screen, and opening
+    /// one always puts the menu away.
+    fn close_overlays(&mut self, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        if self.dialog.read(cx).is_open() {
+            self.dialog.update(cx, |dialog, cx| dialog.close(cx));
+        }
+        if self.settings.read(cx).is_open() {
+            self.settings.update(cx, |dialog, cx| dialog.close(cx));
+        }
+        if self.about.read(cx).is_open() {
+            self.about.update(cx, |dialog, cx| dialog.close(cx));
+        }
+    }
+
     /// Shows the connection dialog with an empty form.
     fn open_dialog(&mut self, cx: &mut Context<Self>) {
-        self.close_settings(cx);
+        self.close_overlays(cx);
         self.dialog.update(cx, |dialog, cx| dialog.open_new(cx));
         cx.notify();
     }
 
     /// Shows the connection dialog pre-filled from a saved profile.
     fn open_profile(&mut self, profile: &SessionProfile, cx: &mut Context<Self>) {
-        self.close_settings(cx);
+        self.close_overlays(cx);
         let id = profile.id;
         self.dialog
             .update(cx, |dialog, cx| dialog.open_profile(id, cx));
         cx.notify();
     }
 
-    /// Shows the settings dialog, closing the connection dialog first so the two
-    /// are never open at once.
+    /// Shows the settings dialog.
     fn open_settings(&mut self, cx: &mut Context<Self>) {
-        if self.dialog.read(cx).is_open() {
-            self.dialog.update(cx, |dialog, cx| dialog.close(cx));
-        }
+        self.close_overlays(cx);
         self.settings.update(cx, |dialog, cx| dialog.open(cx));
         cx.notify();
     }
 
-    /// Closes the settings dialog if it is open. Used before opening the
-    /// connection dialog so only one modal is ever visible.
-    fn close_settings(&mut self, cx: &mut Context<Self>) {
-        if self.settings.read(cx).is_open() {
-            self.settings.update(cx, |dialog, cx| dialog.close(cx));
+    /// Shows the about dialog.
+    fn open_about(&mut self, cx: &mut Context<Self>) {
+        self.close_overlays(cx);
+        self.about.update(cx, |dialog, cx| dialog.open(cx));
+        cx.notify();
+    }
+
+    /// Shows or hides the application dropdown menu.
+    fn set_menu_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.menu_open == open {
+            return;
         }
+        self.menu_open = open;
+        cx.notify();
     }
 
     /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>T</kbd>.
@@ -293,6 +358,11 @@ impl Workspace {
         self.open_settings(cx);
     }
 
+    /// Handles the "About logman" menu item.
+    fn show_about_action(&mut self, _: &ShowAbout, _window: &mut Window, cx: &mut Context<Self>) {
+        self.open_about(cx);
+    }
+
     /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + a digit.
     fn select_tab_action(
         &mut self,
@@ -303,14 +373,25 @@ impl Workspace {
         self.select_tab(action.0, window, cx);
     }
 
-    /// Handles <kbd>Esc</kbd>: closes whichever dialog is open, or lets the key
-    /// through to the terminal when neither is.
+    /// Handles <kbd>Esc</kbd>: closes whichever overlay is open, or lets the key
+    /// through to the terminal when none is.
     fn dismiss_dialog_action(
         &mut self,
         _: &DismissDialog,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The menu paints above everything else, so it is dismissed first.
+        if self.menu_open {
+            self.set_menu_open(false, cx);
+            return;
+        }
+        if self.about.read(cx).is_open() {
+            self.about.update(cx, |dialog, cx| dialog.close(cx));
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
         if self.dialog.read(cx).is_open() {
             // Route through `dismiss` rather than closing directly: the dialog
             // also binds `Escape` internally, and going through one path keeps
@@ -328,6 +409,66 @@ impl Workspace {
             return;
         }
         cx.propagate();
+    }
+
+    /// Renders the toolbar: the application menu button and the tab strip.
+    ///
+    /// The button is left out on macOS, where [`app_menus`] puts the same
+    /// commands in the system menu bar.
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = theme(cx);
+        let menu = (!cfg!(target_os = "macos")).then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(px(TOOLBAR_HEIGHT))
+                .px(px(4.))
+                .bg(theme.surface)
+                .border_b_1()
+                .border_color(theme.border)
+                .child(self.render_app_menu(cx))
+        });
+
+        div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .w_full()
+            .children(menu)
+            .child(div().flex_1().min_w_0().child(self.render_tab_bar(cx)))
+            .into_any_element()
+    }
+
+    /// Builds the dropdown menu shown on the platforms without a native one.
+    ///
+    /// Every row dispatches the action its keyboard shortcut dispatches, so the
+    /// menu adds a way in rather than a second implementation.
+    fn render_app_menu(&self, cx: &mut Context<Self>) -> MenuButton {
+        let this = cx.entity();
+        let entries = vec![
+            MenuEntry::new("New session")
+                .shortcut(format!("{SHORTCUT_MODIFIER}+T"))
+                .on_activate(|window, cx| window.dispatch_action(Box::new(NewSession), cx)),
+            MenuEntry::new("Settings\u{2026}")
+                .shortcut(format!("{SHORTCUT_MODIFIER}+,"))
+                .on_activate(|window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
+            MenuEntry::separator(),
+            MenuEntry::new("About logman")
+                .on_activate(|window, cx| window.dispatch_action(Box::new(ShowAbout), cx)),
+            MenuEntry::separator(),
+            MenuEntry::new("Quit")
+                .shortcut(format!("{SHORTCUT_MODIFIER}+Q"))
+                .on_activate(|window, cx| window.dispatch_action(Box::new(Quit), cx)),
+        ];
+
+        MenuButton::new("app-menu")
+            .open(self.menu_open)
+            .entries(entries)
+            .on_open_change(move |open, _window, cx| {
+                this.update(cx, |workspace, cx| workspace.set_menu_open(open, cx));
+            })
     }
 
     /// Renders the tab strip.
@@ -509,7 +650,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
-        let tab_bar = self.render_tab_bar(cx);
+        let toolbar = self.render_toolbar(cx);
         let body = self.render_body(cx);
         let status_bar = self.render_status_bar(cx);
         let dialog = self
@@ -522,6 +663,11 @@ impl Render for Workspace {
             .read(cx)
             .is_open()
             .then(|| div().absolute().inset_0().child(self.settings.clone()));
+        let about = self
+            .about
+            .read(cx)
+            .is_open()
+            .then(|| div().absolute().inset_0().child(self.about.clone()));
 
         div()
             .key_context(KEY_CONTEXT)
@@ -536,13 +682,15 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::close_session_action))
             .on_action(cx.listener(Self::open_settings_action))
+            .on_action(cx.listener(Self::show_about_action))
             .on_action(cx.listener(Self::select_tab_action))
             .on_action(cx.listener(Self::dismiss_dialog_action))
-            .child(tab_bar)
+            .child(toolbar)
             .child(body)
             .child(status_bar)
             .children(dialog)
             .children(settings)
+            .children(about)
     }
 }
 
@@ -567,6 +715,40 @@ fn window_appearance(window: &WindowSettings) -> WindowBackgroundAppearance {
     } else {
         WindowBackgroundAppearance::Opaque
     }
+}
+
+/// The application menu bar, in macOS layout.
+///
+/// gpui only turns this into a real menu bar on macOS — the Windows and Linux
+/// backends store it and draw nothing — so the other platforms get the same
+/// commands from the in-app dropdown built by
+/// [`Workspace::render_app_menu`]. Every item dispatches an action that is also
+/// bound to a shortcut in [`bind_shortcuts`], which is what lets the macOS
+/// backend label the items with their key equivalents; register the bindings
+/// first so the keymap it reads is already populated.
+///
+/// About, Settings and Quit live in the application menu because that is where
+/// macOS users look for them.
+fn app_menus() -> Vec<Menu> {
+    vec![
+        Menu {
+            name: "logman".into(),
+            items: vec![
+                MenuItem::action("About logman", ShowAbout),
+                MenuItem::separator(),
+                MenuItem::action("Settings\u{2026}", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit logman", Quit),
+            ],
+        },
+        Menu {
+            name: "Session".into(),
+            items: vec![
+                MenuItem::action("New Session", NewSession),
+                MenuItem::action("Close Session", CloseSession),
+            ],
+        },
+    ]
 }
 
 /// Registers every shortcut the workspace listens for.
@@ -609,6 +791,7 @@ fn main() {
         ui::init(cx);
         TerminalView::init(cx);
         bind_shortcuts(cx);
+        cx.set_menus(app_menus());
 
         let settings = app_settings::current(cx);
         apply_ui_theme(settings.ui_theme, cx);
