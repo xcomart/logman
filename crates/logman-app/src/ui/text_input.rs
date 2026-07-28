@@ -557,7 +557,8 @@ impl EntityInputHandler for TextInput {
             .unwrap_or(self.selected_range.clone());
 
         self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
         cx.notify();
@@ -582,7 +583,8 @@ impl EntityInputHandler for TextInput {
             .unwrap_or(self.selected_range.clone());
 
         self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
         if new_text.is_empty() {
             self.marked_range = None;
         } else {
@@ -694,9 +696,7 @@ impl Render for TextInput {
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
             })
-            .child(TextElement {
-                input: cx.entity(),
-            })
+            .child(TextElement { input: cx.entity() })
     }
 }
 
@@ -768,7 +768,11 @@ impl Element for TextElement {
             (input.placeholder.clone(), None, theme.text_muted)
         } else {
             let (text, map) = input.display_text();
-            let color = if disabled { theme.text_muted } else { style.color };
+            let color = if disabled {
+                theme.text_muted
+            } else {
+                style.color
+            };
             (text, map, color)
         };
         let map = display_map.as_ref();

@@ -141,7 +141,9 @@ mod tests {
 
     #[test]
     fn line_text_concatenates_runs() {
-        let line = TerminalLine { runs: vec![run("ab", 0), run("cd", 2)] };
+        let line = TerminalLine {
+            runs: vec![run("ab", 0), run("cd", 2)],
+        };
         assert_eq!(line.text(), "abcd");
         assert!(!line.is_empty());
         assert!(TerminalLine::default().is_empty());
@@ -152,7 +154,12 @@ mod tests {
         let snapshot = TerminalSnapshot {
             cols: 4,
             rows: 2,
-            lines: vec![TerminalLine { runs: vec![run("ab", 0)] }, TerminalLine::default()],
+            lines: vec![
+                TerminalLine {
+                    runs: vec![run("ab", 0)],
+                },
+                TerminalLine::default(),
+            ],
             cursor: CursorPos { line: 0, col: 0 },
             cursor_visible: true,
             display_offset: 0,

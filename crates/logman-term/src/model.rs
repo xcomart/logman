@@ -32,7 +32,11 @@ impl TermDimensions {
     fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
         let columns = cols as usize;
         let screen_lines = rows as usize;
-        Self { columns, screen_lines, total_lines: screen_lines.saturating_add(scrollback) }
+        Self {
+            columns,
+            screen_lines,
+            total_lines: screen_lines.saturating_add(scrollback),
+        }
     }
 }
 
@@ -75,9 +79,12 @@ impl EventListener for EventProxy {
             Event::Title(title) => self.state.borrow_mut().pending_title = Some(Some(title)),
             Event::ResetTitle => self.state.borrow_mut().pending_title = Some(None),
             Event::PtyWrite(text) => {
-                self.state.borrow_mut().pty_output.extend_from_slice(text.as_bytes());
-            },
-            _ => {},
+                self.state
+                    .borrow_mut()
+                    .pty_output
+                    .extend_from_slice(text.as_bytes());
+            }
+            _ => {}
         }
     }
 }
@@ -116,7 +123,14 @@ impl TerminalModel {
         let state = Rc::new(RefCell::new(SharedState::default()));
         let term = Self::build_term(cols, rows, scrollback, Rc::clone(&state));
 
-        Self { term, parser: Processor::new(), state, theme, scrollback, title: None }
+        Self {
+            term,
+            parser: Processor::new(),
+            state,
+            theme,
+            scrollback,
+            title: None,
+        }
     }
 
     fn build_term(
@@ -125,7 +139,10 @@ impl TerminalModel {
         scrollback: usize,
         state: Rc<RefCell<SharedState>>,
     ) -> Term<EventProxy> {
-        let config = Config { scrolling_history: scrollback, ..Config::default() };
+        let config = Config {
+            scrolling_history: scrollback,
+            ..Config::default()
+        };
         let dimensions = TermDimensions::new(cols, rows, scrollback);
         Term::new(config, &dimensions, EventProxy { state })
     }
@@ -146,7 +163,8 @@ impl TerminalModel {
         if self.size() == (cols, rows) {
             return;
         }
-        self.term.resize(TermDimensions::new(cols, rows, self.scrollback));
+        self.term
+            .resize(TermDimensions::new(cols, rows, self.scrollback));
     }
 
     /// Current size as `(cols, rows)`.
@@ -225,7 +243,13 @@ impl TerminalModel {
                 }
                 let mut text = String::new();
                 push_cell(&mut text, cell);
-                current = Some(StyledRun { text, start_col: col as u16, fg, bg, flags });
+                current = Some(StyledRun {
+                    text,
+                    start_col: col as u16,
+                    fg,
+                    bg,
+                    flags,
+                });
             }
         }
 
@@ -463,7 +487,11 @@ mod tests {
 
         let snapshot = term.snapshot();
         assert_eq!(snapshot.display_offset, 0);
-        assert!(snapshot.total_scrollback >= 5, "scrollback: {}", snapshot.total_scrollback);
+        assert!(
+            snapshot.total_scrollback >= 5,
+            "scrollback: {}",
+            snapshot.total_scrollback
+        );
 
         term.scroll_lines(5);
         assert_eq!(term.snapshot().display_offset, 5);
@@ -599,10 +627,16 @@ mod tests {
     fn changing_the_theme_recolors_the_snapshot() {
         let mut term = model(20, 3);
         term.feed(b"x");
-        assert_eq!(term.snapshot().lines[0].runs[0].fg, TerminalTheme::dark().foreground);
+        assert_eq!(
+            term.snapshot().lines[0].runs[0].fg,
+            TerminalTheme::dark().foreground
+        );
 
         term.set_theme(TerminalTheme::light());
-        assert_eq!(term.snapshot().lines[0].runs[0].fg, TerminalTheme::light().foreground);
+        assert_eq!(
+            term.snapshot().lines[0].runs[0].fg,
+            TerminalTheme::light().foreground
+        );
         assert_eq!(term.theme().background, TerminalTheme::light().background);
     }
 

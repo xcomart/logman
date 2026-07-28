@@ -302,7 +302,10 @@ mod tests {
 
         assert_eq!(store.len(), 2);
         assert_eq!(store.profiles()[0].id, keep.id);
-        assert_eq!(store.get(original.id).map(|p| p.name.as_str()), Some("renamed"));
+        assert_eq!(
+            store.get(original.id).map(|p| p.name.as_str()),
+            Some("renamed")
+        );
     }
 
     #[test]
