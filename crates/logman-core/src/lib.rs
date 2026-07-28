@@ -1,5 +1,6 @@
-//! Platform-independent core of logman: configuration paths, saved session
-//! profiles, OS keychain access, and the trusted host key database.
+//! Platform-independent core of logman: configuration paths, application
+//! settings, saved session profiles, OS keychain access, and the trusted host
+//! key database.
 //!
 //! This crate owns everything logman persists on disk or in the system
 //! credential store. It knows nothing about SSH transport, terminal emulation,
@@ -30,8 +31,12 @@ pub mod known_hosts;
 pub mod paths;
 pub mod profile;
 pub mod secrets;
+pub mod settings;
 
 pub use known_hosts::{HostKeyStatus, KnownHosts};
-pub use paths::{config_dir, config_file, known_hosts_file};
-pub use profile::{AuthMethod, ProfileStore, SessionProfile};
+pub use paths::{config_dir, config_file, known_hosts_file, settings_file};
+pub use profile::{AuthMethod, ProfileStore, SessionOverrides, SessionProfile};
 pub use secrets::{SecretStore, init as init_secrets};
+pub use settings::{
+    AppSettings, ConnectionSettings, EffectiveTerminal, TerminalSettings, UiTheme, WindowSettings,
+};

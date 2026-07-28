@@ -30,6 +30,40 @@ pub enum AuthMethod {
     Agent,
 }
 
+/// Per-session deviations from the global [`crate::AppSettings`].
+///
+/// Every field is optional: `None` means "inherit whatever the global settings
+/// say". Overrides are resolved by
+/// [`AppSettings::effective_terminal`](crate::AppSettings::effective_terminal),
+/// which also re-applies the global clamps, so a hand-edited profile cannot
+/// smuggle an absurd font size past the settings validation.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionOverrides {
+    /// Color scheme id for this session only.
+    pub scheme: Option<String>,
+    /// Font size for this session only.
+    pub font_size: Option<f32>,
+    /// Scrollback depth for this session only.
+    pub scrollback_lines: Option<usize>,
+    /// `TERM` value advertised to this host only.
+    pub term: Option<String>,
+}
+
+impl SessionOverrides {
+    /// Whether nothing is overridden, so the session runs on global settings.
+    ///
+    /// Used as the `skip_serializing_if` predicate for
+    /// [`SessionProfile::overrides`], which keeps `profiles.json` free of empty
+    /// `"overrides": {}` noise.
+    pub fn is_empty(&self) -> bool {
+        self.scheme.is_none()
+            && self.font_size.is_none()
+            && self.scrollback_lines.is_none()
+            && self.term.is_none()
+    }
+}
+
 /// A single saved connection: where to connect and how to authenticate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionProfile {
@@ -47,13 +81,20 @@ pub struct SessionProfile {
     pub auth: AuthMethod,
     /// Whether the password (or key passphrase) is kept in the OS keychain.
     pub save_secret: bool,
+    /// Per-session overrides; `None` fields inherit the global settings.
+    ///
+    /// Absent from older `profiles.json` files and omitted again when nothing
+    /// is overridden.
+    #[serde(default, skip_serializing_if = "SessionOverrides::is_empty")]
+    pub overrides: SessionOverrides,
 }
 
 impl SessionProfile {
     /// Create a profile with a freshly generated identifier.
     ///
-    /// `save_secret` starts out disabled; enable it explicitly before storing a
-    /// secret with [`crate::SecretStore::set`].
+    /// `save_secret` starts out disabled and no settings are overridden; enable
+    /// the former explicitly before storing a secret with
+    /// [`crate::SecretStore::set`].
     pub fn new(
         name: impl Into<String>,
         host: impl Into<String>,
@@ -69,6 +110,7 @@ impl SessionProfile {
             username: username.into(),
             auth,
             save_secret: false,
+            overrides: SessionOverrides::default(),
         }
     }
 
@@ -346,6 +388,83 @@ mod tests {
 
         let loaded = ProfileStore::load_from(&path).expect("load");
         assert_eq!(loaded.profiles()[0].name, "bom");
+    }
+
+    /// A `profiles.json` written before session overrides existed.
+    const LEGACY_PROFILES_JSON: &str = r#"{
+      "profiles": [
+        {
+          "id": "0e6d2a08-3a1f-4a2e-9c0b-6f7f1b2c3d4e",
+          "name": "legacy",
+          "host": "example.com",
+          "port": 22,
+          "username": "alice",
+          "auth": { "kind": "password" },
+          "save_secret": true
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn legacy_profiles_without_overrides_still_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("profiles.json");
+        std::fs::write(&path, LEGACY_PROFILES_JSON).expect("write");
+
+        let store = ProfileStore::load_from(&path).expect("load legacy profiles");
+        assert_eq!(store.len(), 1);
+        let profile = &store.profiles()[0];
+        assert_eq!(profile.name, "legacy");
+        assert!(profile.save_secret);
+        assert_eq!(profile.overrides, SessionOverrides::default());
+        assert!(profile.overrides.is_empty());
+    }
+
+    #[test]
+    fn empty_overrides_are_not_written_to_disk() {
+        let mut store = ProfileStore::default();
+        store.upsert(sample("plain"));
+
+        let json = serde_json::to_string(&store).expect("serialize");
+        assert!(
+            !json.contains("overrides"),
+            "empty overrides must be skipped, got {json}"
+        );
+    }
+
+    #[test]
+    fn non_empty_overrides_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("profiles.json");
+
+        let mut profile = sample("custom");
+        profile.overrides = SessionOverrides {
+            font_size: Some(18.0),
+            term: Some("xterm".to_string()),
+            ..SessionOverrides::default()
+        };
+        assert!(!profile.overrides.is_empty());
+
+        let mut store = ProfileStore::default();
+        store.upsert(profile.clone());
+        store.save_to(&path).expect("save");
+
+        let saved = std::fs::read_to_string(&path).expect("read");
+        assert!(saved.contains("overrides"), "got {saved}");
+
+        let loaded = ProfileStore::load_from(&path).expect("load");
+        assert_eq!(loaded.profiles(), &[profile]);
+    }
+
+    #[test]
+    fn unknown_profile_fields_are_ignored() {
+        // A file written by a future version must not break an older build.
+        let json = LEGACY_PROFILES_JSON.replace(
+            "\"save_secret\": true",
+            "\"save_secret\": true, \"future_field\": { \"nested\": 1 }",
+        );
+        let store: ProfileStore = serde_json::from_str(&json).expect("parse");
+        assert_eq!(store.len(), 1);
     }
 
     #[test]

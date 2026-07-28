@@ -22,6 +22,9 @@ const PROFILES_FILE_NAME: &str = "profiles.json";
 /// Name of the file holding the trusted SSH host keys.
 const KNOWN_HOSTS_FILE_NAME: &str = "known_hosts";
 
+/// Name of the file holding the serialized [`crate::AppSettings`].
+const SETTINGS_FILE_NAME: &str = "settings.json";
+
 /// Byte order mark that Windows editors readily prepend to UTF-8 files.
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 
@@ -70,6 +73,15 @@ pub fn config_file() -> Result<PathBuf> {
 /// Fails when no home directory can be determined for the current user.
 pub fn known_hosts_file() -> Result<PathBuf> {
     Ok(config_dir()?.join(KNOWN_HOSTS_FILE_NAME))
+}
+
+/// Full path of the application settings file (`settings.json`).
+///
+/// # Errors
+///
+/// Fails when no home directory can be determined for the current user.
+pub fn settings_file() -> Result<PathBuf> {
+    Ok(config_dir()?.join(SETTINGS_FILE_NAME))
 }
 
 /// Build a unique temporary path next to `path`.
@@ -132,11 +144,14 @@ mod tests {
         let dir = config_dir().expect("config dir");
         let profiles = config_file().expect("config file");
         let hosts = known_hosts_file().expect("known hosts file");
+        let settings = settings_file().expect("settings file");
 
         assert_eq!(profiles.parent(), Some(dir.as_path()));
         assert_eq!(hosts.parent(), Some(dir.as_path()));
+        assert_eq!(settings.parent(), Some(dir.as_path()));
         assert_eq!(profiles.file_name().unwrap(), PROFILES_FILE_NAME);
         assert_eq!(hosts.file_name().unwrap(), KNOWN_HOSTS_FILE_NAME);
+        assert_eq!(settings.file_name().unwrap(), SETTINGS_FILE_NAME);
     }
 
     #[test]
