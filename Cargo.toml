@@ -48,6 +48,13 @@ async-trait = "0.1"
 bitflags = "2"
 tempfile = "3"
 
+# --- localization ---
+# `rust-i18n` compiles `crates/logman-app/locales/*.yml` into the binary, so
+# there is no runtime asset to ship; `sys-locale` is only consulted when the
+# user has not pinned a language in `settings.json`.
+rust-i18n = "4"
+sys-locale = "0.3"
+
 # --- async runtime (SSH transport only) ---
 tokio = { version = "1", features = [
     "rt-multi-thread",

@@ -1,0 +1,134 @@
+# Русский перевод. Структура ключей повторяет en.yml.
+_version: 1
+
+language:
+  name: Русский
+
+common:
+  cancel: Отмена
+  save: Сохранить
+  close: Закрыть
+  inherits: наследует
+
+menu:
+  new_session: Новый сеанс
+  settings: Настройки…
+  about: О программе logman
+  quit: Выход
+  session: Сеанс
+  mac:
+    new_session: Новый сеанс
+    close_session: Закрыть сеанс
+    quit: Завершить logman
+
+empty:
+  hint: "Нажмите %{shortcut}, чтобы подключиться к узлу."
+  saved_profiles: Сохранённые профили
+
+statusbar:
+  no_session: нет сеанса
+  idle: ожидание
+
+settings:
+  title: Настройки
+  save_failed: "Не удалось сохранить настройки: %{error}"
+  system_default: Как в системе
+  section:
+    appearance: Оформление
+    terminal: Терминал
+    connection: Новые подключения
+  ui_theme: Тема интерфейса
+  theme_dark: Тёмная
+  theme_light: Светлая
+  language: Язык
+  opacity: Непрозрачность
+  opacity_hint: "% (50–100)"
+  blur: Размывать рабочий стол за окном
+  scheme: Цветовая схема
+  font: Шрифт
+  font_size: Размер шрифта
+  font_size_hint: pt (6–32)
+  scrollback: Буфер прокрутки
+  scrollback_hint: строк (макс. 100000)
+  term: TERM
+  copy_on_select: Копировать выделение при отпускании мыши
+  port: Порт
+  username: Имя пользователя
+  username_placeholder: нет
+  keepalive: Keepalive
+  keepalive_hint: секунд (0 — отключено)
+  timeout: Таймаут подключения
+  timeout_hint: секунд
+
+connection:
+  title_new: Новое подключение
+  title_edit: Подключиться
+  connect: Подключиться
+  browse: Обзор…
+  edit: Изменить
+  delete: Удалить
+  select_file: Выбрать
+  saved_profiles: Сохранённые профили
+  empty_list: "Сохранённых профилей пока нет. Заполните форму и подключитесь — подключение сохранится автоматически."
+  name: Имя
+  host: Узел
+  port: Порт
+  username: Имя пользователя
+  authentication: Аутентификация
+  password: Пароль
+  key_file: Файл ключа
+  passphrase: Кодовая фраза
+  auth:
+    password: Пароль
+    key: Закрытый ключ
+    agent: Агент
+  password_placeholder: пароль
+  passphrase_placeholder: необязательно
+  inherit_placeholder: наследовать
+  remember_password: Сохранить пароль в системном хранилище ключей
+  remember_passphrase: Сохранить кодовую фразу в системном хранилище ключей
+  agent_unsupported: Аутентификация через агент SSH пока не поддерживается.
+  saved_secret: Будет использован секрет из системного хранилища ключей, если не ввести новый.
+  need_host: Укажите узел для подключения.
+  need_username: Укажите пользователя для входа.
+  need_key: Выберите файл закрытого ключа для аутентификации.
+  need_port: Укажите порт от 1 до 65535.
+  delete_failed_list: "Профиль удалён, но список профилей не удалось записать (%{error})."
+  delete_failed_secret: "Профиль удалён, но его запись в хранилище ключей не удалось удалить (%{error})."
+  delete_failed_both: "Профиль удалён, но список профилей не удалось записать (%{list_error}), а его запись в хранилище ключей не удалось удалить (%{secret_error})."
+  connect_problems: "Подключение выполняется, но сохранить удалось не всё:"
+  problem_secret_read: "Не удалось прочитать сохранённый секрет (%{error})."
+  problem_profile_save: "Не удалось сохранить профиль (%{error})."
+  problem_no_secret: Нечего сохранять в хранилище ключей.
+  problem_secret_save: "Не удалось сохранить секрет (%{error})."
+  problem_secret_delete: "Не удалось удалить ранее сохранённый секрет (%{error})."
+  overrides:
+    title: Настройки сеанса
+    none: наследует все глобальные настройки
+    one: переопределена 1 настройка
+    many: "переопределено настроек: %{count}"
+    scheme: Цветовая схема
+    scheme_default: По умолчанию
+    font_size: Размер шрифта
+    scrollback: Буфер прокрутки
+    term: TERM
+    inherits_value: "наследует %{value}"
+    inherits_lines: "наследует %{value} строк"
+
+session:
+  connecting: подключение
+  connected: подключено
+  disconnected: "отключено: %{reason}"
+  failed: "%{kind}: %{message}"
+  reconnect: Переподключиться
+  overlay:
+    connecting: "Подключение к %{host}..."
+    disconnected: "Отключено от %{host}"
+    failed: "Не удалось подключиться к %{host}"
+
+about:
+  title: О программе logman
+  version: "Версия %{version}"
+  tagline: Кроссплатформенный графический SSH-терминал на основе gpui.
+  license: "Распространяется по лицензии %{license}."
+  credits: Собран на основе gpui 0.2.2 (встроенный и пропатченный), russh и alacritty_terminal.

@@ -1,0 +1,179 @@
+# Interface strings, compiled into the binary by `rust_i18n::i18n!` in
+# `src/main.rs`. This file is the source of truth: every other locale mirrors
+# its keys, and a key missing from a translation falls back to the value here.
+#
+# Not translated anywhere, on purpose: the "logman" wordmark itself, element
+# ids, gpui key names, color scheme ids, and the `Cmd`/`Ctrl` modifier names.
+_version: 1
+
+# What this language calls itself, for the settings dialog's language list.
+# Written in the language of this file and never translated into another one:
+# a user who has landed in a language they cannot read has to be able to find
+# their own in the list. Every locale file must define it — the list of shipped
+# languages is derived from these files, and this key is what names each entry.
+language:
+  name: English
+
+# Shared by more than one dialog.
+common:
+  cancel: Cancel
+  save: Save
+  close: Close
+  # Drawn on the card of a color-scheme picker that has no colors of its own,
+  # i.e. the entry standing for "keep whatever the global setting says".
+  inherits: inherits
+
+# The in-app dropdown menu, and the macOS menu bar below it. The two differ
+# only in capitalisation in English, but a translation may need to distinguish
+# them, so they are separate keys.
+menu:
+  new_session: New session
+  settings: Settings…
+  about: About logman
+  quit: Quit
+  session: Session
+  mac:
+    new_session: New Session
+    close_session: Close Session
+    quit: Quit logman
+
+# The placeholder shown while no session is open.
+empty:
+  # `%{shortcut}` is "Cmd+T" or "Ctrl+T"; neither is translated.
+  hint: Press %{shortcut} to connect to a host.
+  saved_profiles: Saved profiles
+
+# The bar along the bottom of the window.
+statusbar:
+  no_session: no session
+  idle: idle
+
+settings:
+  title: Settings
+  save_failed: "Could not save the settings: %{error}"
+  # Both the first row of the language list and the font list's "leave it to
+  # the OS" row, so it has to read well for either.
+  system_default: System default
+  section:
+    appearance: Appearance
+    terminal: Terminal
+    connection: New connections
+  ui_theme: UI theme
+  theme_dark: Dark
+  theme_light: Light
+  language: Language
+  opacity: Opacity
+  opacity_hint: "% (50–100)"
+  blur: Blur the desktop behind the window
+  scheme: Color scheme
+  font: Font
+  font_size: Font size
+  font_size_hint: pt (6–32)
+  scrollback: Scrollback
+  scrollback_hint: lines (max 100000)
+  # The name of the environment variable; stays "TERM" in every language.
+  term: TERM
+  copy_on_select: Copy the selection on mouse release
+  port: Port
+  username: Username
+  username_placeholder: none
+  keepalive: Keepalive
+  keepalive_hint: seconds (0 disables)
+  timeout: Connect timeout
+  timeout_hint: seconds
+
+# The connection dialog: the saved-profile column, the form, and the messages
+# the dialog reports back in.
+#
+# Sample values are *not* here: the host, name and key-path placeholders spell
+# out an example rather than a word, and read the same in every language.
+connection:
+  title_new: New connection
+  title_edit: Connect
+  connect: Connect
+  browse: Browse…
+  edit: Edit
+  delete: Delete
+  # Confirmation button of the platform file picker for the private key.
+  select_file: Select
+  saved_profiles: Saved profiles
+  empty_list: No saved profiles yet. Fill in the form and connect — the connection is saved automatically.
+  name: Name
+  host: Host
+  port: Port
+  username: Username
+  authentication: Authentication
+  password: Password
+  key_file: Key file
+  passphrase: Passphrase
+  # Labels of the authentication picker. Their ids are not translated.
+  auth:
+    password: Password
+    key: Private key
+    agent: Agent
+  password_placeholder: password
+  passphrase_placeholder: optional
+  # Placeholder of every per-session override field; a blank field inherits.
+  inherit_placeholder: inherit
+  remember_password: Remember password in the system keychain
+  remember_passphrase: Remember passphrase in the system keychain
+  agent_unsupported: SSH agent authentication is not supported yet.
+  saved_secret: A secret saved in the system keychain will be used unless you type a new one.
+  need_host: Enter the host to connect to.
+  need_username: Enter the user to log in as.
+  need_key: Choose the private key file to authenticate with.
+  need_port: Enter a port between 1 and 65535.
+  # Deleting a profile. Every outcome is a whole sentence of its own rather than
+  # clauses the code joins, because neither the order nor the conjunction of
+  # such a join survives translation. `%{error}` is the underlying failure and
+  # stays in English.
+  delete_failed_list: "The profile was deleted, but the profile list could not be written (%{error})."
+  delete_failed_secret: "The profile was deleted, but its keychain entry could not be removed (%{error})."
+  delete_failed_both: "The profile was deleted, but the profile list could not be written (%{list_error}) and its keychain entry could not be removed (%{secret_error})."
+  # Connecting while something could not be stored: the heading, then one whole
+  # sentence per problem, each on a line of its own.
+  connect_problems: "Connecting, but not everything could be saved:"
+  problem_secret_read: "The saved secret could not be read (%{error})."
+  problem_profile_save: "The profile could not be saved (%{error})."
+  problem_no_secret: There was no secret to put in the keychain.
+  problem_secret_save: "The secret could not be saved (%{error})."
+  problem_secret_delete: "A previously saved secret could not be removed (%{error})."
+  # The collapsible per-session section. The counts are two keys rather than one
+  # plural rule, since only "one" and "more than one" are ever needed.
+  overrides:
+    title: Session overrides
+    none: inherits every global setting
+    one: 1 setting overridden
+    many: "%{count} settings overridden"
+    scheme: Color scheme
+    # The card that keeps the global scheme instead of choosing one.
+    scheme_default: Default
+    font_size: Font size
+    scrollback: Scrollback
+    term: TERM
+    inherits_value: "inherits %{value}"
+    inherits_lines: "inherits %{value} lines"
+
+# Session life cycle, shown in the status bar and in the terminal overlay.
+#
+# `%{reason}`, `%{kind}` and `%{message}` are produced by the SSH layer and are
+# English wherever they appear; only the sentence around them is translated.
+session:
+  connecting: connecting
+  connected: connected
+  disconnected: "disconnected: %{reason}"
+  failed: "%{kind}: %{message}"
+  reconnect: Reconnect
+  overlay:
+    connecting: "Connecting to %{host}..."
+    disconnected: "Disconnected from %{host}"
+    failed: "Could not connect to %{host}"
+
+# The about box. The version, the licence name and the names of the libraries
+# are values, not words, and are never translated.
+about:
+  title: About logman
+  version: "Version %{version}"
+  tagline: A multi-platform GUI SSH terminal built on gpui.
+  license: "Licensed under %{license}."
+  credits: Built with gpui 0.2.2 (vendored and patched), russh and alacritty_terminal.

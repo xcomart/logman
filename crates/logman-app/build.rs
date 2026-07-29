@@ -1,4 +1,5 @@
-//! Embeds the application icon into the Windows executable.
+//! Embeds the application icon into the Windows executable, and re-runs the
+//! build when a translation changes.
 //!
 //! The icon goes in under resource ID 1, which is not arbitrary: gpui's
 //! Windows backend loads exactly `LoadImageW(module, MAKEINTRESOURCE(1), ...)`
@@ -10,6 +11,10 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=../../assets/icon.ico");
+    // `rust_i18n::i18n!` reads the YAML at macro expansion time, and a proc
+    // macro cannot register the files it read with cargo. Without this line an
+    // edited translation would not rebuild the crate.
+    println!("cargo:rerun-if-changed=locales");
 
     #[cfg(windows)]
     {

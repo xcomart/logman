@@ -47,6 +47,7 @@ use logman_term::{
 };
 
 use crate::app_settings;
+use crate::i18n::ts;
 use crate::session::{Session, SessionStatus};
 use crate::ui::{Button, ButtonVariant, theme};
 
@@ -542,17 +543,23 @@ impl TerminalView {
         let theme = theme(cx);
         let label = self.session.read(cx).profile().label();
 
-        let (headline, detail, reconnect) = match status {
+        // The detail line quotes the SSH layer verbatim, so it stays English;
+        // only the headline around it follows the locale.
+        let (headline, detail, reconnect): (SharedString, SharedString, bool) = match status {
             SessionStatus::Connected => return None,
-            SessionStatus::Connecting => {
-                (format!("Connecting to {label}..."), String::new(), false)
-            }
-            SessionStatus::Disconnected { reason } => {
-                (format!("Disconnected from {label}"), reason.clone(), true)
-            }
+            SessionStatus::Connecting => (
+                ts!("session.overlay.connecting", host = label),
+                SharedString::default(),
+                false,
+            ),
+            SessionStatus::Disconnected { reason } => (
+                ts!("session.overlay.disconnected", host = label),
+                reason.clone().into(),
+                true,
+            ),
             SessionStatus::Failed { kind, message } => (
-                format!("Could not connect to {label}"),
-                format!("{kind}: {message}"),
+                ts!("session.overlay.failed", host = label),
+                ts!("session.failed", kind = kind.to_string(), message = message),
                 true,
             ),
         };
@@ -583,7 +590,7 @@ impl TerminalView {
             })
             .when(reconnect, |this| {
                 this.child(
-                    Button::new("terminal-reconnect", "Reconnect")
+                    Button::new("terminal-reconnect", ts!("session.reconnect"))
                         .variant(ButtonVariant::Primary)
                         .on_click(move |_, _window, cx| {
                             session.update(cx, |session, cx| session.reconnect(cx));

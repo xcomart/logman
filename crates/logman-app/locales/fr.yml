@@ -1,0 +1,134 @@
+# Traduction française. La structure des clés reprend celle de en.yml.
+_version: 1
+
+language:
+  name: Français
+
+common:
+  cancel: Annuler
+  save: Enregistrer
+  close: Fermer
+  inherits: hérite
+
+menu:
+  new_session: Nouvelle session
+  settings: Préférences…
+  about: À propos de logman
+  quit: Quitter
+  session: Session
+  mac:
+    new_session: Nouvelle session
+    close_session: Fermer la session
+    quit: Quitter logman
+
+empty:
+  hint: Appuyez sur %{shortcut} pour vous connecter à un hôte.
+  saved_profiles: Profils enregistrés
+
+statusbar:
+  no_session: aucune session
+  idle: inactif
+
+settings:
+  title: Préférences
+  save_failed: "Impossible d'enregistrer les préférences : %{error}"
+  system_default: Par défaut du système
+  section:
+    appearance: Apparence
+    terminal: Terminal
+    connection: Nouvelles connexions
+  ui_theme: Thème de l'interface
+  theme_dark: Sombre
+  theme_light: Clair
+  language: Langue
+  opacity: Opacité
+  opacity_hint: "% (50–100)"
+  blur: Flouter le bureau derrière la fenêtre
+  scheme: Palette de couleurs
+  font: Police
+  font_size: Taille de police
+  font_size_hint: pt (6–32)
+  scrollback: Historique
+  scrollback_hint: lignes (max. 100000)
+  term: TERM
+  copy_on_select: Copier la sélection au relâchement de la souris
+  port: Port
+  username: Nom d'utilisateur
+  username_placeholder: aucun
+  keepalive: Keepalive
+  keepalive_hint: secondes (0 désactive)
+  timeout: Délai de connexion
+  timeout_hint: secondes
+
+connection:
+  title_new: Nouvelle connexion
+  title_edit: Se connecter
+  connect: Se connecter
+  browse: Parcourir…
+  edit: Modifier
+  delete: Supprimer
+  select_file: Sélectionner
+  saved_profiles: Profils enregistrés
+  empty_list: "Aucun profil enregistré pour l'instant. Remplissez le formulaire et connectez-vous : la connexion est enregistrée automatiquement."
+  name: Nom
+  host: Hôte
+  port: Port
+  username: Nom d'utilisateur
+  authentication: Authentification
+  password: Mot de passe
+  key_file: Fichier de clé
+  passphrase: Phrase secrète
+  auth:
+    password: Mot de passe
+    key: Clé privée
+    agent: Agent
+  password_placeholder: mot de passe
+  passphrase_placeholder: facultatif
+  inherit_placeholder: hériter
+  remember_password: Mémoriser le mot de passe dans le trousseau du système
+  remember_passphrase: Mémoriser la phrase secrète dans le trousseau du système
+  agent_unsupported: L'authentification par agent SSH n'est pas encore prise en charge.
+  saved_secret: Le secret enregistré dans le trousseau du système sera utilisé, sauf si vous en saisissez un nouveau.
+  need_host: Indiquez l'hôte auquel vous connecter.
+  need_username: Indiquez l'utilisateur avec lequel vous connecter.
+  need_key: Choisissez le fichier de clé privée servant à l'authentification.
+  need_port: Indiquez un port compris entre 1 et 65535.
+  delete_failed_list: "Le profil a été supprimé, mais la liste des profils n'a pas pu être écrite (%{error})."
+  delete_failed_secret: "Le profil a été supprimé, mais son entrée dans le trousseau n'a pas pu être retirée (%{error})."
+  delete_failed_both: "Le profil a été supprimé, mais la liste des profils n'a pas pu être écrite (%{list_error}) et son entrée dans le trousseau n'a pas pu être retirée (%{secret_error})."
+  connect_problems: "Connexion en cours, mais tout n'a pas pu être enregistré :"
+  problem_secret_read: "Le secret enregistré n'a pas pu être lu (%{error})."
+  problem_profile_save: "Le profil n'a pas pu être enregistré (%{error})."
+  problem_no_secret: Aucun secret à placer dans le trousseau.
+  problem_secret_save: "Le secret n'a pas pu être enregistré (%{error})."
+  problem_secret_delete: "Un secret enregistré précédemment n'a pas pu être retiré (%{error})."
+  overrides:
+    title: Réglages de la session
+    none: hérite de tous les réglages globaux
+    one: 1 réglage remplacé
+    many: "%{count} réglages remplacés"
+    scheme: Palette de couleurs
+    scheme_default: Par défaut
+    font_size: Taille de police
+    scrollback: Historique
+    term: TERM
+    inherits_value: "hérite de %{value}"
+    inherits_lines: "hérite de %{value} lignes"
+
+session:
+  connecting: connexion
+  connected: connecté
+  disconnected: "déconnecté : %{reason}"
+  failed: "%{kind} : %{message}"
+  reconnect: Se reconnecter
+  overlay:
+    connecting: "Connexion à %{host}..."
+    disconnected: "Déconnecté de %{host}"
+    failed: "Impossible de se connecter à %{host}"
+
+about:
+  title: À propos de logman
+  version: "Version %{version}"
+  tagline: Un terminal SSH graphique multiplateforme bâti sur gpui.
+  license: "Distribué sous licence %{license}."
+  credits: Construit avec gpui 0.2.2 (intégré et corrigé), russh et alacritty_terminal.

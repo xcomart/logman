@@ -1,0 +1,134 @@
+# 简体中文翻译。键结构与 en.yml 保持一致。
+_version: 1
+
+language:
+  name: 简体中文
+
+common:
+  cancel: 取消
+  save: 保存
+  close: 关闭
+  inherits: 继承
+
+menu:
+  new_session: 新建会话
+  settings: 设置…
+  about: 关于 logman
+  quit: 退出
+  session: 会话
+  mac:
+    new_session: 新建会话
+    close_session: 关闭会话
+    quit: 退出 logman
+
+empty:
+  hint: "按 %{shortcut} 连接到主机。"
+  saved_profiles: 已保存的配置
+
+statusbar:
+  no_session: 无会话
+  idle: 空闲
+
+settings:
+  title: 设置
+  save_failed: "无法保存设置：%{error}"
+  system_default: 系统默认
+  section:
+    appearance: 外观
+    terminal: 终端
+    connection: 新建连接
+  ui_theme: 界面主题
+  theme_dark: 深色
+  theme_light: 浅色
+  language: 语言
+  opacity: 不透明度
+  opacity_hint: "% (50–100)"
+  blur: 模糊窗口后面的桌面
+  scheme: 配色方案
+  font: 字体
+  font_size: 字号
+  font_size_hint: pt (6–32)
+  scrollback: 回滚缓冲
+  scrollback_hint: 行（最多 100000）
+  term: TERM
+  copy_on_select: 松开鼠标时复制所选内容
+  port: 端口
+  username: 用户名
+  username_placeholder: 无
+  keepalive: 保活
+  keepalive_hint: 秒（0 表示禁用）
+  timeout: 连接超时
+  timeout_hint: 秒
+
+connection:
+  title_new: 新建连接
+  title_edit: 连接
+  connect: 连接
+  browse: 浏览…
+  edit: 编辑
+  delete: 删除
+  select_file: 选择
+  saved_profiles: 已保存的配置
+  empty_list: 还没有保存的配置。填写表单并连接后，连接会自动保存。
+  name: 名称
+  host: 主机
+  port: 端口
+  username: 用户名
+  authentication: 认证方式
+  password: 密码
+  key_file: 密钥文件
+  passphrase: 密钥口令
+  auth:
+    password: 密码
+    key: 私钥
+    agent: 代理
+  password_placeholder: 密码
+  passphrase_placeholder: 可选
+  inherit_placeholder: 继承
+  remember_password: 将密码保存到系统钥匙串
+  remember_passphrase: 将密钥口令保存到系统钥匙串
+  agent_unsupported: 暂不支持 SSH 代理认证。
+  saved_secret: 除非另行输入，否则将使用保存在系统钥匙串中的密钥信息。
+  need_host: 请输入要连接的主机。
+  need_username: 请输入登录用户名。
+  need_key: 请选择用于认证的私钥文件。
+  need_port: 请输入 1 到 65535 之间的端口。
+  delete_failed_list: "配置已删除，但无法写入配置列表（%{error}）。"
+  delete_failed_secret: "配置已删除，但无法移除其钥匙串条目（%{error}）。"
+  delete_failed_both: "配置已删除，但无法写入配置列表（%{list_error}），也无法移除其钥匙串条目（%{secret_error}）。"
+  connect_problems: "正在连接，但部分内容未能保存："
+  problem_secret_read: "无法读取已保存的密钥信息（%{error}）。"
+  problem_profile_save: "无法保存配置（%{error}）。"
+  problem_no_secret: 没有可存入钥匙串的密钥信息。
+  problem_secret_save: "无法保存密钥信息（%{error}）。"
+  problem_secret_delete: "无法移除先前保存的密钥信息（%{error}）。"
+  overrides:
+    title: 会话覆盖设置
+    none: 全部继承全局设置
+    one: 已覆盖 1 项设置
+    many: "已覆盖 %{count} 项设置"
+    scheme: 配色方案
+    scheme_default: 默认
+    font_size: 字号
+    scrollback: 回滚缓冲
+    term: TERM
+    inherits_value: "继承 %{value}"
+    inherits_lines: "继承 %{value} 行"
+
+session:
+  connecting: 连接中
+  connected: 已连接
+  disconnected: "已断开：%{reason}"
+  failed: "%{kind}：%{message}"
+  reconnect: 重新连接
+  overlay:
+    connecting: "正在连接 %{host}..."
+    disconnected: "已与 %{host} 断开连接"
+    failed: "无法连接到 %{host}"
+
+about:
+  title: 关于 logman
+  version: "版本 %{version}"
+  tagline: 基于 gpui 构建的跨平台图形界面 SSH 终端。
+  license: "以 %{license} 许可证发布。"
+  credits: 基于 gpui 0.2.2（已内置并打补丁）、russh 和 alacritty_terminal 构建。

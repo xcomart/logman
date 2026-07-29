@@ -19,6 +19,12 @@ const PREVIEW_HEIGHT: f32 = 34.;
 /// Diameter of one accent chip in the preview strip.
 const CHIP_SIZE: f32 = 9.;
 
+/// Text drawn on a card that has no colors of its own.
+///
+/// English, because the widget layer has no locale of its own; every caller in
+/// the application overrides it with [`SchemeSwatch::placeholder_label`].
+const DEFAULT_PLACEHOLDER_LABEL: &str = "inherits";
+
 /// Callback fired with the id of the newly picked scheme.
 type SelectHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
@@ -40,9 +46,12 @@ pub struct SchemeSwatch {
     id: SharedString,
     /// Label shown under the preview.
     name: SharedString,
-    /// Colors to preview. `None` renders a muted "inherits" card instead,
+    /// Colors to preview. `None` renders a muted placeholder card instead,
     /// which is how a per-session picker offers "use the global scheme".
     preview: Option<SchemePreview>,
+    /// Text drawn on that placeholder card. Taken from the caller so the widget
+    /// needs no translations of its own.
+    placeholder_label: SharedString,
 }
 
 impl SchemeSwatch {
@@ -52,12 +61,21 @@ impl SchemeSwatch {
             id: id.into(),
             name: name.into(),
             preview: None,
+            placeholder_label: SharedString::new_static(DEFAULT_PLACEHOLDER_LABEL),
         }
     }
 
     /// Attaches the colors to draw in this entry's preview strip.
     pub fn preview(mut self, preview: SchemePreview) -> Self {
         self.preview = Some(preview);
+        self
+    }
+
+    /// Sets the text of the placeholder card shown when there is no preview.
+    ///
+    /// Callers pass a translated string; the built-in default is English.
+    pub fn placeholder_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.placeholder_label = label.into();
         self
     }
 }
@@ -199,7 +217,7 @@ impl RenderOnce for SchemePicker {
                                 .border_color(theme.border)
                                 .text_size(px(11.))
                                 .text_color(theme.text_muted)
-                                .child("inherits"),
+                                .child(entry.placeholder_label.clone()),
                         };
 
                         div()
