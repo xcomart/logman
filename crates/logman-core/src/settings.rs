@@ -204,6 +204,13 @@ impl ConnectionSettings {
 pub struct AppSettings {
     /// Schema version of the file; see [`AppSettings::CURRENT_VERSION`].
     pub version: u32,
+    /// BCP 47 tag of the interface language, e.g. `"ko"` or `"zh-CN"`.
+    ///
+    /// `None` — the default — means "follow the operating system". The list of
+    /// tags logman actually ships translations for lives in the app layer, so
+    /// nothing here validates the string: an unknown tag is resolved the same
+    /// way `None` is, by falling back to the system locale and then to English.
+    pub language: Option<String>,
     /// UI chrome theme.
     pub ui_theme: UiTheme,
     /// Window background treatment.
@@ -218,6 +225,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             version: Self::CURRENT_VERSION,
+            language: None,
             ui_theme: UiTheme::default(),
             window: WindowSettings::default(),
             terminal: TerminalSettings::default(),
@@ -302,6 +310,11 @@ impl AppSettings {
     /// and blank strings fall back to their defaults. The UI should call it
     /// again after editing values.
     pub fn sanitize(&mut self) {
+        if let Some(language) = &self.language
+            && language.trim().is_empty()
+        {
+            self.language = None;
+        }
         self.window.sanitize();
         self.terminal.sanitize();
         self.connection.sanitize();
@@ -363,6 +376,7 @@ mod tests {
     fn defaults_match_the_documented_values() {
         let settings = AppSettings::default();
         assert_eq!(settings.version, 1);
+        assert_eq!(settings.language, None);
         assert_eq!(settings.ui_theme, UiTheme::Dark);
         assert_eq!(settings.window.background_opacity, 1.0);
         assert!(!settings.window.background_blur);
@@ -396,6 +410,7 @@ mod tests {
         let path = dir.path().join("cfg").join("settings.json");
 
         let settings = AppSettings {
+            language: Some("zh-CN".to_string()),
             ui_theme: UiTheme::Light,
             window: WindowSettings {
                 background_opacity: 0.8,
@@ -556,7 +571,10 @@ mod tests {
 
     #[test]
     fn sanitize_restores_blank_strings() {
-        let mut settings = AppSettings::default();
+        let mut settings = AppSettings {
+            language: Some("  ".to_string()),
+            ..AppSettings::default()
+        };
         settings.terminal.scheme = "   ".to_string();
         settings.terminal.term = String::new();
         settings.terminal.font_family = Some("  ".to_string());
@@ -566,12 +584,26 @@ mod tests {
 
         settings.sanitize();
 
+        assert_eq!(settings.language, None);
         assert_eq!(settings.terminal.scheme, "one-dark");
         assert_eq!(settings.terminal.term, "xterm-256color");
         assert_eq!(settings.terminal.font_family, None);
         assert_eq!(settings.connection.default_username, None);
         assert_eq!(settings.connection.default_port, 22);
         assert_eq!(settings.connection.connect_timeout_secs, 15);
+    }
+
+    #[test]
+    fn sanitize_keeps_an_unknown_language_tag() {
+        // The app layer owns the list of shipped translations and degrades an
+        // unknown tag to the system locale, so core must not silently drop one:
+        // a typo has to survive a round trip for the UI to be able to show it.
+        let mut settings = AppSettings {
+            language: Some("xx-YZ".to_string()),
+            ..AppSettings::default()
+        };
+        settings.sanitize();
+        assert_eq!(settings.language.as_deref(), Some("xx-YZ"));
     }
 
     #[test]

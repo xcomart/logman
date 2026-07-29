@@ -6,10 +6,11 @@
 //! or persist — it only reports that it was dismissed.
 
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render,
-    SharedString, Window, div, prelude::*, px,
+    App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, Window,
+    div, prelude::*, px,
 };
 
+use crate::i18n::ts;
 use crate::ui::{Button, ButtonVariant, modal, theme};
 
 /// Width of the dialog panel.
@@ -18,20 +19,15 @@ const DIALOG_WIDTH: f32 = 420.;
 /// Version of the `logman` binary, taken from its `Cargo.toml`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// One-line summary of what the application is.
-const TAGLINE: &str = "A multi-platform GUI SSH terminal built on gpui.";
-
 /// Project home page, opened by the repository button.
 const REPOSITORY_URL: &str = "https://github.com/xcomart/logman";
 
 /// Label of the repository button; the URL without its scheme.
 const REPOSITORY_LABEL: &str = "github.com/xcomart/logman";
 
-/// Licence the application is distributed under.
+/// Licence the application is distributed under. A licence identifier, so it
+/// reads the same in every language.
 const LICENSE: &str = "Apache-2.0";
-
-/// The third-party work the application leans on.
-const CREDITS: &str = "Built with gpui 0.2.2 (vendored and patched), russh and alacritty_terminal.";
 
 /// Emitted by [`AboutDialog`] when the user closes it.
 pub enum AboutDialogEvent {
@@ -142,7 +138,7 @@ impl Render for AboutDialog {
                 div()
                     .text_size(px(12.))
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(format!("Version {VERSION}"))),
+                    .child(ts!("about.version", version = VERSION)),
             );
 
         let repository = Button::new("about-repository", REPOSITORY_LABEL)
@@ -156,11 +152,11 @@ impl Render for AboutDialog {
             .gap(px(2.))
             .text_size(px(11.))
             .text_color(theme.text_muted)
-            .child(div().child(SharedString::from(format!("Licensed under {LICENSE}."))))
-            .child(div().child(CREDITS));
+            .child(div().child(ts!("about.license", license = LICENSE)))
+            .child(div().child(ts!("about.credits")));
 
         let close = div().flex().flex_row().justify_end().child(
-            Button::new("about-close", "Close")
+            Button::new("about-close", ts!("common.close"))
                 .variant(ButtonVariant::Primary)
                 .on_click({
                     let this = this.clone();
@@ -179,7 +175,7 @@ impl Render for AboutDialog {
                 div()
                     .text_size(px(13.))
                     .text_color(theme.text)
-                    .child(TAGLINE),
+                    .child(ts!("about.tagline")),
             )
             .child(repository)
             .child(footnotes)
@@ -203,7 +199,7 @@ impl Render for AboutDialog {
             .on_key_down(cx.listener(Self::on_key_down))
             .child(modal(
                 "about-modal",
-                "About logman",
+                ts!("about.title"),
                 px(DIALOG_WIDTH),
                 body,
                 on_dismiss,

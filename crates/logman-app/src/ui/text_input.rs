@@ -209,6 +209,20 @@ impl TextInput {
         self
     }
 
+    /// Replaces the text shown while the field is empty.
+    ///
+    /// The builder above covers a hint that is fixed for the life of the field.
+    /// This is for the ones that have to follow a language switch, since the
+    /// field entity outlives the locale it was created under.
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
     /// Renders every grapheme as a bullet, for password entry.
     ///
     /// The stored content is untouched; only the rendered string is masked.
