@@ -19,8 +19,8 @@ use std::sync::Once;
 
 use gpui::{
     App, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    KeyBinding, KeyDownEvent, MouseButton, PathPromptOptions, Render, SharedString, Window,
-    actions, div, prelude::*, px,
+    KeyBinding, KeyDownEvent, MouseButton, PathPromptOptions, Render, ScrollHandle, SharedString,
+    Window, actions, div, prelude::*, px,
 };
 use logman_core::{AuthMethod, ProfileStore, SecretStore, SessionOverrides, SessionProfile};
 use logman_ssh::SshAuth;
@@ -257,6 +257,9 @@ pub struct ConnectionDialog {
     focus_handle: FocusHandle,
     /// Field to focus on the next render, set when the dialog opens.
     pending_focus: Option<FocusTarget>,
+    /// Scroll position of everything above the footer, so that expanding the
+    /// overrides section can reveal it.
+    body_scroll: ScrollHandle,
     /// Display name of the connection.
     name_input: Entity<TextInput>,
     /// Host name or address.
@@ -366,6 +369,7 @@ impl ConnectionDialog {
             status: None,
             focus_handle: cx.focus_handle(),
             pending_focus: None,
+            body_scroll: ScrollHandle::new(),
             name_input,
             host_input,
             port_input,
@@ -486,6 +490,8 @@ impl ConnectionDialog {
             .update(cx, |input, cx| input.clear(cx));
         self.override_term_input
             .update(cx, |input, cx| input.clear(cx));
+
+        self.body_scroll.scroll_to_item(0);
     }
 
     /// Copy `profile` into the form and remember that it is being edited.
@@ -577,6 +583,10 @@ impl ConnectionDialog {
     /// Expand or collapse the "Session overrides" section.
     fn toggle_overrides(&mut self, cx: &mut Context<Self>) {
         self.overrides_open = !self.overrides_open;
+        if self.overrides_open {
+            // Index of the section within the scrolled body; see `render`.
+            self.body_scroll.scroll_to_item(1);
+        }
         cx.notify();
     }
 
@@ -1144,6 +1154,7 @@ impl ConnectionDialog {
         div()
             .flex()
             .flex_col()
+            .flex_none()
             .gap(px(10.))
             .child(div().h(px(1.)).w_full().flex_none().bg(theme.border))
             .children(status)
@@ -1275,6 +1286,7 @@ impl ConnectionDialog {
         div()
             .flex()
             .flex_col()
+            .flex_none()
             .w_full()
             .child(div().h(px(1.)).w_full().flex_none().bg(theme.border))
             .child(
@@ -1335,20 +1347,35 @@ impl Render for ConnectionDialog {
             "New connection"
         };
 
+        // Only the form scrolls; the footer stays put. The modal caps the panel
+        // at the window height, and the `min_h_0` chain from here down is what
+        // turns that cap into a scrolling body instead of a clipped one.
         let body = div()
             .flex()
             .flex_col()
+            .min_h_0()
             .gap(px(12.))
             .child(
                 div()
+                    .id("connection-body")
+                    .track_scroll(&self.body_scroll)
                     .flex()
-                    .flex_row()
-                    .items_start()
-                    .gap(px(16.))
-                    .child(self.render_profile_list(cx))
-                    .child(self.render_form(cx)),
+                    .flex_col()
+                    .min_h_0()
+                    .gap(px(12.))
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_none()
+                            .items_start()
+                            .gap(px(16.))
+                            .child(self.render_profile_list(cx))
+                            .child(self.render_form(cx)),
+                    )
+                    .child(self.render_overrides(cx)),
             )
-            .child(self.render_overrides(cx))
             .child(self.render_footer(cx));
 
         let on_dismiss = {
