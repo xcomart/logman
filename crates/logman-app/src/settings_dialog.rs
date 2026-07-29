@@ -683,9 +683,12 @@ impl Render for SettingsDialog {
 
         self.apply_pending_focus(window, cx);
 
+        // The `min_h_0` chain lets the scroll area shrink below its cap when
+        // the modal hits the window height, keeping the footer on screen.
         let body = div()
             .flex()
             .flex_col()
+            .min_h_0()
             .gap(px(12.))
             .child(
                 div()
@@ -693,6 +696,7 @@ impl Render for SettingsDialog {
                     .track_scroll(&self.body_scroll)
                     .flex()
                     .flex_col()
+                    .min_h_0()
                     .gap(px(14.))
                     .max_h(px(BODY_MAX_HEIGHT))
                     .overflow_y_scroll()
