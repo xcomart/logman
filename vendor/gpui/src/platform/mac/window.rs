@@ -1270,10 +1270,21 @@ impl PlatformWindow for MacWindow {
             };
             this.native_window.setBackgroundColor_(background_color);
 
-            if NSAppKitVersionNumber < NSAppKitVersionNumber12_0 {
+            // On macOS Tahoe (26) Liquid Glass reworked the private layer tree of
+            // `NSVisualEffectView`, so the tinting workarounds in `remove_layer_background` no
+            // longer apply and the backdrop ends up unblurred. Use the legacy path there too.
+            let legacy_blur = NSAppKitVersionNumber < NSAppKitVersionNumber12_0
+                || is_macos_version_at_least(NSOperatingSystemVersion::new(26, 0, 0));
+
+            if legacy_blur {
                 // Whether `-[NSVisualEffectView respondsToSelector:@selector(_updateProxyLayer)]`.
                 // On macOS Catalina/Big Sur `NSVisualEffectView` doesn’t own concrete sublayers
                 // but uses a `CAProxyLayer`. Use the legacy WindowServer API.
+                if let Some(blur_view) = this.blurred_view {
+                    NSView::removeFromSuperview(blur_view);
+                    this.blurred_view = None;
+                }
+
                 let blur_radius = if background_appearance == WindowBackgroundAppearance::Blurred {
                     80
                 } else {
