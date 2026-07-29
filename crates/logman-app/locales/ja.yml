@@ -1,0 +1,134 @@
+# 日本語訳。キー構成は en.yml と同じ。
+_version: 1
+
+language:
+  name: 日本語
+
+common:
+  cancel: キャンセル
+  save: 保存
+  close: 閉じる
+  inherits: 継承
+
+menu:
+  new_session: 新規セッション
+  settings: 設定…
+  about: logman について
+  quit: 終了
+  session: セッション
+  mac:
+    new_session: 新規セッション
+    close_session: セッションを閉じる
+    quit: logman を終了
+
+empty:
+  hint: "%{shortcut} を押してホストに接続します。"
+  saved_profiles: 保存済みプロファイル
+
+statusbar:
+  no_session: セッションなし
+  idle: 待機中
+
+settings:
+  title: 設定
+  save_failed: "設定を保存できませんでした: %{error}"
+  system_default: システムのデフォルト
+  section:
+    appearance: 外観
+    terminal: ターミナル
+    connection: 新規接続
+  ui_theme: UI テーマ
+  theme_dark: ダーク
+  theme_light: ライト
+  language: 言語
+  opacity: 不透明度
+  opacity_hint: "% (50–100)"
+  blur: ウィンドウの背後のデスクトップをぼかす
+  scheme: カラースキーム
+  font: フォント
+  font_size: フォントサイズ
+  font_size_hint: pt (6–32)
+  scrollback: スクロールバック
+  scrollback_hint: 行 (最大 100000)
+  term: TERM
+  copy_on_select: マウスを離したときに選択範囲をコピー
+  port: ポート
+  username: ユーザー名
+  username_placeholder: なし
+  keepalive: キープアライブ
+  keepalive_hint: 秒 (0 で無効)
+  timeout: 接続タイムアウト
+  timeout_hint: 秒
+
+connection:
+  title_new: 新規接続
+  title_edit: 接続
+  connect: 接続
+  browse: 参照…
+  edit: 編集
+  delete: 削除
+  select_file: 選択
+  saved_profiles: 保存済みプロファイル
+  empty_list: 保存済みプロファイルはまだありません。フォームに入力して接続すると、接続が自動的に保存されます。
+  name: 名前
+  host: ホスト
+  port: ポート
+  username: ユーザー名
+  authentication: 認証
+  password: パスワード
+  key_file: キーファイル
+  passphrase: パスフレーズ
+  auth:
+    password: パスワード
+    key: 秘密鍵
+    agent: エージェント
+  password_placeholder: パスワード
+  passphrase_placeholder: 任意
+  inherit_placeholder: 継承
+  remember_password: システムキーチェーンにパスワードを保存
+  remember_passphrase: システムキーチェーンにパスフレーズを保存
+  agent_unsupported: SSH エージェント認証はまだ対応していません。
+  saved_secret: 新しく入力しない限り、システムキーチェーンに保存されたシークレットを使用します。
+  need_host: 接続先のホストを入力してください。
+  need_username: ログインするユーザーを入力してください。
+  need_key: 認証に使う秘密鍵ファイルを選択してください。
+  need_port: 1 から 65535 の間のポートを入力してください。
+  delete_failed_list: "プロファイルを削除しましたが、プロファイル一覧を保存できませんでした (%{error})。"
+  delete_failed_secret: "プロファイルを削除しましたが、キーチェーンの項目を削除できませんでした (%{error})。"
+  delete_failed_both: "プロファイルを削除しましたが、プロファイル一覧を保存できず (%{list_error})、キーチェーンの項目も削除できませんでした (%{secret_error})。"
+  connect_problems: "接続しますが、一部を保存できませんでした:"
+  problem_secret_read: "保存されたシークレットを読み取れませんでした (%{error})。"
+  problem_profile_save: "プロファイルを保存できませんでした (%{error})。"
+  problem_no_secret: キーチェーンに保存するシークレットがありません。
+  problem_secret_save: "シークレットを保存できませんでした (%{error})。"
+  problem_secret_delete: "以前に保存したシークレットを削除できませんでした (%{error})。"
+  overrides:
+    title: セッション個別設定
+    none: すべてグローバル設定を継承します
+    one: 1 件を個別設定
+    many: "%{count} 件を個別設定"
+    scheme: カラースキーム
+    scheme_default: デフォルト
+    font_size: フォントサイズ
+    scrollback: スクロールバック
+    term: TERM
+    inherits_value: "%{value} を継承"
+    inherits_lines: "%{value} 行を継承"
+
+session:
+  connecting: 接続中
+  connected: 接続済み
+  disconnected: "切断: %{reason}"
+  failed: "%{kind}: %{message}"
+  reconnect: 再接続
+  overlay:
+    connecting: "%{host} に接続しています..."
+    disconnected: "%{host} から切断されました"
+    failed: "%{host} に接続できませんでした"
+
+about:
+  title: logman について
+  version: "バージョン %{version}"
+  tagline: gpui で作られたマルチプラットフォームの GUI SSH ターミナルです。
+  license: "%{license} ライセンスで配布されています。"
+  credits: gpui 0.2.2 (ベンダリングとパッチ適用)、russh、alacritty_terminal を利用しています。

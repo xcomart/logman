@@ -1,0 +1,134 @@
+# Traducción al español. La estructura de claves refleja la de en.yml.
+_version: 1
+
+language:
+  name: Español
+
+common:
+  cancel: Cancelar
+  save: Guardar
+  close: Cerrar
+  inherits: hereda
+
+menu:
+  new_session: Nueva sesión
+  settings: Configuración…
+  about: Acerca de logman
+  quit: Salir
+  session: Sesión
+  mac:
+    new_session: Nueva sesión
+    close_session: Cerrar sesión
+    quit: Salir de logman
+
+empty:
+  hint: Pulsa %{shortcut} para conectarte a un host.
+  saved_profiles: Perfiles guardados
+
+statusbar:
+  no_session: sin sesión
+  idle: inactivo
+
+settings:
+  title: Configuración
+  save_failed: "No se pudo guardar la configuración: %{error}"
+  system_default: Predeterminado del sistema
+  section:
+    appearance: Apariencia
+    terminal: Terminal
+    connection: Nuevas conexiones
+  ui_theme: Tema de la interfaz
+  theme_dark: Oscuro
+  theme_light: Claro
+  language: Idioma
+  opacity: Opacidad
+  opacity_hint: "% (50–100)"
+  blur: Difuminar el escritorio detrás de la ventana
+  scheme: Esquema de color
+  font: Fuente
+  font_size: Tamaño de fuente
+  font_size_hint: pt (6–32)
+  scrollback: Historial
+  scrollback_hint: líneas (máx. 100000)
+  term: TERM
+  copy_on_select: Copiar la selección al soltar el ratón
+  port: Puerto
+  username: Usuario
+  username_placeholder: ninguno
+  keepalive: Keepalive
+  keepalive_hint: segundos (0 lo desactiva)
+  timeout: Tiempo de espera
+  timeout_hint: segundos
+
+connection:
+  title_new: Nueva conexión
+  title_edit: Conectar
+  connect: Conectar
+  browse: Examinar…
+  edit: Editar
+  delete: Eliminar
+  select_file: Seleccionar
+  saved_profiles: Perfiles guardados
+  empty_list: "Aún no hay perfiles guardados. Rellena el formulario y conéctate: la conexión se guarda automáticamente."
+  name: Nombre
+  host: Host
+  port: Puerto
+  username: Usuario
+  authentication: Autenticación
+  password: Contraseña
+  key_file: Archivo de clave
+  passphrase: Frase de contraseña
+  auth:
+    password: Contraseña
+    key: Clave privada
+    agent: Agente
+  password_placeholder: contraseña
+  passphrase_placeholder: opcional
+  inherit_placeholder: heredar
+  remember_password: Recordar la contraseña en el llavero del sistema
+  remember_passphrase: Recordar la frase de contraseña en el llavero del sistema
+  agent_unsupported: La autenticación con el agente SSH todavía no es compatible.
+  saved_secret: Se usará el secreto guardado en el llavero del sistema salvo que escribas uno nuevo.
+  need_host: Indica el host al que conectarte.
+  need_username: Indica el usuario con el que iniciar sesión.
+  need_key: Elige el archivo de clave privada con el que autenticarte.
+  need_port: Indica un puerto entre 1 y 65535.
+  delete_failed_list: "El perfil se eliminó, pero no se pudo escribir la lista de perfiles (%{error})."
+  delete_failed_secret: "El perfil se eliminó, pero no se pudo quitar su entrada del llavero (%{error})."
+  delete_failed_both: "El perfil se eliminó, pero no se pudo escribir la lista de perfiles (%{list_error}) ni quitar su entrada del llavero (%{secret_error})."
+  connect_problems: "Conectando, pero no se pudo guardar todo:"
+  problem_secret_read: "No se pudo leer el secreto guardado (%{error})."
+  problem_profile_save: "No se pudo guardar el perfil (%{error})."
+  problem_no_secret: No había ningún secreto que guardar en el llavero.
+  problem_secret_save: "No se pudo guardar el secreto (%{error})."
+  problem_secret_delete: "No se pudo quitar un secreto guardado anteriormente (%{error})."
+  overrides:
+    title: Ajustes de la sesión
+    none: hereda todos los ajustes globales
+    one: 1 ajuste sobrescrito
+    many: "%{count} ajustes sobrescritos"
+    scheme: Esquema de color
+    scheme_default: Predeterminado
+    font_size: Tamaño de fuente
+    scrollback: Historial
+    term: TERM
+    inherits_value: "hereda %{value}"
+    inherits_lines: "hereda %{value} líneas"
+
+session:
+  connecting: conectando
+  connected: conectado
+  disconnected: "desconectado: %{reason}"
+  failed: "%{kind}: %{message}"
+  reconnect: Reconectar
+  overlay:
+    connecting: "Conectando con %{host}..."
+    disconnected: "Desconectado de %{host}"
+    failed: "No se pudo conectar con %{host}"
+
+about:
+  title: Acerca de logman
+  version: "Versión %{version}"
+  tagline: Un terminal SSH gráfico multiplataforma construido sobre gpui.
+  license: "Distribuido bajo la licencia %{license}."
+  credits: Creado con gpui 0.2.2 (incluido y parcheado), russh y alacritty_terminal.

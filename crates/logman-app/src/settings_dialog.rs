@@ -17,8 +17,9 @@ use logman_core::{AppSettings, UiTheme};
 use logman_term::TerminalTheme;
 
 use crate::app_settings;
+use crate::i18n::{self, ts};
 use crate::ui::{
-    Button, ButtonVariant, Checkbox, SchemePicker, SchemePreview, SchemeSwatch, Segmented,
+    Button, ButtonVariant, Checkbox, SchemePicker, SchemePreview, SchemeSwatch, Segmented, Select,
     TextInput, Theme, form_row, modal, theme,
 };
 
@@ -36,10 +37,24 @@ const SCHEME_COLUMNS: usize = 3;
 const PREVIEW_ANSI_SLOTS: [usize; 6] = [1, 2, 3, 4, 5, 6];
 
 /// Segments of the UI theme picker, in [`UiTheme`] order.
-const UI_THEME_OPTIONS: [(&str, &str); 2] = [("dark", "Dark"), ("light", "Light")];
+///
+/// The first half of each pair is an element id and is never translated; only
+/// the label is. Built per call rather than declared as a `const` because the
+/// labels come out of the active locale.
+fn ui_theme_options() -> [(&'static str, SharedString); 2] {
+    [
+        ("dark", ts!("settings.theme_dark")),
+        ("light", ts!("settings.theme_light")),
+    ]
+}
 
-/// Shown under the font family field when it is left empty.
-const FONT_FAMILY_PLACEHOLDER: &str = "System default";
+/// Label of the entry that hands the choice back to the operating system.
+///
+/// Heads both dropdowns in the dialog, and doubles as their placeholder so a
+/// trigger reads the same whether or not its list is open.
+fn system_default() -> SharedString {
+    ts!("settings.system_default")
+}
 
 /// Key context the dialog's own shortcuts are scoped to.
 ///
@@ -65,6 +80,8 @@ actions!(
 mod tab {
     /// UI theme picker.
     pub const UI_THEME: isize = 10;
+    /// Interface language picker.
+    pub const LANGUAGE: isize = 15;
     /// Background opacity, in percent.
     pub const OPACITY: isize = 20;
     /// Background blur toggle.
@@ -122,6 +139,9 @@ fn preview_for(id: &str) -> Option<SchemePreview> {
 }
 
 /// The built-in schemes as picker entries, each with a live preview.
+///
+/// A scheme whose colors cannot be resolved falls back to the muted placeholder
+/// card, so it is given the translated label that card draws.
 pub(crate) fn scheme_swatches() -> Vec<SchemeSwatch> {
     TerminalTheme::builtin()
         .iter()
@@ -129,10 +149,22 @@ pub(crate) fn scheme_swatches() -> Vec<SchemeSwatch> {
             let swatch = SchemeSwatch::new(info.id, info.name);
             match preview_for(info.id) {
                 Some(preview) => swatch.preview(preview),
-                None => swatch,
+                None => swatch.placeholder_label(ts!("common.inherits")),
             }
         })
         .collect()
+}
+
+/// Which of the dialog's dropdown lists is currently showing.
+///
+/// A single field rather than one flag per dropdown, so that the two cannot be
+/// open at once — their lists are drawn deferred and would overlap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenList {
+    /// The interface language picker.
+    Language,
+    /// The terminal font picker.
+    Font,
 }
 
 /// Severity of the message strip at the bottom of the dialog.
@@ -166,6 +198,10 @@ pub struct SettingsDialog {
     base: AppSettings,
     /// UI chrome theme currently selected in the form.
     ui_theme: UiTheme,
+    /// BCP 47 tag of the interface language; `None` follows the system locale.
+    /// Holds the tag rather than the label, because the label is what the
+    /// dropdown shows and the tag is what gets persisted.
+    language: Option<String>,
     /// Whether the window should be blurred behind.
     background_blur: bool,
     /// Terminal color scheme id currently selected in the form.
@@ -184,10 +220,20 @@ pub struct SettingsDialog {
     /// Index of the section currently scrolled into view. Kept so that tabbing
     /// between two controls of the same section does not re-scroll it.
     visible_section: usize,
+    /// Terminal font family; `None` means the per-OS default.
+    font_family: Option<SharedString>,
+    /// Which dropdown, if any, is showing its list.
+    open_list: Option<OpenList>,
+    /// Font families installed on the machine, read once per opening of the
+    /// dialog rather than on every render.
+    fonts: Vec<SharedString>,
+    /// Scroll position of the font list, so opening it reveals the current
+    /// font instead of the top of the alphabet.
+    font_scroll: ScrollHandle,
+    /// Scroll position of the language list, kept for the same reason.
+    language_scroll: ScrollHandle,
     /// Window background opacity, in whole percent.
     opacity_input: Entity<TextInput>,
-    /// Terminal font family; empty means the per-OS default.
-    font_family_input: Entity<TextInput>,
     /// Terminal font size.
     font_size_input: Entity<TextInput>,
     /// Scrollback depth in lines.
@@ -221,7 +267,7 @@ impl SettingsDialog {
         // TextInput leased, and saving reads every field back.
         let field = {
             let weak = weak.clone();
-            move |cx: &mut Context<Self>, placeholder: &'static str, tab_index: isize| {
+            move |cx: &mut Context<Self>, placeholder: SharedString, tab_index: isize| {
                 let weak = weak.clone();
                 cx.new(move |cx| {
                     TextInput::new(cx)
@@ -237,15 +283,22 @@ impl SettingsDialog {
             }
         };
 
-        let opacity_input = field(cx, "100", tab::OPACITY);
-        let font_family_input = field(cx, FONT_FAMILY_PLACEHOLDER, tab::FONT_FAMILY);
-        let font_size_input = field(cx, "14", tab::FONT_SIZE);
-        let scrollback_input = field(cx, "5000", tab::SCROLLBACK);
-        let term_input = field(cx, "xterm-256color", tab::TERM);
-        let port_input = field(cx, "22", tab::DEFAULT_PORT);
-        let username_input = field(cx, "none", tab::DEFAULT_USERNAME);
-        let keepalive_input = field(cx, "30", tab::KEEPALIVE);
-        let timeout_input = field(cx, "15", tab::TIMEOUT);
+        // Every placeholder but one is a sample *value* — a number, or the
+        // default `TERM` — and reads the same in every language. The username
+        // hint is a word, so it is translated; it is also the only placeholder
+        // `refresh_placeholders` has to revisit after a language switch.
+        let opacity_input = field(cx, "100".into(), tab::OPACITY);
+        let font_size_input = field(cx, "14".into(), tab::FONT_SIZE);
+        let scrollback_input = field(cx, "5000".into(), tab::SCROLLBACK);
+        let term_input = field(cx, "xterm-256color".into(), tab::TERM);
+        let port_input = field(cx, "22".into(), tab::DEFAULT_PORT);
+        let username_input = field(
+            cx,
+            ts!("settings.username_placeholder"),
+            tab::DEFAULT_USERNAME,
+        );
+        let keepalive_input = field(cx, "30".into(), tab::KEEPALIVE);
+        let timeout_input = field(cx, "15".into(), tab::TIMEOUT);
 
         // Numeric fields have no input filter of their own, so each one is
         // sanitised after the fact by an observer.
@@ -260,17 +313,22 @@ impl SettingsDialog {
         Self {
             open: false,
             ui_theme: base.ui_theme,
+            language: base.language.clone(),
             background_blur: base.window.background_blur,
             scheme: base.terminal.scheme.clone().into(),
             copy_on_select: base.terminal.copy_on_select,
+            font_family: base.terminal.font_family.clone().map(SharedString::from),
             base,
             status: None,
             focus_handle: cx.focus_handle(),
             pending_focus: false,
             body_scroll: ScrollHandle::new(),
             visible_section: 0,
+            open_list: None,
+            fonts: Vec::new(),
+            font_scroll: ScrollHandle::new(),
+            language_scroll: ScrollHandle::new(),
             opacity_input,
-            font_family_input,
             font_size_input,
             scrollback_input,
             term_input,
@@ -284,10 +342,13 @@ impl SettingsDialog {
     /// Show the dialog, re-reading the current settings into the form.
     pub fn open(&mut self, cx: &mut Context<Self>) {
         let settings = app_settings::current(cx);
+        self.fonts = installed_fonts(cx);
+        self.refresh_placeholders(cx);
         self.fill_form(&settings, cx);
         self.base = settings;
         self.status = None;
         self.open = true;
+        self.open_list = None;
         self.pending_focus = true;
         self.visible_section = 0;
         self.body_scroll.scroll_to_item(0);
@@ -302,25 +363,39 @@ impl SettingsDialog {
     /// Hide the dialog without saving.
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.open_list = None;
         self.pending_focus = false;
         self.status = None;
         cx.notify();
     }
 
+    /// Re-translate the placeholders of the fields that have a worded one.
+    ///
+    /// The text fields are built once, when the dialog is created, so their
+    /// hints would otherwise still be in whatever language was active at
+    /// start-up after the user switches — including right after switching it
+    /// here.
+    fn refresh_placeholders(&self, cx: &mut Context<Self>) {
+        self.username_input.update(cx, |input, cx| {
+            input.set_placeholder(ts!("settings.username_placeholder"), cx);
+        });
+    }
+
     /// Copy `settings` into every control.
     fn fill_form(&mut self, settings: &AppSettings, cx: &mut Context<Self>) {
         self.ui_theme = settings.ui_theme;
+        self.language = settings.language.clone();
         self.background_blur = settings.window.background_blur;
         self.scheme = settings.terminal.scheme.clone().into();
         self.copy_on_select = settings.terminal.copy_on_select;
+        self.font_family = settings
+            .terminal
+            .font_family
+            .clone()
+            .map(SharedString::from);
 
         let percent = (settings.window.background_opacity * 100.0).round() as i32;
         set_text(&self.opacity_input, percent.to_string(), cx);
-        set_text(
-            &self.font_family_input,
-            settings.terminal.font_family.clone().unwrap_or_default(),
-            cx,
-        );
         set_text(
             &self.font_size_input,
             format_number(settings.terminal.font_size),
@@ -368,13 +443,14 @@ impl SettingsDialog {
         let mut settings = self.base.clone();
 
         settings.ui_theme = self.ui_theme;
+        settings.language = self.language.clone();
         settings.window.background_blur = self.background_blur;
         if let Some(percent) = parse_number::<f32>(&self.opacity_input, cx) {
             settings.window.background_opacity = percent / 100.0;
         }
 
         settings.terminal.scheme = self.scheme.to_string();
-        settings.terminal.font_family = optional_text(&self.font_family_input, cx);
+        settings.terminal.font_family = self.font_family.as_ref().map(ToString::to_string);
         settings.terminal.copy_on_select = self.copy_on_select;
         if let Some(size) = parse_number::<f32>(&self.font_size_input, cx) {
             settings.terminal.font_size = size;
@@ -411,7 +487,7 @@ impl SettingsDialog {
 
         if let Err(err) = settings.save() {
             log::error!("could not write settings.json: {err:#}");
-            self.status = Some(format!("Could not save the settings: {err:#}").into());
+            self.status = Some(ts!("settings.save_failed", error = format!("{err:#}")));
             // Show the clamped values so the user sees what would be stored.
             self.fill_form(&settings, cx);
             cx.notify();
@@ -431,12 +507,14 @@ impl SettingsDialog {
 
     /// `Tab`: move focus to the next control. gpui's tab ring wraps on its own.
     fn focus_next(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_lists(cx);
         window.focus_next();
         self.reveal_focused(window, cx);
     }
 
     /// `Shift+Tab`: move focus to the previous control, wrapping to the last.
     fn focus_prev(&mut self, _: &FocusPrev, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_lists(cx);
         window.focus_prev();
         self.reveal_focused(window, cx);
     }
@@ -464,11 +542,91 @@ impl SettingsDialog {
     }
 
     /// `Escape` dismisses the dialog from anywhere inside it.
+    ///
+    /// An open dropdown takes the key first and only closes itself, so that
+    /// backing out of a list does not also throw away the whole form.
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.open && event.keystroke.key == "escape" {
-            cx.stop_propagation();
-            self.dismiss(cx);
+        if !self.open || event.keystroke.key != "escape" {
+            return;
         }
+        cx.stop_propagation();
+        if self.open_list.is_some() {
+            self.close_lists(cx);
+            return;
+        }
+        self.dismiss(cx);
+    }
+
+    /// Hide whichever dropdown list is showing.
+    ///
+    /// Called whenever focus leaves a dropdown, so that a list nobody is
+    /// driving any more does not stay painted over the rest of the form.
+    fn close_lists(&mut self, cx: &mut Context<Self>) {
+        if self.open_list.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The entries of the font dropdown: the "leave it to the OS" row first,
+    /// then every installed family.
+    ///
+    /// A saved font that is not installed — a hand-edited `settings.json`, or a
+    /// family that has since been removed — is spliced in after the first row,
+    /// so the trigger keeps showing it instead of silently falling back.
+    fn font_options(&self) -> Vec<SharedString> {
+        let mut options = Vec::with_capacity(self.fonts.len() + 2);
+        options.push(system_default());
+        options.extend(
+            self.font_family
+                .clone()
+                .filter(|family| !self.fonts.contains(family)),
+        );
+        options.extend(self.fonts.iter().cloned());
+        options
+    }
+
+    /// The entries of the language dropdown: "follow the system" first, then
+    /// every shipped translation named in its own language.
+    fn language_options() -> Vec<SharedString> {
+        let supported = i18n::supported();
+        let mut options = Vec::with_capacity(supported.len() + 1);
+        options.push(system_default());
+        options.extend(supported.iter().map(|(_, name)| name.clone()));
+        options
+    }
+
+    /// Show or hide `list`, revealing the current entry as it opens.
+    ///
+    /// Opening one list closes the other, since both are drawn deferred and
+    /// two open at once would paint over each other.
+    fn set_list_open(&mut self, list: OpenList, open: bool, cx: &mut Context<Self>) {
+        self.open_list = open.then_some(list);
+        if open {
+            let (scroll, current) = match list {
+                OpenList::Font => {
+                    let options = self.font_options();
+                    let current = self
+                        .font_family
+                        .as_ref()
+                        .and_then(|family| options.iter().position(|option| option == family));
+                    (&self.font_scroll, current)
+                }
+                OpenList::Language => (&self.language_scroll, self.language_index()),
+            };
+            scroll.scroll_to_item(current.unwrap_or(0));
+        }
+        cx.notify();
+    }
+
+    /// Position of the selected language in [`Self::language_options`], or
+    /// `None` while the language follows the system — or names a tag logman
+    /// has no translation for, which the app treats the same way.
+    fn language_index(&self) -> Option<usize> {
+        let tag = self.language.as_deref()?;
+        let index = i18n::supported()
+            .iter()
+            .position(|(code, _)| *code == tag)?;
+        Some(index + 1)
     }
 
     /// Move focus into the first control when the dialog opens.
@@ -490,7 +648,7 @@ impl SettingsDialog {
         };
 
         let theme_picker = Segmented::new("settings-ui-theme")
-            .options(UI_THEME_OPTIONS)
+            .options(ui_theme_options())
             .selected(selected)
             .tab_index(tab::UI_THEME)
             .on_select({
@@ -507,7 +665,39 @@ impl SettingsDialog {
                 }
             });
 
-        let blur = Checkbox::new("settings-blur", "Blur the desktop behind the window")
+        let language = Select::new("settings-language")
+            .options(Self::language_options())
+            .selected(self.language.as_deref().and_then(i18n::display_name))
+            .placeholder(system_default())
+            .open(self.open_list == Some(OpenList::Language))
+            .tab_index(tab::LANGUAGE)
+            .scroll_handle(self.language_scroll.clone())
+            .on_select({
+                let this = this.clone();
+                // By index, not by label: row 0 is "follow the system" and the
+                // rest line up with `i18n::supported`, whereas the labels are
+                // endonyms that say nothing about their position.
+                move |index, _label, _window, cx| {
+                    let tag = index
+                        .checked_sub(1)
+                        .and_then(|index| i18n::supported().get(index))
+                        .map(|(code, _)| (*code).to_owned());
+                    this.update(cx, |dialog, cx| {
+                        dialog.language = tag;
+                        cx.notify();
+                    });
+                }
+            })
+            .on_open_change({
+                let this = this.clone();
+                move |open, _window, cx| {
+                    this.update(cx, |dialog, cx| {
+                        dialog.set_list_open(OpenList::Language, open, cx);
+                    });
+                }
+            });
+
+        let blur = Checkbox::new("settings-blur", ts!("settings.blur"))
             .checked(self.background_blur)
             .tab_index(tab::BLUR)
             .on_toggle({
@@ -521,16 +711,17 @@ impl SettingsDialog {
             });
 
         section(
-            "Appearance",
+            ts!("settings.section.appearance"),
             cx,
             div()
                 .flex()
                 .flex_col()
                 .gap(px(10.))
-                .child(form_row("UI theme", theme_picker))
+                .child(form_row(ts!("settings.ui_theme"), theme_picker))
+                .child(form_row(ts!("settings.language"), language))
                 .child(form_row(
-                    "Opacity",
-                    suffixed(self.opacity_input.clone(), "% (50\u{2013}100)", cx),
+                    ts!("settings.opacity"),
+                    suffixed(self.opacity_input.clone(), ts!("settings.opacity_hint"), cx),
                 ))
                 .child(form_row("", blur)),
         )
@@ -556,40 +747,74 @@ impl SettingsDialog {
                 }
             });
 
-        let copy_on_select = Checkbox::new(
-            "settings-copy-on-select",
-            "Copy the selection on mouse release",
-        )
-        .checked(self.copy_on_select)
-        .tab_index(tab::COPY_ON_SELECT)
-        .on_toggle({
-            let this = this.clone();
-            move |checked, _window, cx| {
-                this.update(cx, |dialog, cx| {
-                    dialog.copy_on_select = checked;
-                    cx.notify();
+        let font = Select::new("settings-font")
+            .options(self.font_options())
+            .selected(self.font_family.clone())
+            .placeholder(system_default())
+            .open(self.open_list == Some(OpenList::Font))
+            .tab_index(tab::FONT_FAMILY)
+            .scroll_handle(self.font_scroll.clone())
+            .on_select({
+                let this = this.clone();
+                // Row 0 is the "leave it to the OS" entry; comparing its label
+                // against the picked text would only work in one language.
+                move |index, family, _window, cx| {
+                    let family = (index > 0).then(|| SharedString::from(family.to_owned()));
+                    this.update(cx, |dialog, cx| {
+                        dialog.font_family = family;
+                        cx.notify();
+                    });
+                }
+            })
+            .on_open_change({
+                let this = this.clone();
+                move |open, _window, cx| {
+                    this.update(cx, |dialog, cx| {
+                        dialog.set_list_open(OpenList::Font, open, cx);
+                    });
+                }
+            });
+
+        let copy_on_select =
+            Checkbox::new("settings-copy-on-select", ts!("settings.copy_on_select"))
+                .checked(self.copy_on_select)
+                .tab_index(tab::COPY_ON_SELECT)
+                .on_toggle({
+                    let this = this.clone();
+                    move |checked, _window, cx| {
+                        this.update(cx, |dialog, cx| {
+                            dialog.copy_on_select = checked;
+                            cx.notify();
+                        });
+                    }
                 });
-            }
-        });
 
         section(
-            "Terminal",
+            ts!("settings.section.terminal"),
             cx,
             div()
                 .flex()
                 .flex_col()
                 .gap(px(10.))
-                .child(form_row("Color scheme", picker))
-                .child(form_row("Font", self.font_family_input.clone()))
+                .child(form_row(ts!("settings.scheme"), picker))
+                .child(form_row(ts!("settings.font"), font))
                 .child(form_row(
-                    "Font size",
-                    suffixed(self.font_size_input.clone(), "pt (6\u{2013}32)", cx),
+                    ts!("settings.font_size"),
+                    suffixed(
+                        self.font_size_input.clone(),
+                        ts!("settings.font_size_hint"),
+                        cx,
+                    ),
                 ))
                 .child(form_row(
-                    "Scrollback",
-                    suffixed(self.scrollback_input.clone(), "lines (max 100000)", cx),
+                    ts!("settings.scrollback"),
+                    suffixed(
+                        self.scrollback_input.clone(),
+                        ts!("settings.scrollback_hint"),
+                        cx,
+                    ),
                 ))
-                .child(form_row("TERM", self.term_input.clone()))
+                .child(form_row(ts!("settings.term"), self.term_input.clone()))
                 .child(form_row("", copy_on_select)),
         )
     }
@@ -597,21 +822,28 @@ impl SettingsDialog {
     /// The "New connections" section.
     fn render_connection(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         section(
-            "New connections",
+            ts!("settings.section.connection"),
             cx,
             div()
                 .flex()
                 .flex_col()
                 .gap(px(10.))
-                .child(form_row("Port", self.port_input.clone()))
-                .child(form_row("Username", self.username_input.clone()))
+                .child(form_row(ts!("settings.port"), self.port_input.clone()))
                 .child(form_row(
-                    "Keepalive",
-                    suffixed(self.keepalive_input.clone(), "seconds (0 disables)", cx),
+                    ts!("settings.username"),
+                    self.username_input.clone(),
                 ))
                 .child(form_row(
-                    "Connect timeout",
-                    suffixed(self.timeout_input.clone(), "seconds", cx),
+                    ts!("settings.keepalive"),
+                    suffixed(
+                        self.keepalive_input.clone(),
+                        ts!("settings.keepalive_hint"),
+                        cx,
+                    ),
+                ))
+                .child(form_row(
+                    ts!("settings.timeout"),
+                    suffixed(self.timeout_input.clone(), ts!("settings.timeout_hint"), cx),
                 )),
         )
     }
@@ -642,7 +874,7 @@ impl SettingsDialog {
                     .justify_end()
                     .gap(px(8.))
                     .child(
-                        Button::new("settings-cancel", "Cancel")
+                        Button::new("settings-cancel", ts!("common.cancel"))
                             .variant(ButtonVariant::Secondary)
                             .tab_index(tab::CANCEL)
                             .on_click({
@@ -653,7 +885,7 @@ impl SettingsDialog {
                             }),
                     )
                     .child(
-                        Button::new("settings-save", "Save")
+                        Button::new("settings-save", ts!("common.save"))
                             .variant(ButtonVariant::Primary)
                             .tab_index(tab::SAVE)
                             .on_click({
@@ -727,7 +959,7 @@ impl Render for SettingsDialog {
             .on_key_down(cx.listener(Self::on_key_down))
             .child(modal(
                 "settings-modal",
-                "Settings",
+                ts!("settings.title"),
                 px(DIALOG_WIDTH),
                 body,
                 on_dismiss,
@@ -736,7 +968,7 @@ impl Render for SettingsDialog {
 }
 
 /// Wraps `body` in a titled card.
-fn section<E: IntoElement>(title: &'static str, cx: &App, body: E) -> impl IntoElement + use<E> {
+fn section<E: IntoElement>(title: SharedString, cx: &App, body: E) -> impl IntoElement + use<E> {
     let theme = theme(cx);
     div()
         .flex()
@@ -757,7 +989,7 @@ fn section<E: IntoElement>(title: &'static str, cx: &App, body: E) -> impl IntoE
 }
 
 /// Lays a short unit hint out to the right of a narrow control.
-fn suffixed<E: IntoElement>(control: E, hint: &'static str, cx: &App) -> impl IntoElement + use<E> {
+fn suffixed<E: IntoElement>(control: E, hint: SharedString, cx: &App) -> impl IntoElement + use<E> {
     let theme = theme(cx);
     div()
         .flex()
@@ -774,6 +1006,21 @@ fn suffixed<E: IntoElement>(control: E, hint: &'static str, cx: &App) -> impl In
                 .text_color(theme.text_muted)
                 .child(hint),
         )
+}
+
+/// The font families the platform offers, in the order gpui reports them —
+/// sorted and deduplicated already.
+///
+/// Names starting with a dot are dropped: those are the platform's private
+/// aliases, such as `.SystemUIFont` on macOS, which are not meant to be chosen
+/// by name.
+fn installed_fonts(cx: &App) -> Vec<SharedString> {
+    cx.text_system()
+        .all_font_names()
+        .into_iter()
+        .filter(|name| !name.starts_with('.'))
+        .map(SharedString::from)
+        .collect()
 }
 
 /// Trimmed content of `input`.

@@ -26,6 +26,7 @@ use logman_core::{AuthMethod, ProfileStore, SecretStore, SessionOverrides, Sessi
 use logman_ssh::SshAuth;
 use uuid::Uuid;
 
+use crate::i18n::ts;
 use crate::ui::{
     Button, ButtonVariant, Checkbox, SchemePicker, SchemeSwatch, Segmented, TextInput, form_row,
     modal, theme,
@@ -62,18 +63,17 @@ const LIST_WIDTH: f32 = 260.;
 const LIST_MAX_HEIGHT: f32 = 300.;
 
 /// Segments of the authentication picker, in [`AuthKind`] order.
-const AUTH_OPTIONS: [(&str, &str); 3] = [
-    ("password", "Password"),
-    ("key", "Private key"),
-    ("agent", "Agent"),
-];
-
-/// Shown instead of the profile list on a first run.
-const EMPTY_LIST_HINT: &str = "No saved profiles yet. Fill in the form and connect \u{2014} the \
-                               connection is saved automatically.";
-
-/// Explanation shown while the unsupported agent method is selected.
-const AGENT_UNSUPPORTED: &str = "SSH agent authentication is not supported yet.";
+///
+/// The first half of each pair is an element id and is never translated; only
+/// the label is. Built per call rather than declared as a `const` because the
+/// labels come out of the active locale.
+fn auth_options() -> [(&'static str, SharedString); 3] {
+    [
+        ("password", ts!("connection.auth.password")),
+        ("key", ts!("connection.auth.key")),
+        ("agent", ts!("connection.auth.agent")),
+    ]
+}
 
 /// Key context the dialog's own shortcuts are scoped to.
 ///
@@ -172,7 +172,7 @@ enum AuthKind {
 }
 
 impl AuthKind {
-    /// Index of this method in [`AUTH_OPTIONS`].
+    /// Index of this method in [`auth_options`].
     fn index(self) -> usize {
         match self {
             Self::Password => 0,
@@ -181,7 +181,7 @@ impl AuthKind {
         }
     }
 
-    /// The method at `index` in [`AUTH_OPTIONS`], defaulting to
+    /// The method at `index` in [`auth_options`], defaulting to
     /// [`AuthKind::Password`].
     fn from_index(index: usize) -> Self {
         match index {
@@ -218,8 +218,13 @@ impl StatusLevel {
 struct DialogStatus {
     /// How loudly to render it.
     level: StatusLevel,
-    /// Text shown to the user. Never contains a secret.
-    message: SharedString,
+    /// Lines shown to the user, each a sentence of its own. Never contains a
+    /// secret.
+    ///
+    /// A list rather than one string because a run that hits several storage
+    /// problems reports each of them; stitching them into one sentence would
+    /// mean assembling grammar in code, which no translation survives.
+    lines: Vec<SharedString>,
 }
 
 /// Field that should receive keyboard focus the next time the dialog renders.
@@ -304,7 +309,7 @@ impl ConnectionDialog {
         let field = {
             let weak = weak.clone();
             move |cx: &mut Context<Self>,
-                  placeholder: &'static str,
+                  placeholder: SharedString,
                   masked: bool,
                   tab_index: isize| {
                 let weak = weak.clone();
@@ -330,18 +335,30 @@ impl ConnectionDialog {
             }
         };
 
-        let name_input = field(cx, "web-01", false, tab::NAME);
-        let host_input = field(cx, "web-01.example.com", false, tab::HOST);
-        let port_input = field(cx, "22", false, tab::PORT);
-        let username_input = field(cx, "alice", false, tab::USERNAME);
-        let password_input = field(cx, "password", true, tab::SECRET_OR_KEY);
-        let key_path_input = field(cx, "~/.ssh/id_ed25519", false, tab::SECRET_OR_KEY);
-        let passphrase_input = field(cx, "optional", true, tab::PASSPHRASE);
-        // Placeholders are rewritten from the live global settings on every
-        // open, so these are only what a first paint shows.
-        let override_font_size_input = field(cx, "inherit", false, tab::OVERRIDE_FONT_SIZE);
-        let override_scrollback_input = field(cx, "inherit", false, tab::OVERRIDE_SCROLLBACK);
-        let override_term_input = field(cx, "inherit", false, tab::OVERRIDE_TERM);
+        // The name, host, port and key-path hints spell out a sample *value*
+        // and read the same in every language; the rest are words, and are the
+        // ones `refresh_placeholders` revisits after a language switch.
+        let name_input = field(cx, "web-01".into(), false, tab::NAME);
+        let host_input = field(cx, "web-01.example.com".into(), false, tab::HOST);
+        let port_input = field(cx, "22".into(), false, tab::PORT);
+        let username_input = field(cx, "alice".into(), false, tab::USERNAME);
+        let password_input = field(
+            cx,
+            ts!("connection.password_placeholder"),
+            true,
+            tab::SECRET_OR_KEY,
+        );
+        let key_path_input = field(cx, "~/.ssh/id_ed25519".into(), false, tab::SECRET_OR_KEY);
+        let passphrase_input = field(
+            cx,
+            ts!("connection.passphrase_placeholder"),
+            true,
+            tab::PASSPHRASE,
+        );
+        let inherit = ts!("connection.inherit_placeholder");
+        let override_font_size_input = field(cx, inherit.clone(), false, tab::OVERRIDE_FONT_SIZE);
+        let override_scrollback_input = field(cx, inherit.clone(), false, tab::OVERRIDE_SCROLLBACK);
+        let override_term_input = field(cx, inherit, false, tab::OVERRIDE_TERM);
 
         port_input.update(cx, |input, cx| {
             input.set_content(DEFAULT_PORT.to_string(), cx);
@@ -385,9 +402,34 @@ impl ConnectionDialog {
         }
     }
 
+    /// Re-translate the placeholders of the fields that have a worded one.
+    ///
+    /// The text fields are built once, when the dialog is created, so their
+    /// hints would otherwise stay in whatever language was active at start-up
+    /// after the user switches. Called from every `open_*`, which is the only
+    /// moment a stale hint could become visible.
+    fn refresh_placeholders(&self, cx: &mut Context<Self>) {
+        self.password_input.update(cx, |input, cx| {
+            input.set_placeholder(ts!("connection.password_placeholder"), cx);
+        });
+        self.passphrase_input.update(cx, |input, cx| {
+            input.set_placeholder(ts!("connection.passphrase_placeholder"), cx);
+        });
+        for input in [
+            &self.override_font_size_input,
+            &self.override_scrollback_input,
+            &self.override_term_input,
+        ] {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(ts!("connection.inherit_placeholder"), cx);
+            });
+        }
+    }
+
     /// Show the dialog with an empty form.
     pub fn open_new(&mut self, cx: &mut Context<Self>) {
         self.reload_store();
+        self.refresh_placeholders(cx);
         self.reset_form(cx);
         self.open = true;
         self.pending_focus = Some(FocusTarget::Host);
@@ -399,6 +441,7 @@ impl ConnectionDialog {
     /// An unknown `id` opens the empty form rather than failing.
     pub fn open_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.reload_store();
+        self.refresh_placeholders(cx);
         self.reset_form(cx);
         self.open = true;
 
@@ -413,13 +456,9 @@ impl ConnectionDialog {
                     FocusTarget::Secret
                 });
                 if agent {
-                    self.set_status(StatusLevel::Warning, AGENT_UNSUPPORTED);
+                    self.set_status(StatusLevel::Warning, ts!("connection.agent_unsupported"));
                 } else if has_secret {
-                    self.set_status(
-                        StatusLevel::Info,
-                        "A secret saved in the system keychain will be used unless you type a \
-                         new one.",
-                    );
+                    self.set_status(StatusLevel::Info, ts!("connection.saved_secret"));
                 }
             }
             None => {
@@ -596,12 +635,14 @@ impl ConnectionDialog {
         cx.notify();
     }
 
-    /// Replace the message strip.
+    /// Replace the message strip with a single sentence.
     fn set_status(&mut self, level: StatusLevel, message: impl Into<SharedString>) {
-        self.status = Some(DialogStatus {
-            level,
-            message: message.into(),
-        });
+        self.set_status_lines(level, vec![message.into()]);
+    }
+
+    /// Replace the message strip with one sentence per line.
+    fn set_status_lines(&mut self, level: StatusLevel, lines: Vec<SharedString>) {
+        self.status = Some(DialogStatus { level, lines });
     }
 
     /// Load the profile `id` into the form.
@@ -614,12 +655,9 @@ impl ConnectionDialog {
         self.fill_form(&profile, cx);
         self.status = None;
         if agent {
-            self.set_status(StatusLevel::Warning, AGENT_UNSUPPORTED);
+            self.set_status(StatusLevel::Warning, ts!("connection.agent_unsupported"));
         } else if has_secret {
-            self.set_status(
-                StatusLevel::Info,
-                "A secret saved in the system keychain will be used unless you type a new one.",
-            );
+            self.set_status(StatusLevel::Info, ts!("connection.saved_secret"));
         }
         cx.notify();
     }
@@ -628,31 +666,42 @@ impl ConnectionDialog {
     ///
     /// Deleting the secret alongside the profile is what keeps the keychain from
     /// accumulating entries nothing refers to any more.
+    ///
+    /// Only two things can go wrong here, so all three outcomes are spelled out
+    /// as whole sentences rather than clauses joined with "and": the conjunction
+    /// and the clause order of such a join are not translatable.
     fn delete_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
         if self.store.remove(id).is_none() {
             return;
         }
 
-        let mut problems = Vec::new();
-        if let Err(err) = self.store.save() {
-            problems.push(format!("the profile list could not be written ({err:#})"));
-        }
-        if let Err(err) = SecretStore::delete(id) {
-            problems.push(format!("its keychain entry could not be removed ({err:#})"));
-        }
+        let list_error = self.store.save().err().map(|err| format!("{err:#}"));
+        let secret_error = SecretStore::delete(id).err().map(|err| format!("{err:#}"));
 
         if self.editing == Some(id) {
             self.reset_form(cx);
         }
 
-        if problems.is_empty() {
-            self.status = None;
-        } else {
-            self.set_status(
-                StatusLevel::Error,
-                format!("Profile deleted, but {}.", problems.join(" and ")),
-            );
-        }
+        // The error detail comes from the storage layer and stays in English.
+        self.status = match (list_error, secret_error) {
+            (None, None) => None,
+            (Some(list_error), None) => Some(DialogStatus {
+                level: StatusLevel::Error,
+                lines: vec![ts!("connection.delete_failed_list", error = list_error)],
+            }),
+            (None, Some(secret_error)) => Some(DialogStatus {
+                level: StatusLevel::Error,
+                lines: vec![ts!("connection.delete_failed_secret", error = secret_error)],
+            }),
+            (Some(list_error), Some(secret_error)) => Some(DialogStatus {
+                level: StatusLevel::Error,
+                lines: vec![ts!(
+                    "connection.delete_failed_both",
+                    list_error = list_error,
+                    secret_error = secret_error
+                )],
+            }),
+        };
         cx.notify();
     }
 
@@ -669,7 +718,7 @@ impl ConnectionDialog {
         self.status = match kind {
             AuthKind::Agent => Some(DialogStatus {
                 level: StatusLevel::Warning,
-                message: AGENT_UNSUPPORTED.into(),
+                lines: vec![ts!("connection.agent_unsupported")],
             }),
             _ => None,
         };
@@ -730,17 +779,17 @@ impl ConnectionDialog {
     /// Fill the message strip with the reason [`Self::can_connect`] said no.
     fn explain_incomplete(&mut self, cx: &mut Context<Self>) {
         let reason = if self.auth_kind == AuthKind::Agent {
-            AGENT_UNSUPPORTED
+            ts!("connection.agent_unsupported")
         } else if Self::text(&self.host_input, cx).is_empty() {
-            "Enter the host to connect to."
+            ts!("connection.need_host")
         } else if Self::text(&self.username_input, cx).is_empty() {
-            "Enter the user to log in as."
+            ts!("connection.need_username")
         } else if self.auth_kind == AuthKind::PrivateKey
             && Self::text(&self.key_path_input, cx).is_empty()
         {
-            "Choose the private key file to authenticate with."
+            ts!("connection.need_key")
         } else {
-            "Enter a port between 1 and 65535."
+            ts!("connection.need_port")
         };
         self.set_status(StatusLevel::Error, reason);
         cx.notify();
@@ -799,7 +848,11 @@ impl ConnectionDialog {
         profile.save_secret = self.save_secret;
         profile.overrides = self.collect_overrides(cx);
 
-        let mut problems: Vec<String> = Vec::new();
+        // Each entry is a whole sentence, shown on a line of its own under the
+        // heading: a list of problems cannot be joined into one sentence in a
+        // way that survives translation. The error details inside them come
+        // from the storage layer and stay in English.
+        let mut problems: Vec<SharedString> = Vec::new();
 
         // The secret typed into the form wins; an empty field falls back to the
         // keychain, which is how a saved profile connects without retyping.
@@ -814,7 +867,10 @@ impl ConnectionDialog {
             match SecretStore::get(profile.id) {
                 Ok(stored) => stored.unwrap_or_default(),
                 Err(err) => {
-                    problems.push(format!("the saved secret could not be read ({err:#})"));
+                    problems.push(ts!(
+                        "connection.problem_secret_read",
+                        error = format!("{err:#}")
+                    ));
                     String::new()
                 }
             }
@@ -824,18 +880,25 @@ impl ConnectionDialog {
 
         self.store.upsert(profile.clone());
         if let Err(err) = self.store.save() {
-            problems.push(format!("the profile could not be saved ({err:#})"));
+            problems.push(ts!(
+                "connection.problem_profile_save",
+                error = format!("{err:#}")
+            ));
         }
 
         if profile.save_secret {
             if secret.is_empty() {
-                problems.push("there was no secret to put in the keychain".to_owned());
+                problems.push(ts!("connection.problem_no_secret"));
             } else if let Err(err) = SecretStore::set(profile.id, &secret) {
-                problems.push(format!("the secret could not be saved ({err:#})"));
+                problems.push(ts!(
+                    "connection.problem_secret_save",
+                    error = format!("{err:#}")
+                ));
             }
         } else if let Err(err) = SecretStore::delete(profile.id) {
-            problems.push(format!(
-                "a previously saved secret could not be removed ({err:#})"
+            problems.push(ts!(
+                "connection.problem_secret_delete",
+                error = format!("{err:#}")
             ));
         }
 
@@ -854,10 +917,10 @@ impl ConnectionDialog {
         if problems.is_empty() {
             self.close(cx);
         } else {
-            self.set_status(
-                StatusLevel::Warning,
-                format!("Connecting, but {}.", problems.join(", and ")),
-            );
+            let mut lines = Vec::with_capacity(problems.len() + 1);
+            lines.push(ts!("connection.connect_problems"));
+            lines.extend(problems);
+            self.set_status_lines(StatusLevel::Warning, lines);
             cx.notify();
         }
     }
@@ -976,7 +1039,7 @@ impl ConnectionDialog {
                             .group_hover(group, |style| style.visible())
                             .child(row_action(
                                 ElementId::from(("connection-profile-edit", index)),
-                                "Edit",
+                                ts!("connection.edit"),
                                 theme.text_muted,
                                 theme.surface_hover,
                                 {
@@ -991,7 +1054,7 @@ impl ConnectionDialog {
                             ))
                             .child(row_action(
                                 ElementId::from(("connection-profile-delete", index)),
-                                "Delete",
+                                ts!("connection.delete"),
                                 theme.danger,
                                 theme.surface_hover,
                                 {
@@ -1019,7 +1082,7 @@ impl ConnectionDialog {
                 div()
                     .text_size(px(11.))
                     .text_color(theme.text_muted)
-                    .child("Saved profiles"),
+                    .child(ts!("connection.saved_profiles")),
             )
             .child(
                 div()
@@ -1040,7 +1103,7 @@ impl ConnectionDialog {
                                 .p(px(8.))
                                 .text_size(px(12.))
                                 .text_color(theme.text_muted)
-                                .child(EMPTY_LIST_HINT),
+                                .child(ts!("connection.empty_list")),
                         )
                     })
                     .children(rows),
@@ -1054,7 +1117,7 @@ impl ConnectionDialog {
         let auth_kind = self.auth_kind;
 
         let auth_control = Segmented::new("connection-auth")
-            .options(AUTH_OPTIONS)
+            .options(auth_options())
             .selected(auth_kind.index())
             .tab_index(tab::AUTH)
             .on_select({
@@ -1079,7 +1142,7 @@ impl ConnectionDialog {
                     .child(self.key_path_input.clone()),
             )
             .child(
-                Button::new("connection-browse", "Browse\u{2026}")
+                Button::new("connection-browse", ts!("connection.browse"))
                     .variant(ButtonVariant::Secondary)
                     .tab_index(tab::BROWSE)
                     .on_click({
@@ -1089,8 +1152,8 @@ impl ConnectionDialog {
             );
 
         let secret_label = match auth_kind {
-            AuthKind::PrivateKey => "Remember passphrase in the system keychain",
-            _ => "Remember password in the system keychain",
+            AuthKind::PrivateKey => ts!("connection.remember_passphrase"),
+            _ => ts!("connection.remember_password"),
         };
 
         let remember = Checkbox::new("connection-remember", secret_label)
@@ -1112,17 +1175,26 @@ impl ConnectionDialog {
             .flex_grow()
             .min_w_0()
             .gap(px(10.))
-            .child(form_row("Name", self.name_input.clone()))
-            .child(form_row("Host", self.host_input.clone()))
-            .child(form_row("Port", self.port_input.clone()))
-            .child(form_row("Username", self.username_input.clone()))
-            .child(form_row("Authentication", auth_control))
+            .child(form_row(ts!("connection.name"), self.name_input.clone()))
+            .child(form_row(ts!("connection.host"), self.host_input.clone()))
+            .child(form_row(ts!("connection.port"), self.port_input.clone()))
+            .child(form_row(
+                ts!("connection.username"),
+                self.username_input.clone(),
+            ))
+            .child(form_row(ts!("connection.authentication"), auth_control))
             .when(auth_kind == AuthKind::Password, |this| {
-                this.child(form_row("Password", self.password_input.clone()))
+                this.child(form_row(
+                    ts!("connection.password"),
+                    self.password_input.clone(),
+                ))
             })
             .when(auth_kind == AuthKind::PrivateKey, |this| {
-                this.child(form_row("Key file", key_row))
-                    .child(form_row("Passphrase", self.passphrase_input.clone()))
+                this.child(form_row(ts!("connection.key_file"), key_row))
+                    .child(form_row(
+                        ts!("connection.passphrase"),
+                        self.passphrase_input.clone(),
+                    ))
             })
             .when(auth_kind == AuthKind::Agent, |this| {
                 this.child(form_row(
@@ -1130,7 +1202,7 @@ impl ConnectionDialog {
                     div()
                         .text_size(px(12.))
                         .text_color(theme.text_muted)
-                        .child(AGENT_UNSUPPORTED),
+                        .child(ts!("connection.agent_unsupported")),
                 ))
             })
             .when(auth_kind != AuthKind::Agent, |this| {
@@ -1144,11 +1216,16 @@ impl ConnectionDialog {
         let this = cx.entity();
         let connectable = self.can_connect(cx);
 
+        // One element per sentence: a status that reports several problems
+        // stacks them instead of running them together on one line.
         let status = self.status.as_ref().map(|status| {
             div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
                 .text_size(px(12.))
                 .text_color(status.level.color(&theme))
-                .child(status.message.clone())
+                .children(status.lines.iter().map(|line| div().child(line.clone())))
         });
 
         div()
@@ -1165,7 +1242,7 @@ impl ConnectionDialog {
                     .justify_end()
                     .gap(px(8.))
                     .child(
-                        Button::new("connection-cancel", "Cancel")
+                        Button::new("connection-cancel", ts!("common.cancel"))
                             .variant(ButtonVariant::Secondary)
                             .tab_index(tab::CANCEL)
                             .on_click({
@@ -1176,7 +1253,7 @@ impl ConnectionDialog {
                             }),
                     )
                     .child(
-                        Button::new("connection-connect", "Connect")
+                        Button::new("connection-connect", ts!("connection.connect"))
                             .variant(ButtonVariant::Primary)
                             .disabled(!connectable)
                             .tab_index(tab::CONNECT)
@@ -1211,15 +1288,17 @@ impl ConnectionDialog {
         .iter()
         .filter(|value| **value)
         .count();
+        // Two keys rather than a plural rule: only "one" and "more than one"
+        // are ever needed here.
         let summary = match set {
-            0 => "inherits every global setting".to_owned(),
-            1 => "1 setting overridden".to_owned(),
-            many => format!("{many} settings overridden"),
+            0 => ts!("connection.overrides.none"),
+            1 => ts!("connection.overrides.one"),
+            many => ts!("connection.overrides.many", count = many),
         };
 
         let toggle = Button::new(
             "connection-overrides-toggle",
-            format!("{caret}  Session overrides"),
+            format!("{caret}  {}", ts!("connection.overrides.title")),
         )
         .variant(ButtonVariant::Ghost)
         .tab_index(tab::OVERRIDES)
@@ -1230,7 +1309,15 @@ impl ConnectionDialog {
             }
         });
 
-        let mut swatches = vec![SchemeSwatch::new(INHERIT_SCHEME_ID, "Default")];
+        // The id stays empty — it is what "inherit" is stored as — while the
+        // card itself is labelled in the user's language.
+        let mut swatches = vec![
+            SchemeSwatch::new(
+                INHERIT_SCHEME_ID,
+                ts!("connection.overrides.scheme_default"),
+            )
+            .placeholder_label(ts!("common.inherits")),
+        ];
         swatches.extend(crate::settings_dialog::scheme_swatches());
 
         let picker = SchemePicker::new("connection-override-scheme")
@@ -1257,28 +1344,34 @@ impl ConnectionDialog {
             .flex_col()
             .gap(px(10.))
             .pt(px(10.))
-            .child(form_row("Color scheme", picker))
+            .child(form_row(ts!("connection.overrides.scheme"), picker))
             .child(form_row(
-                "Font size",
+                ts!("connection.overrides.font_size"),
                 inherit_hint(
                     self.override_font_size_input.clone(),
-                    format!("inherits {}", format_number(defaults.font_size)),
+                    ts!(
+                        "connection.overrides.inherits_value",
+                        value = format_number(defaults.font_size)
+                    ),
                     cx,
                 ),
             ))
             .child(form_row(
-                "Scrollback",
+                ts!("connection.overrides.scrollback"),
                 inherit_hint(
                     self.override_scrollback_input.clone(),
-                    format!("inherits {} lines", defaults.scrollback_lines),
+                    ts!(
+                        "connection.overrides.inherits_lines",
+                        value = defaults.scrollback_lines
+                    ),
                     cx,
                 ),
             ))
             .child(form_row(
-                "TERM",
+                ts!("connection.overrides.term"),
                 inherit_hint(
                     self.override_term_input.clone(),
-                    format!("inherits {}", defaults.term),
+                    ts!("connection.overrides.inherits_value", value = defaults.term),
                     cx,
                 ),
             ));
@@ -1342,9 +1435,9 @@ impl Render for ConnectionDialog {
         self.apply_pending_focus(window, cx);
 
         let title = if self.editing.is_some() {
-            "Connect"
+            ts!("connection.title_edit")
         } else {
-            "New connection"
+            ts!("connection.title_new")
         };
 
         // Only the form scrolls; the footer stays put. The modal caps the panel
@@ -1411,7 +1504,11 @@ impl Render for ConnectionDialog {
 }
 
 /// Lays a "what this field inherits" hint out to the right of a control.
-fn inherit_hint<E: IntoElement>(control: E, hint: String, cx: &App) -> impl IntoElement + use<E> {
+fn inherit_hint<E: IntoElement>(
+    control: E,
+    hint: SharedString,
+    cx: &App,
+) -> impl IntoElement + use<E> {
     let theme = theme(cx);
     div()
         .flex()
@@ -1480,7 +1577,7 @@ fn digits_only(
 /// also select the row it lives in.
 fn row_action(
     id: ElementId,
-    label: &'static str,
+    label: SharedString,
     color: Hsla,
     hover: Hsla,
     on_click: impl Fn(&mut App) + 'static,
@@ -1513,7 +1610,7 @@ fn browse_for_key(dialog: Entity<ConnectionDialog>, cx: &mut App) {
         files: true,
         directories: false,
         multiple: false,
-        prompt: Some("Select".into()),
+        prompt: Some(ts!("connection.select_file")),
     });
 
     cx.spawn(async move |cx| {

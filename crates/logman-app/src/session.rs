@@ -17,6 +17,7 @@ use logman_ssh::{SshAuth, SshConfig, SshErrorKind, SshEvent, SshSession};
 use logman_term::{TerminalModel, TerminalTheme};
 
 use crate::app_settings;
+use crate::i18n::ts;
 use crate::ui::TabStatus;
 use crate::verifier::host_key_verifier;
 
@@ -49,12 +50,20 @@ pub enum SessionStatus {
 
 impl SessionStatus {
     /// A short label for the status bar and the connection overlay.
-    pub fn summary(&self) -> String {
+    ///
+    /// Translated here rather than stored translated, because the status
+    /// outlives the language it was reached in: the caller asks for the summary
+    /// while rendering, so a language switch shows up on the very next frame.
+    /// The `reason`, `kind` and `message` inside come from the SSH layer and
+    /// stay in English; only the wording around them follows the locale.
+    pub fn summary(&self) -> SharedString {
         match self {
-            Self::Connecting => "connecting".to_owned(),
-            Self::Connected => "connected".to_owned(),
-            Self::Disconnected { reason } => format!("disconnected: {reason}"),
-            Self::Failed { kind, message } => format!("{kind}: {message}"),
+            Self::Connecting => ts!("session.connecting"),
+            Self::Connected => ts!("session.connected"),
+            Self::Disconnected { reason } => ts!("session.disconnected", reason = reason),
+            Self::Failed { kind, message } => {
+                ts!("session.failed", kind = kind.to_string(), message = message)
+            }
         }
     }
 

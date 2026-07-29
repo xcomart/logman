@@ -15,6 +15,7 @@ mod about_dialog;
 mod app_settings;
 mod caption;
 mod connection;
+mod i18n;
 mod session;
 mod settings_dialog;
 mod terminal_view;
@@ -25,6 +26,12 @@ mod terminal_view;
 #[allow(dead_code)]
 mod ui;
 mod verifier;
+
+// Compiles `locales/*.yml` into the binary and defines the machinery `t!`
+// expands to, which is why it has to sit in the crate root. `fallback = "en"`
+// is per key, not per locale: a string a translator has not got to yet shows
+// in English while the rest of that language stays translated.
+rust_i18n::i18n!("locales", fallback = "en");
 
 use gpui::{
     AnyElement, App, Application, Bounds, Context, ElementId, Entity, FocusHandle, Focusable,
@@ -37,6 +44,7 @@ use logman_ssh::SshAuth;
 use about_dialog::{AboutDialog, AboutDialogEvent};
 use caption::apply_caption_theme;
 use connection::{ConnectionDialog, ConnectionDialogEvent};
+use i18n::ts;
 use session::Session;
 use settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use terminal_view::TerminalView;
@@ -80,10 +88,11 @@ const QUICK_SELECT_TABS: usize = 9;
 /// and the tab strip would not line up.
 const TOOLBAR_HEIGHT: f32 = 36.;
 
-/// Modifier key named in the dropdown menu's shortcut hints.
+/// Modifier key named in the shortcut hints of the dropdown menu and the empty
+/// state.
 ///
-/// The dropdown is only drawn where gpui builds no native menu bar, but the
-/// hints follow [`bind_shortcuts`] on every platform so the two never drift.
+/// Never translated: it is the name printed on the key. It follows
+/// [`bind_shortcuts`] on every platform so the two never drift.
 const SHORTCUT_MODIFIER: &str = if cfg!(target_os = "macos") {
     "Cmd"
 } else {
@@ -165,6 +174,13 @@ impl Workspace {
                 // parts that touch live windows and sessions.
                 SettingsDialogEvent::Applied => {
                     let settings = app_settings::current(cx);
+                    // Before the repaint below, so the next frame is already
+                    // drawn in the newly chosen language.
+                    i18n::apply(settings.language.as_deref());
+                    // The native macOS menu bar is built once and owned by the
+                    // platform, so unlike the in-app menu it does not follow a
+                    // repaint; it has to be handed over again.
+                    cx.set_menus(app_menus());
                     apply_ui_theme(settings.ui_theme, cx);
                     cx.refresh_windows();
                     window.set_background_appearance(window_appearance(&settings.window));
@@ -499,17 +515,17 @@ impl Workspace {
     fn render_app_menu(&self, cx: &mut Context<Self>) -> MenuButton {
         let this = cx.entity();
         let entries = vec![
-            MenuEntry::new("New session")
+            MenuEntry::new(ts!("menu.new_session"))
                 .shortcut(format!("{SHORTCUT_MODIFIER}+T"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(NewSession), cx)),
-            MenuEntry::new("Settings\u{2026}")
+            MenuEntry::new(ts!("menu.settings"))
                 .shortcut(format!("{SHORTCUT_MODIFIER}+,"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
             MenuEntry::separator(),
-            MenuEntry::new("About logman")
+            MenuEntry::new(ts!("menu.about"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(ShowAbout), cx)),
             MenuEntry::separator(),
-            MenuEntry::new("Quit")
+            MenuEntry::new(ts!("menu.quit"))
                 .shortcut(format!("{SHORTCUT_MODIFIER}+Q"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(Quit), cx)),
         ];
@@ -604,16 +620,12 @@ impl Workspace {
                     div()
                         .text_size(px(11.))
                         .text_color(theme.text_muted)
-                        .child("Saved profiles"),
+                        .child(ts!("empty.saved_profiles")),
                 )
                 .children(rows)
         });
 
-        let shortcut = if cfg!(target_os = "macos") {
-            "Press Cmd+T to connect to a host."
-        } else {
-            "Press Ctrl+T to connect to a host."
-        };
+        let shortcut = ts!("empty.hint", shortcut = format!("{SHORTCUT_MODIFIER}+T"));
 
         div()
             .flex()
@@ -640,7 +652,7 @@ impl Workspace {
             )
             .child(
                 div().w(px(320.)).child(
-                    Button::new("empty-new-session", "New session")
+                    Button::new("empty-new-session", ts!("menu.new_session"))
                         .full_width(true)
                         .on_click({
                             let this = this.clone();
@@ -657,18 +669,25 @@ impl Workspace {
     /// Renders the bottom status bar.
     fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
-        let (target, status, grid) = match self.tabs.get(self.active) {
-            Some(tab) => {
-                let session = tab.view.read(cx).session().read(cx);
-                let (cols, rows) = session.terminal().size();
-                (
-                    session.profile().label(),
-                    session.status().summary(),
-                    format!("{cols}x{rows}"),
-                )
-            }
-            None => ("no session".to_owned(), "idle".to_owned(), "-".to_owned()),
-        };
+        let (target, status, grid): (SharedString, SharedString, SharedString) =
+            match self.tabs.get(self.active) {
+                Some(tab) => {
+                    let session = tab.view.read(cx).session().read(cx);
+                    let (cols, rows) = session.terminal().size();
+                    (
+                        session.profile().label().into(),
+                        session.status().summary(),
+                        format!("{cols}x{rows}").into(),
+                    )
+                }
+                None => (
+                    ts!("statusbar.no_session"),
+                    ts!("statusbar.idle"),
+                    // A dash standing in for the grid size: punctuation, not a
+                    // word, so it is the same in every language.
+                    SharedString::new_static("-"),
+                ),
+            };
 
         div()
             .flex()
@@ -683,28 +702,12 @@ impl Workspace {
             .border_color(theme.border)
             .text_size(px(11.))
             .text_color(theme.text_muted)
-            .child(
-                div()
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .child(SharedString::from(target)),
-            )
+            .child(div().flex_none().whitespace_nowrap().child(target))
             // The status summary carries the failure reason, which can be far
             // wider than the window; letting it shrink and ellipsize keeps the
             // grid size pinned to the right edge instead of pushing it out.
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(SharedString::from(status)),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .child(SharedString::from(grid)),
-            )
+            .child(div().flex_1().min_w_0().truncate().child(status))
+            .child(div().flex_none().whitespace_nowrap().child(grid))
             .into_any_element()
     }
 }
@@ -796,23 +799,27 @@ fn window_appearance(window: &WindowSettings) -> WindowBackgroundAppearance {
 ///
 /// About, Settings and Quit live in the application menu because that is where
 /// macOS users look for them.
+///
+/// The item labels are translated, but the application menu's own name is the
+/// "logman" wordmark and stays as it is. Rebuilt and re-installed whenever the
+/// language changes, because gpui takes the menu bar by value.
 fn app_menus() -> Vec<Menu> {
     vec![
         Menu {
             name: "logman".into(),
             items: vec![
-                MenuItem::action("About logman", ShowAbout),
+                MenuItem::action(ts!("menu.about"), ShowAbout),
                 MenuItem::separator(),
-                MenuItem::action("Settings\u{2026}", OpenSettings),
+                MenuItem::action(ts!("menu.settings"), OpenSettings),
                 MenuItem::separator(),
-                MenuItem::action("Quit logman", Quit),
+                MenuItem::action(ts!("menu.mac.quit"), Quit),
             ],
         },
         Menu {
-            name: "Session".into(),
+            name: ts!("menu.session"),
             items: vec![
-                MenuItem::action("New Session", NewSession),
-                MenuItem::action("Close Session", CloseSession),
+                MenuItem::action(ts!("menu.mac.new_session"), NewSession),
+                MenuItem::action(ts!("menu.mac.close_session"), CloseSession),
             ],
         },
     ]
@@ -855,12 +862,16 @@ fn main() {
         // Load settings before the widget layer installs its default theme, then
         // override that theme to match what the user configured.
         app_settings::init(cx);
+        let settings = app_settings::current(cx);
+        // Ahead of everything that renders a string — the menu bar included —
+        // so nothing is ever built in the wrong language and then corrected.
+        i18n::apply(settings.language.as_deref());
+
         ui::init(cx);
         TerminalView::init(cx);
         bind_shortcuts(cx);
         cx.set_menus(app_menus());
 
-        let settings = app_settings::current(cx);
         apply_ui_theme(settings.ui_theme, cx);
 
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
