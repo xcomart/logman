@@ -3,10 +3,18 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ElementId, Hsla, MouseButton, SharedString, Window, div, prelude::*, px, transparent_black,
+    App, ElementId, Hsla, MouseButton, ScrollHandle, SharedString, Window, div, prelude::*, px,
+    transparent_black,
 };
 
+use super::menu::{MenuButton, MenuEntry};
 use super::theme::{Theme, theme};
+
+/// Glyph of the button opening the tab list.
+const TAB_MENU_GLYPH: &str = "\u{25be}";
+
+/// Marker put in the shortcut slot of the active tab's dropdown row.
+const ACTIVE_MARK: &str = "\u{2713}";
 
 /// Connection state rendered as a colored dot in front of a tab title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,22 +75,30 @@ type IndexHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 /// Callback for the "new tab" button.
 type PlainHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// Callback fired when the tab dropdown wants to open or close itself.
+type OpenChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
 /// A stateless tab strip.
 ///
 /// The bar owns no selection state: the parent view passes the current tabs and
 /// the active index on every render, and reacts to [`TabBar::on_select`],
 /// [`TabBar::on_close`] and [`TabBar::on_new`].
 ///
-/// The tab list scrolls horizontally once it overflows; the "+" button stays
-/// pinned to the right edge.
+/// The tab list scrolls horizontally once it overflows; the dropdown listing
+/// every tab and the "+" button stay pinned to the right edge. Scrolling the
+/// active tab back into view is the parent's job, through the handle it passes
+/// to [`TabBar::scroll_handle`].
 #[derive(IntoElement)]
 pub struct TabBar {
     id: ElementId,
     tabs: Vec<TabItem>,
     active: usize,
+    scroll_handle: Option<ScrollHandle>,
+    menu_open: bool,
     on_select: Option<IndexHandler>,
     on_close: Option<IndexHandler>,
     on_new: Option<PlainHandler>,
+    on_menu_open_change: Option<OpenChangeHandler>,
 }
 
 impl TabBar {
@@ -92,9 +108,12 @@ impl TabBar {
             id: id.into(),
             tabs: Vec::new(),
             active: 0,
+            scroll_handle: None,
+            menu_open: false,
             on_select: None,
             on_close: None,
             on_new: None,
+            on_menu_open_change: None,
         }
     }
 
@@ -107,6 +126,21 @@ impl TabBar {
     /// Sets the index of the highlighted tab.
     pub fn active(mut self, index: usize) -> Self {
         self.active = index;
+        self
+    }
+
+    /// Tracks the horizontal scroll of the tab list with `handle`.
+    ///
+    /// The handle indexes the tabs in display order, so the parent can bring the
+    /// active tab back into view with [`gpui::ScrollHandle::scroll_to_item`].
+    pub fn scroll_handle(mut self, handle: &ScrollHandle) -> Self {
+        self.scroll_handle = Some(handle.clone());
+        self
+    }
+
+    /// Sets whether the tab dropdown is currently shown.
+    pub fn menu_open(mut self, open: bool) -> Self {
+        self.menu_open = open;
         self
     }
 
@@ -131,14 +165,53 @@ impl TabBar {
         self.on_new = Some(Rc::new(handler));
         self
     }
+
+    /// Called with the open state the tab dropdown would like to be in.
+    ///
+    /// Setting this handler is what makes the dropdown button appear; it is
+    /// still left out while the bar has no tabs to list.
+    pub fn on_menu_open_change(
+        mut self,
+        handler: impl Fn(bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_menu_open_change = Some(Rc::new(handler));
+        self
+    }
 }
 
 impl RenderOnce for TabBar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = theme(cx);
+        let id = self.id;
         let active = self.active;
         let on_select = self.on_select;
         let on_close = self.on_close;
+
+        // An empty bar has nothing to list, so its dropdown stays away.
+        let on_menu_open_change = self.on_menu_open_change.filter(|_| !self.tabs.is_empty());
+        let menu = on_menu_open_change.map(|on_open_change| {
+            let entries = self
+                .tabs
+                .iter()
+                .enumerate()
+                .map(|(index, tab)| {
+                    let mut entry = MenuEntry::new(tab.title.clone());
+                    if index == active {
+                        entry = entry.shortcut(ACTIVE_MARK);
+                    }
+                    if let Some(handler) = on_select.clone() {
+                        entry = entry.on_activate(move |window, cx| handler(index, window, cx));
+                    }
+                    entry
+                })
+                .collect();
+
+            MenuButton::new(ElementId::from((id.clone(), "tab-menu")))
+                .glyph(TAB_MENU_GLYPH)
+                .open(self.menu_open)
+                .entries(entries)
+                .on_open_change(move |open, window, cx| on_open_change(open, window, cx))
+        });
 
         let tab_theme = theme.clone();
         let tabs = self.tabs.into_iter().enumerate().map(move |(index, tab)| {
@@ -219,7 +292,7 @@ impl RenderOnce for TabBar {
         });
 
         div()
-            .id(self.id.clone())
+            .id(id.clone())
             .flex()
             .flex_row()
             .items_center()
@@ -230,7 +303,7 @@ impl RenderOnce for TabBar {
             .border_color(theme.border)
             .child(
                 div()
-                    .id(ElementId::from((self.id.clone(), "tabs")))
+                    .id(ElementId::from((id.clone(), "tabs")))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -238,12 +311,16 @@ impl RenderOnce for TabBar {
                     .min_w_0()
                     .h_full()
                     .overflow_x_scroll()
+                    .when_some(self.scroll_handle.as_ref(), |this, handle| {
+                        this.track_scroll(handle)
+                    })
                     .children(tabs),
             )
+            .children(menu)
             .when_some(self.on_new, |this, handler| {
                 this.child(
                     div()
-                        .id(ElementId::from((self.id.clone(), "new")))
+                        .id(ElementId::from((id.clone(), "new")))
                         .flex()
                         .flex_none()
                         .items_center()

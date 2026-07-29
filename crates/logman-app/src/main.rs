@@ -28,7 +28,7 @@ mod verifier;
 
 use gpui::{
     AnyElement, App, Application, Bounds, Context, ElementId, Entity, FocusHandle, Focusable,
-    KeyBinding, Menu, MenuItem, SharedString, Subscription, TitlebarOptions, Window,
+    KeyBinding, Menu, MenuItem, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
 use logman_core::{SessionProfile, UiTheme, WindowSettings};
@@ -113,6 +113,8 @@ struct Workspace {
     tabs: Vec<SessionTab>,
     /// Index of the active tab; meaningless while [`Workspace::tabs`] is empty.
     active: usize,
+    /// Horizontal scroll of the tab strip, used to reveal the active tab.
+    tab_scroll: ScrollHandle,
     /// The connection dialog, rendered only while it reports itself open.
     dialog: Entity<ConnectionDialog>,
     /// The settings dialog, rendered only while it reports itself open.
@@ -121,6 +123,8 @@ struct Workspace {
     about: Entity<AboutDialog>,
     /// Whether the application dropdown menu is showing.
     menu_open: bool,
+    /// Whether the tab strip's dropdown tab list is showing.
+    tab_menu_open: bool,
     /// Keeps the connection dialog subscription alive.
     _dialog_events: Subscription,
     /// Keeps the settings dialog subscription alive.
@@ -205,10 +209,12 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
             active: 0,
+            tab_scroll: ScrollHandle::new(),
             dialog,
             settings,
             about,
             menu_open: false,
+            tab_menu_open: false,
             _dialog_events: dialog_events,
             _settings_events: settings_events,
             _about_events: about_events,
@@ -234,16 +240,21 @@ impl Workspace {
             _observer: observer,
         });
         self.active = self.tabs.len() - 1;
+        self.reveal_active_tab();
         self.focus_active(window, cx);
         cx.notify();
     }
 
     /// Activates the tab at `index`, if it exists.
+    ///
+    /// Selecting the tab that is already active is not a no-op: it scrolls the
+    /// strip back to it, which is the point of picking it from the tab list.
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index >= self.tabs.len() || index == self.active {
+        if index >= self.tabs.len() {
             return;
         }
         self.active = index;
+        self.reveal_active_tab();
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -258,11 +269,26 @@ impl Workspace {
         tab.session(cx)
             .update(cx, |session, cx| session.disconnect(cx));
 
+        // Removing a tab in front of the active one shifts it down a slot.
+        if index < self.active {
+            self.active -= 1;
+        }
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);
         }
+        self.reveal_active_tab();
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    /// Scrolls the tab strip so that the active tab is on screen.
+    ///
+    /// The strip applies this during its next prepaint, so callers have to ask
+    /// for a repaint as well.
+    fn reveal_active_tab(&self) {
+        if !self.tabs.is_empty() {
+            self.tab_scroll.scroll_to_item(self.active);
+        }
     }
 
     /// Moves keyboard focus onto the active terminal, or onto the workspace
@@ -288,6 +314,7 @@ impl Workspace {
     /// one always puts the menu away.
     fn close_overlays(&mut self, cx: &mut Context<Self>) {
         self.menu_open = false;
+        self.tab_menu_open = false;
         if self.dialog.read(cx).is_open() {
             self.dialog.update(cx, |dialog, cx| dialog.close(cx));
         }
@@ -335,6 +362,15 @@ impl Workspace {
             return;
         }
         self.menu_open = open;
+        cx.notify();
+    }
+
+    /// Shows or hides the tab strip's dropdown tab list.
+    fn set_tab_menu_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.tab_menu_open == open {
+            return;
+        }
+        self.tab_menu_open = open;
         cx.notify();
     }
 
@@ -387,9 +423,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The menu paints above everything else, so it is dismissed first.
+        // The dropdown menus paint above everything else, so they are dismissed
+        // first.
         if self.menu_open {
             self.set_menu_open(false, cx);
+            return;
+        }
+        if self.tab_menu_open {
+            self.set_tab_menu_open(false, cx);
             return;
         }
         if self.about.read(cx).is_open() {
@@ -493,6 +534,14 @@ impl Workspace {
         TabBar::new("session-tabs")
             .tabs(tabs)
             .active(self.active)
+            .scroll_handle(&self.tab_scroll)
+            .menu_open(self.tab_menu_open)
+            .on_menu_open_change({
+                let this = this.clone();
+                move |open, _window, cx| {
+                    this.update(cx, |workspace, cx| workspace.set_tab_menu_open(open, cx));
+                }
+            })
             .on_select({
                 let this = this.clone();
                 move |index, window, cx| {
