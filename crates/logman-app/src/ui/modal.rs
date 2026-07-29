@@ -7,6 +7,16 @@ use super::theme::theme;
 /// Callback fired when the backdrop is clicked.
 type DismissHandler = Box<dyn Fn(&mut Window, &mut App)>;
 
+/// Space kept clear above and below the panel, in pixels, top and bottom
+/// combined.
+const VIEWPORT_MARGIN: f32 = 64.;
+
+/// Floor for the panel's height cap, in pixels.
+///
+/// Without it a window shorter than [`VIEWPORT_MARGIN`] would cap the panel at
+/// zero — or a negative value — and hide it entirely.
+const MIN_PANEL_HEIGHT: f32 = 160.;
+
 /// Builds a modal dialog.
 ///
 /// The returned element positions itself absolutely, so it must be rendered
@@ -16,6 +26,9 @@ type DismissHandler = Box<dyn Fn(&mut Window, &mut App)>;
 ///
 /// Clicks on the panel itself are swallowed; only clicks on the backdrop invoke
 /// `on_dismiss`.
+///
+/// The panel is as tall as its content but never taller than the window, so a
+/// `body` that can grow past that should put its own scroll area inside.
 ///
 /// ```ignore
 /// modal("connect", "New connection", px(420.), body, cx.listener(..))
@@ -47,9 +60,11 @@ struct Modal {
 }
 
 impl RenderOnce for Modal {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = theme(cx);
         let on_dismiss = self.on_dismiss;
+        let viewport_height = f32::from(window.viewport_size().height);
+        let max_height = px((viewport_height - VIEWPORT_MARGIN).max(MIN_PANEL_HEIGHT));
 
         div()
             .id(self.id.clone())
@@ -68,6 +83,7 @@ impl RenderOnce for Modal {
                     .flex()
                     .flex_col()
                     .w(self.width)
+                    .max_h(max_height)
                     .bg(theme.background)
                     .border_1()
                     .border_color(theme.border)
@@ -87,9 +103,15 @@ impl RenderOnce for Modal {
                             .child(self.title),
                     )
                     .child(
+                        // `min_h_0` is what lets the body shrink once the panel
+                        // hits `max_height`: a flex item's default minimum size
+                        // is its content, which would push the panel past the
+                        // cap instead of handing the overflow to a scroll area
+                        // inside the body.
                         div()
                             .flex()
                             .flex_col()
+                            .min_h_0()
                             .gap(px(12.))
                             .p(px(16.))
                             .child(self.body),
