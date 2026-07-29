@@ -176,6 +176,10 @@ impl Workspace {
                         tab.session(cx)
                             .update(cx, |session, cx| session.apply_settings(cx));
                     }
+                    // The dialog closes itself after applying; without a refocus
+                    // the window focus dangles on its unrendered controls and
+                    // macOS disables every menu item validated through it.
+                    this.focus_active(window, cx);
                 }
                 SettingsDialogEvent::Dismissed => {
                     dialog.update(cx, |dialog, cx| dialog.close(cx));
