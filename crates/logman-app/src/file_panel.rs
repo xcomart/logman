@@ -28,8 +28,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, ElementId, Entity, EntityId, ExternalPaths,
-    PathPromptOptions, ScrollHandle, SharedString, Subscription, Window, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, DragMoveEvent, ElementId, Entity, EntityId,
+    ExternalPaths, PathPromptOptions, ScrollHandle, SharedString, Subscription, Window, div,
+    prelude::*, px,
 };
 use logman_ssh::{RemoteEntry, SftpClient, SftpError};
 
@@ -39,11 +40,32 @@ use crate::icons;
 use crate::session::Session;
 use crate::ui::{Theme, theme};
 
-/// Width of the panel, in pixels.
+/// Width the panel opens at, in pixels.
 ///
-/// Fixed rather than resizable: the panel is a sidebar, and a drag handle would
-/// need a persisted width to be worth having.
-const PANEL_WIDTH: f32 = 260.;
+/// Wide enough for a typical file name plus its size column; dragging the right
+/// edge takes it from there.
+const DEFAULT_PANEL_WIDTH: f32 = 260.;
+
+/// Narrowest the panel may be dragged, in pixels.
+///
+/// Below this the header's path and the toolbar buttons start colliding, and a
+/// panel too narrow to read is indistinguishable from one the user meant to
+/// close — which the toggle already does, and reversibly.
+const MIN_PANEL_WIDTH: f32 = 180.;
+
+/// Widest the panel may be dragged, in pixels.
+///
+/// The panel is a sidebar next to the terminals, not a half of the window; the
+/// cap is what stops a slipped drag from squeezing the panes down to nothing on
+/// a small display.
+const MAX_PANEL_WIDTH: f32 = 560.;
+
+/// Width of the grab area along the panel's right edge, in pixels.
+///
+/// The edge itself is the panel's hairline border, far too thin to hit. The
+/// handle is laid over it absolutely so that widening the grab area costs the
+/// listing no room.
+const PANEL_HANDLE: f32 = 6.;
 
 /// Longest remote path the header shows in full, in characters.
 ///
@@ -67,6 +89,15 @@ const BUTTON_GROUP: &str = "file-panel-button";
 
 /// The row standing for the parent directory. Punctuation, never translated.
 const PARENT_NAME: &str = "..";
+
+/// The panel's right edge, while a drag is holding it.
+///
+/// Carries nothing: there is one panel and one edge, so the type alone says
+/// what is being dragged. Being its own type is the point — it is what keeps
+/// an edge drag from looking like the [`ExternalPaths`] drop the panel accepts,
+/// since gpui routes both through the same drag machinery and tells them apart
+/// by the payload's type.
+struct DraggedPanelEdge;
 
 /// Where one navigation gets its directory from.
 enum Target {
@@ -167,6 +198,13 @@ pub struct FilePanel {
     /// nothing else removes them, so a session keeps its place for as long as
     /// it is open.
     states: HashMap<EntityId, SessionState>,
+    /// How wide the panel is drawn, in pixels.
+    ///
+    /// Session state only, like the workspace's `panel_open` flag: persisting it
+    /// would mean a settings key, and re-dragging an edge is cheap enough that
+    /// the key would earn its keep only once there is more to remember about the
+    /// panel than a flag and a number.
+    width: f32,
     /// Watches the active session for directory and status changes.
     _observer: Option<Subscription>,
 }
@@ -177,8 +215,25 @@ impl FilePanel {
         Self {
             session: None,
             states: HashMap::new(),
+            width: DEFAULT_PANEL_WIDTH,
             _observer: None,
         }
+    }
+
+    /// Widens or narrows the panel to follow a drag of its right edge.
+    ///
+    /// The width is read off the pointer rather than accumulated as a delta:
+    /// the panel's left edge never moves, so the distance from it *is* the
+    /// width, and a gesture that wandered outside the window comes back to the
+    /// right place instead of to wherever the deltas summed to.
+    fn drag_edge(&mut self, event: &DragMoveEvent<DraggedPanelEdge>, cx: &mut Context<Self>) {
+        let width = f32::from(event.event.position.x - event.bounds.left());
+        let width = width.clamp(MIN_PANEL_WIDTH, MAX_PANEL_WIDTH);
+        if width == self.width || !width.is_finite() {
+            return;
+        }
+        self.width = width;
+        cx.notify();
     }
 
     /// Points the panel at `session`, keeping whatever it was showing before.
@@ -809,12 +864,33 @@ impl Render for FilePanel {
         let notice = self.render_notice(state, cx);
         let accent = theme.accent;
 
+        // Kept wholly inside the panel and added last, so it wins the hit test
+        // against the rows it covers. Straddling the border would put half the
+        // grab area over the pane next door, which is drawn after the panel and
+        // would take those pixels back.
+        let handle = div()
+            .id("file-panel-edge")
+            .absolute()
+            // A plain hitbox does not stop events reaching what is under it,
+            // and under this one are listing rows that would take the press as
+            // a selection.
+            .occlude()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(px(PANEL_HANDLE))
+            .cursor_ew_resize()
+            // An empty preview: the edge follows the pointer directly, so a
+            // ghost trailing it would only be a second thing to watch.
+            .on_drag(DraggedPanelEdge, |_, _, _, cx| cx.new(|_| gpui::Empty));
+
         div()
             .id("file-panel")
+            .relative()
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(PANEL_WIDTH))
+            .w(px(self.width))
             .h_full()
             .min_h_0()
             // The panel is the only thing covering these pixels, so this is
@@ -833,9 +909,16 @@ impl Render for FilePanel {
             .on_drop(cx.listener(|panel, paths: &ExternalPaths, _window, cx| {
                 panel.upload(paths.paths().to_vec(), cx);
             }))
+            // Listening on the panel, not on the handle: the handle slides out
+            // from under the pointer as the drag goes on, while the panel's left
+            // edge — the one the new width is measured from — stays put.
+            .on_drag_move::<DraggedPanelEdge>(
+                cx.listener(|panel, event, _window, cx| panel.drag_edge(event, cx)),
+            )
             .child(header)
             .child(list)
             .children(notice)
+            .child(handle)
     }
 }
 
