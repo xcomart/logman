@@ -11,7 +11,7 @@
 use std::fmt;
 
 use futures::StreamExt;
-use gpui::{App, Context, SharedString, Task};
+use gpui::{App, AppContext, Context, Entity, SharedString, Task};
 use logman_core::{EffectiveTerminal, SessionProfile};
 use logman_ssh::{SftpClient, SshAuth, SshConfig, SshErrorKind, SshEvent, SshSession};
 use logman_term::{TerminalModel, TerminalTheme};
@@ -268,6 +268,23 @@ impl Session {
         }
         self.terminal.reset();
         self.start(cx);
+    }
+
+    /// Opens a second, independent session to the same host as this one.
+    ///
+    /// Same principle as [`Session::reconnect`]: the credentials already in
+    /// memory are reused, so a duplicate never asks for a password again. It
+    /// lives here rather than in the caller for the reason given at the top of
+    /// this module — [`Session::auth`] has no accessor, so the only place that
+    /// can hand it to a new session is inside this type.
+    ///
+    /// The returned session is its own entity with its own transport, terminal
+    /// and life cycle; nothing about it stays tied to this one. The current
+    /// status is irrelevant, exactly as it is for a reconnect: duplicating a
+    /// failed or disconnected session is how the user retries in a second pane
+    /// while keeping the first one's error on screen.
+    pub fn duplicate(&self, cx: &mut Context<Self>) -> Entity<Self> {
+        cx.new(|cx| Self::new(self.profile.clone(), self.auth.clone(), cx))
     }
 
     /// How the session should be rendered in the tab strip.

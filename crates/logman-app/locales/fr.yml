@@ -12,6 +12,8 @@ common:
 
 menu:
   new_session: Nouvelle session
+  duplicate_right: Diviser à droite avec une nouvelle connexion
+  duplicate_below: Diviser en dessous avec une nouvelle connexion
   break_out_pane: Détacher dans un onglet
   settings: Préférences…
   about: À propos de logman
@@ -20,12 +22,16 @@ menu:
   mac:
     new_session: Nouvelle session
     close_session: Fermer la session
+    duplicate_right: Diviser à droite avec une nouvelle connexion
+    duplicate_below: Diviser en dessous avec une nouvelle connexion
     break_out_pane: Détacher dans un onglet
     quit: Quitter logman
 
 tab:
   split_right: Diviser à droite de l'onglet actuel
   split_below: Diviser sous l'onglet actuel
+  duplicate_right: Diviser à droite avec une nouvelle connexion
+  duplicate_below: Diviser en dessous avec une nouvelle connexion
   close: Fermer l'onglet
 
 files:

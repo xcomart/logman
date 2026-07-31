@@ -12,6 +12,8 @@ common:
 
 menu:
   new_session: 新規セッション
+  duplicate_right: 新しい接続で右に分割
+  duplicate_below: 新しい接続で下に分割
   break_out_pane: ペインを新しいタブに分離
   settings: 設定…
   about: logman について
@@ -20,12 +22,16 @@ menu:
   mac:
     new_session: 新規セッション
     close_session: セッションを閉じる
+    duplicate_right: 新しい接続で右に分割
+    duplicate_below: 新しい接続で下に分割
     break_out_pane: ペインを新しいタブに分離
     quit: logman を終了
 
 tab:
   split_right: 現在のタブの右に分割して追加
   split_below: 現在のタブの下に分割して追加
+  duplicate_right: 新しい接続で右に分割
+  duplicate_below: 新しい接続で下に分割
   close: タブを閉じる
 
 files:
