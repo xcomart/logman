@@ -28,6 +28,10 @@ common:
 # them, so they are separate keys.
 menu:
   new_session: New session
+  # Moves the focused pane of a split tab out into a tab of its own. Also the
+  # label of the matching row in the tab context menu, which is in sentence case
+  # too.
+  break_out_pane: Move pane to its own tab
   settings: Settings…
   about: About logman
   quit: Quit
@@ -35,8 +39,23 @@ menu:
   mac:
     new_session: New Session
     close_session: Close Session
+    break_out_pane: Move Pane to Its Own Tab
     quit: Quit logman
 
+# The menu a right-click on a tab opens. "Current tab" is the active one, which
+# a right-click deliberately leaves as it is: both split commands attach the
+# clicked tab to the tab already on screen.
+tab:
+  split_right: Split right of current tab
+  split_below: Split below current tab
+  close: Close tab
+
+# The remote file panel: the SFTP browser to the left of the terminal.
+#
+# `%{name}` is a file name, `%{path}` a local path and `%{error}` the sentence
+# the SFTP layer produced; all three are values rather than words and stay as
+# they are. Only the sentence framing `%{error}` is translated, the same policy
+# the connection and session messages follow.
 # The placeholder shown while no session is open.
 empty:
   # `%{shortcut}` is "Cmd+T" or "Ctrl+T"; neither is translated.

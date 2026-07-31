@@ -10,12 +10,22 @@
 //! terminal surface of the active one, a status bar, and the connection dialog
 //! rendered on top of everything else. Session state lives in [`session`], the
 //! terminal surface in [`terminal_view`], and every reusable widget in [`ui`].
+//!
+//! A tab is not one session but a tree of panes ([`pane_tree`]), each showing
+//! one session. Most tabs hold a single pane; splitting one is how a tab comes
+//! to show several sessions side by side.
 
 mod about_dialog;
 mod app_settings;
 mod caption;
 mod connection;
 mod i18n;
+// The pane tree is written as a self-contained data structure with its own
+// tests rather than for the two call sites the shell currently has, so it
+// offers operations nothing reaches yet — splitting a pane in place, editing a
+// payload — which inside a binary crate read as dead code.
+#[allow(dead_code)]
+mod pane_tree;
 mod session;
 mod settings_dialog;
 mod terminal_view;
@@ -34,9 +44,10 @@ mod verifier;
 rust_i18n::i18n!("locales", fallback = "en");
 
 use gpui::{
-    AnyElement, App, Application, Bounds, Context, ElementId, Entity, FocusHandle, Focusable,
-    KeyBinding, Menu, MenuItem, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
+    AnyElement, App, Application, Bounds, Context, ElementId, Entity, EntityId, FocusHandle,
+    Focusable, KeyBinding, Menu, MenuItem, Pixels, Point, ScrollHandle, SharedString, Subscription,
+    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div,
+    prelude::*, px, relative, size,
 };
 use logman_core::{SessionProfile, UiTheme, WindowSettings};
 use logman_ssh::SshAuth;
@@ -45,10 +56,14 @@ use about_dialog::{AboutDialog, AboutDialogEvent};
 use caption::apply_caption_theme;
 use connection::{ConnectionDialog, ConnectionDialogEvent};
 use i18n::ts;
-use session::Session;
+use pane_tree::{Axis, PaneId, PaneNode, PaneTree};
+use session::{Session, SessionStatus};
 use settings_dialog::{SettingsDialog, SettingsDialogEvent};
-use terminal_view::TerminalView;
-use ui::{Button, ButtonVariant, MenuButton, MenuEntry, TabBar, TabItem, Theme, set_theme, theme};
+use terminal_view::{PaneFocused, TerminalView};
+use ui::{
+    Button, ButtonVariant, ContextMenu, MenuButton, MenuEntry, TabBar, TabItem, Theme, set_theme,
+    theme,
+};
 
 actions!(
     logman,
@@ -57,8 +72,14 @@ actions!(
         Quit,
         /// Open the connection dialog with an empty form.
         NewSession,
-        /// Close the active session tab.
+        /// Close the active pane, and with it the tab once it was the last one.
         CloseSession,
+        /// Move keyboard focus to the next pane of the active tab.
+        FocusNextPane,
+        /// Move keyboard focus to the previous pane of the active tab.
+        FocusPrevPane,
+        /// Move the active pane out of its tab and into a tab of its own.
+        BreakOutPane,
         /// Open the settings dialog.
         OpenSettings,
         /// Open the about dialog.
@@ -99,18 +120,110 @@ const SHORTCUT_MODIFIER: &str = if cfg!(target_os = "macos") {
     "Ctrl"
 };
 
-/// One open session together with the view rendering it.
-struct SessionTab {
+/// Modifier key named in the shortcut hints of the pane commands.
+///
+/// Not [`SHORTCUT_MODIFIER`]: the pane shortcuts avoid `Ctrl` off macOS so that
+/// the remote shell keeps it. Follows `pane_modifier` in [`bind_shortcuts`], and
+/// like the other modifier name it is never translated.
+const PANE_SHORTCUT_MODIFIER: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Alt"
+};
+
+/// Narrowest pane, in terminal columns, a horizontal split may produce.
+///
+/// A pane below this is unusable — a shell prompt alone is wider — so a split
+/// that would create one is refused instead.
+const MIN_PANE_COLS: u16 = 20;
+
+/// Shortest pane, in terminal rows, a vertical split may produce.
+const MIN_PANE_ROWS: u16 = 6;
+
+/// Smallest share of a split either of its children may be given.
+///
+/// Splits are always created even and nothing moves the ratio yet, so this only
+/// guards the renderer against a stored ratio that would collapse a pane to
+/// nothing.
+const MIN_SPLIT_RATIO: f32 = 0.1;
+
+/// One pane: the view showing a session, plus the wiring that keeps the
+/// workspace in step with it.
+struct PaneLeaf {
     /// The terminal surface; it owns the [`Session`] entity.
     view: Entity<TerminalView>,
     /// Repaints the workspace when the session's title or status changes.
     _observer: Subscription,
+    /// Records this pane as the active one when a click focuses its view.
+    ///
+    /// Driven by [`PaneFocused`] rather than `cx.on_focus`: gpui fires focus
+    /// listeners after the frame that carried the click was already drawn, so
+    /// a frame-swap driven that way would not show up until the next input
+    /// event — the active-pane frame would visibly trail the click.
+    _clicked: Subscription,
+    /// Backstop for focus arriving by any route other than a click, e.g. a
+    /// future programmatic `window.focus`. One frame late by gpui's dispatch
+    /// order, which does not matter for paths that repaint anyway.
+    _focus: Subscription,
+}
+
+/// One tab: a tree of panes, one of which is active.
+struct SessionTab {
+    /// The panes of this tab. Never empty — the last pane closes the tab.
+    panes: PaneTree<PaneLeaf>,
+    /// The pane the tab label, the status bar and the shortcuts act on.
+    active_pane: PaneId,
 }
 
 impl SessionTab {
-    /// The session rendered by this tab.
-    fn session(&self, cx: &App) -> Entity<Session> {
-        self.view.read(cx).session().clone()
+    /// A tab of a single pane showing `leaf`.
+    fn single(leaf: PaneLeaf) -> Self {
+        let panes = PaneTree::single(leaf);
+        let active_pane = panes.first_leaf().0;
+        Self { panes, active_pane }
+    }
+
+    /// The active pane, falling back to the first one.
+    ///
+    /// The fallback only matters if [`SessionTab::active_pane`] ever went stale;
+    /// a tab always has a pane to speak for it, so this never fails.
+    fn active_pane(&self) -> PaneId {
+        if self.panes.contains(self.active_pane) {
+            self.active_pane
+        } else {
+            self.panes.first_leaf().0
+        }
+    }
+
+    /// The view of the active pane.
+    fn active_view(&self) -> &Entity<TerminalView> {
+        let pane = self.active_pane();
+        match self.panes.get(pane) {
+            Some(leaf) => &leaf.view,
+            None => &self.panes.first_leaf().1.view,
+        }
+    }
+
+    /// Every session in this tab, one per pane.
+    fn sessions(&self, cx: &App) -> Vec<Entity<Session>> {
+        self.panes
+            .leaves()
+            .into_iter()
+            .map(|(_, leaf)| leaf.view.read(cx).session().clone())
+            .collect()
+    }
+
+    /// The pane rendering `view`, if any.
+    ///
+    /// Panes are found by view rather than by id because a focus event only
+    /// says which surface was focused, and a pane keeps its view across merges
+    /// and break-outs.
+    fn pane_of(&self, view: EntityId) -> Option<PaneId> {
+        self.panes
+            .leaves()
+            .into_iter()
+            .find(|(_, leaf)| leaf.view.entity_id() == view)
+            .map(|(id, _)| id)
     }
 }
 
@@ -134,6 +247,9 @@ struct Workspace {
     menu_open: bool,
     /// Whether the tab strip's dropdown tab list is showing.
     tab_menu_open: bool,
+    /// The tab a right-click opened a context menu for, and where the pointer
+    /// was when it did. `None` while no tab menu is showing.
+    tab_context: Option<(usize, Point<Pixels>)>,
     /// Keeps the connection dialog subscription alive.
     _dialog_events: Subscription,
     /// Keeps the settings dialog subscription alive.
@@ -188,9 +304,11 @@ impl Workspace {
                     // that call re-arms the accent policy that would otherwise
                     // repaint the caption out from under us.
                     apply_caption_theme(window, settings.ui_theme, &theme(cx));
-                    for tab in &this.tabs {
-                        tab.session(cx)
-                            .update(cx, |session, cx| session.apply_settings(cx));
+                    // Every pane of every tab, not just the visible one: a
+                    // background tab's terminal has to come back in the newly
+                    // chosen scheme too.
+                    for session in this.sessions(cx) {
+                        session.update(cx, |session, cx| session.apply_settings(cx));
                     }
                     // The dialog closes itself after applying; without a refocus
                     // the window focus dangles on its unrendered controls and
@@ -218,9 +336,8 @@ impl Workspace {
             );
 
         let quit = cx.on_app_quit(|this, cx| {
-            for tab in &this.tabs {
-                tab.session(cx)
-                    .update(cx, |session, cx| session.disconnect(cx));
+            for session in this.sessions(cx) {
+                session.update(cx, |session, cx| session.disconnect(cx));
             }
             async {}
         });
@@ -235,11 +352,17 @@ impl Workspace {
             about,
             menu_open: false,
             tab_menu_open: false,
+            tab_context: None,
             _dialog_events: dialog_events,
             _settings_events: settings_events,
             _about_events: about_events,
             _quit: quit,
         }
+    }
+
+    /// Every session the workspace holds, across all tabs and panes.
+    fn sessions(&self, cx: &App) -> Vec<Entity<Session>> {
+        self.tabs.iter().flat_map(|tab| tab.sessions(cx)).collect()
     }
 
     /// Opens a session for `profile` and makes its tab active.
@@ -253,16 +376,68 @@ impl Workspace {
         log::info!("opening a session to {}", profile.label());
         let session = cx.new(|cx| Session::new(profile, auth, cx));
         let view = cx.new(|cx| TerminalView::new(session.clone(), window, cx));
-        let observer = cx.observe(&session, |_, _, cx| cx.notify());
+        let leaf = self.new_pane(view, session, window, cx);
 
-        self.tabs.push(SessionTab {
-            view,
-            _observer: observer,
-        });
+        self.tabs.push(SessionTab::single(leaf));
         self.active = self.tabs.len() - 1;
         self.reveal_active_tab();
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    /// Wires a freshly created terminal view up as a pane.
+    fn new_pane(
+        &mut self,
+        view: Entity<TerminalView>,
+        session: Entity<Session>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PaneLeaf {
+        // Repaints on any session change; on a disconnect it also retires the
+        // pane. `observe_in` rather than `observe` because closing a pane moves
+        // focus, and focus needs the window.
+        let observer = cx.observe_in(&session, window, |this, session, window, cx| {
+            if matches!(
+                session.read(cx).status(),
+                SessionStatus::Disconnected { .. }
+            ) {
+                this.close_pane_for_session(session.entity_id(), window, cx);
+            }
+            cx.notify();
+        });
+        let handle = view.read(cx).focus_handle(cx);
+        let id = view.entity_id();
+        let clicked = cx.subscribe(&view, |this, view, _: &PaneFocused, cx| {
+            this.on_pane_focused(view.entity_id(), cx);
+        });
+        let focus = cx.on_focus(&handle, window, move |this, _window, cx| {
+            this.on_pane_focused(id, cx);
+        });
+
+        PaneLeaf {
+            view,
+            _observer: observer,
+            _clicked: clicked,
+            _focus: focus,
+        }
+    }
+
+    /// Records the pane rendering `view` as the active one of its tab.
+    ///
+    /// This is what makes a click inside a pane — [`TerminalView`] focuses
+    /// itself on mouse down — move the active-pane marker, the status bar and
+    /// the tab label onto that pane.
+    fn on_pane_focused(&mut self, view: EntityId, cx: &mut Context<Self>) {
+        for tab in &mut self.tabs {
+            let Some(pane) = tab.pane_of(view) else {
+                continue;
+            };
+            if tab.active_pane != pane {
+                tab.active_pane = pane;
+                cx.notify();
+            }
+            return;
+        }
     }
 
     /// Activates the tab at `index`, if it exists.
@@ -279,15 +454,19 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Disconnects and removes the tab at `index`.
+    /// Disconnects and removes the tab at `index`, panes and all.
+    ///
+    /// This is the tab strip's close button: a tab that was split closes as a
+    /// unit. Closing one pane at a time is [`Workspace::close_active_pane`].
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
         }
 
         let tab = self.tabs.remove(index);
-        tab.session(cx)
-            .update(cx, |session, cx| session.disconnect(cx));
+        for session in tab.sessions(cx) {
+            session.update(cx, |session, cx| session.disconnect(cx));
+        }
 
         // Removing a tab in front of the active one shifts it down a slot.
         if index < self.active {
@@ -301,6 +480,240 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Disconnects and removes the active pane of the active tab.
+    ///
+    /// The pane's sibling grows into the space it leaves. On the last pane of a
+    /// tab there is no sibling to grow, so the tab goes with it.
+    fn close_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        self.remove_pane(self.active, tab.active_pane(), window, cx);
+    }
+
+    /// Retires the pane of a session whose connection has ended.
+    ///
+    /// This is the automatic arm of the close policy, driven by the session
+    /// observer in [`Self::new_pane`]:
+    ///
+    /// * `Disconnected` — the remote shell exited or the server hung up — the
+    ///   pane closes by itself; its sibling grows, and the tab goes once its
+    ///   last pane does. When the last tab goes, the workspace shows the start
+    ///   screen again rather than quitting.
+    /// * `Failed` never lands here: a session that could not connect keeps its
+    ///   pane, so the error and its Reconnect button stay readable.
+    ///
+    /// A session that is no longer in any tab — the manual close paths remove
+    /// the pane *before* disconnecting it — is a no-op, which is also what
+    /// makes the observer re-entrancy safe.
+    fn close_pane_for_session(
+        &mut self,
+        session: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let found = self.tabs.iter().enumerate().find_map(|(index, tab)| {
+            tab.panes.leaves().into_iter().find_map(|(pane, leaf)| {
+                (leaf.view.read(cx).session().entity_id() == session).then_some((index, pane))
+            })
+        });
+        let Some((index, pane)) = found else {
+            return;
+        };
+        self.remove_pane(index, pane, window, cx);
+    }
+
+    /// Disconnects and removes one pane of the tab at `index`.
+    ///
+    /// The pane's sibling grows into the space it leaves. On the last pane of a
+    /// tab there is no sibling to grow, so the tab goes with it. Focus only
+    /// moves when the removed pane sat in the active tab; a background tab
+    /// shrinking must not steal the keyboard.
+    fn remove_pane(
+        &mut self,
+        index: usize,
+        pane: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        if tab.panes.leaf_count() < 2 {
+            self.close_tab(index, window, cx);
+            return;
+        }
+
+        // Read before the removal, while the neighbour is still in the tree.
+        let successor = tab.panes.next_leaf(pane);
+
+        let tab = &mut self.tabs[index];
+        let Some(leaf) = tab.panes.remove(pane) else {
+            return;
+        };
+        // The removed pane may not have been the active one — an idle split
+        // closing in the background — in which case the active pane stands.
+        if !tab.panes.contains(tab.active_pane) {
+            tab.active_pane = successor
+                .filter(|id| tab.panes.contains(*id))
+                .unwrap_or_else(|| tab.panes.first_leaf().0);
+        }
+
+        // Dropping the leaf takes its subscriptions and its view with it, so the
+        // session has to be told to hang up first. Hanging up twice — the
+        // automatic path arrives here already disconnected — is a no-op.
+        let session = leaf.view.read(cx).session().clone();
+        session.update(cx, |session, cx| session.disconnect(cx));
+
+        if index == self.active {
+            self.focus_active(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Turns the tab at `source` into a split of the active tab.
+    ///
+    /// The source tab leaves the strip and its panes — the whole subtree, if it
+    /// was itself split — appear next to the active pane, along `axis`. Focus
+    /// follows the panes that moved.
+    ///
+    /// Splitting is always "merge another open tab in", so it needs a target the
+    /// user picks: [`Workspace::render_tab_context`] is the only way in, and
+    /// there is no shortcut for it.
+    pub(crate) fn merge_tab_into_active(
+        &mut self,
+        source: usize,
+        axis: Axis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if source >= self.tabs.len() || source == self.active {
+            return;
+        }
+        if !self.can_split_active(axis, cx) {
+            // Only reachable from a stale menu: the rows offering a split are
+            // left out while the pane is this small.
+            log::info!("refusing to merge tab {source}: the active pane is too small to split");
+            return;
+        }
+
+        let target_pane = self.tabs[self.active].active_pane();
+        let incoming = self.tabs.remove(source);
+        // Removing a tab in front of the active one shifts it down a slot.
+        if source < self.active {
+            self.active -= 1;
+        }
+
+        let follow = incoming.active_pane();
+        let tab = &mut self.tabs[self.active];
+        if !tab.panes.merge_subtree(target_pane, axis, incoming.panes) {
+            // `target_pane` came from this very tab a moment ago, so this is
+            // unreachable; logged rather than ignored because reaching it would
+            // mean a pane has been dropped on the floor.
+            log::error!("the pane to split has vanished; the merge was dropped");
+            return;
+        }
+        tab.active_pane = follow;
+
+        self.reveal_active_tab();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Moves the active pane into a tab of its own, right after the current one.
+    ///
+    /// The session keeps running throughout: the pane, its view and its
+    /// subscriptions move over unchanged. A no-op on an unsplit tab, which is
+    /// already exactly this.
+    pub(crate) fn break_out_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        if tab.panes.leaf_count() < 2 {
+            return;
+        }
+
+        let pane = tab.active_pane();
+        let successor = tab.panes.next_leaf(pane);
+
+        let tab = &mut self.tabs[self.active];
+        let Some(leaf) = tab.panes.remove(pane) else {
+            return;
+        };
+        tab.active_pane = successor
+            .filter(|id| tab.panes.contains(*id))
+            .unwrap_or_else(|| tab.panes.first_leaf().0);
+
+        let index = self.active + 1;
+        self.tabs.insert(index, SessionTab::single(leaf));
+        self.active = index;
+        self.reveal_active_tab();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Moves focus to the next pane of the active tab, wrapping around.
+    pub(crate) fn focus_next_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_pane(true, window, cx);
+    }
+
+    /// Moves focus to the previous pane of the active tab, wrapping around.
+    pub(crate) fn focus_prev_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_pane(false, window, cx);
+    }
+
+    /// Steps the active pane one place through the active tab's focus cycle.
+    fn cycle_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if tab.panes.leaf_count() < 2 {
+            return;
+        }
+
+        let from = tab.active_pane();
+        let next = if forward {
+            tab.panes.next_leaf(from)
+        } else {
+            tab.panes.prev_leaf(from)
+        };
+        let Some(next) = next else {
+            return;
+        };
+
+        tab.active_pane = next;
+        // Focusing the pane's grid also runs `on_pane_focused`, which is
+        // harmless: it finds the pane already marked active.
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Whether the active pane is big enough to be split along `axis`.
+    ///
+    /// The two halves inherit roughly half of the pane's current grid each, so
+    /// the check is on the live column or row count rather than on pixels: a
+    /// pane that would come out narrower than [`MIN_PANE_COLS`] or shorter than
+    /// [`MIN_PANE_ROWS`] is not worth having.
+    ///
+    /// Silent, because the tab context menu asks this on every frame it is open
+    /// to decide which rows to show; the refusal is logged where it happens.
+    fn can_split_active(&self, axis: Axis, cx: &App) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return false;
+        };
+        let (cols, rows) = tab
+            .active_view()
+            .read(cx)
+            .session()
+            .read(cx)
+            .terminal()
+            .size();
+        match axis {
+            Axis::Horizontal => cols / 2 >= MIN_PANE_COLS,
+            Axis::Vertical => rows / 2 >= MIN_PANE_ROWS,
+        }
+    }
+
     /// Scrolls the tab strip so that the active tab is on screen.
     ///
     /// The strip applies this during its next prepaint, so callers have to ask
@@ -311,8 +724,8 @@ impl Workspace {
         }
     }
 
-    /// Moves keyboard focus onto the active terminal, or onto the workspace
-    /// itself when no session is open.
+    /// Moves keyboard focus onto the active pane's terminal, or onto the
+    /// workspace itself when no session is open.
     ///
     /// Without this the shortcuts stop working after the last tab is closed,
     /// because their key context only exists while something inside the
@@ -320,11 +733,21 @@ impl Workspace {
     fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.tabs.get(self.active) {
             Some(tab) => {
-                let handle = tab.view.read(cx).focus_handle(cx);
+                let handle = tab.active_view().read(cx).focus_handle(cx);
                 window.focus(&handle);
             }
             None => window.focus(&self.focus_handle),
         }
+    }
+
+    /// Whether one of the modal dialogs is on screen.
+    ///
+    /// A modal takes the window over, so anything the strip would otherwise open
+    /// on top of it has to stand down.
+    fn dialog_open(&self, cx: &App) -> bool {
+        self.dialog.read(cx).is_open()
+            || self.settings.read(cx).is_open()
+            || self.about.read(cx).is_open()
     }
 
     /// Closes every dialog and the dropdown menu.
@@ -335,6 +758,7 @@ impl Workspace {
     fn close_overlays(&mut self, cx: &mut Context<Self>) {
         self.menu_open = false;
         self.tab_menu_open = false;
+        self.tab_context = None;
         if self.dialog.read(cx).is_open() {
             self.dialog.update(cx, |dialog, cx| dialog.close(cx));
         }
@@ -394,20 +818,78 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Opens the context menu of the tab at `index`, with its corner at `at`.
+    ///
+    /// The right-click that gets here does not change the active tab, so `index`
+    /// and [`Workspace::active`] are independent — which is what the menu's
+    /// commands are built around.
+    fn open_tab_context(&mut self, index: usize, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() || self.dialog_open(cx) {
+            return;
+        }
+        // Not `close_overlays`: a modal dialog outranks the strip — the guard
+        // above leaves it alone — while the two dropdowns are simply mutually
+        // exclusive with this menu.
+        self.menu_open = false;
+        self.tab_menu_open = false;
+        self.tab_context = Some((index, at));
+        cx.notify();
+    }
+
+    /// Puts the tab context menu away, if one is open.
+    fn close_tab_context(&mut self, cx: &mut Context<Self>) {
+        if self.tab_context.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>T</kbd>.
     fn new_session_action(&mut self, _: &NewSession, _window: &mut Window, cx: &mut Context<Self>) {
         self.open_dialog(cx);
     }
 
     /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>W</kbd>.
+    ///
+    /// Closes the active pane rather than the whole tab, the way a split editor
+    /// or terminal does: on an unsplit tab the two are the same thing, and on a
+    /// split one closing every pane in turn ends up closing the tab.
     fn close_session_action(
         &mut self,
         _: &CloseSession,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let active = self.active;
-        self.close_tab(active, window, cx);
+        self.close_active_pane(window, cx);
+    }
+
+    /// Handles the pane focus shortcut for the next pane.
+    fn focus_next_pane_action(
+        &mut self,
+        _: &FocusNextPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_next_pane(window, cx);
+    }
+
+    /// Handles the pane focus shortcut for the previous pane.
+    fn focus_prev_pane_action(
+        &mut self,
+        _: &FocusPrevPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_prev_pane(window, cx);
+    }
+
+    /// Handles the shortcut that pulls the active pane out into its own tab.
+    fn break_out_pane_action(
+        &mut self,
+        _: &BreakOutPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.break_out_active_pane(window, cx);
     }
 
     /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>,</kbd>.
@@ -445,6 +927,10 @@ impl Workspace {
     ) {
         // The dropdown menus paint above everything else, so they are dismissed
         // first.
+        if self.tab_context.is_some() {
+            self.close_tab_context(cx);
+            return;
+        }
         if self.menu_open {
             self.set_menu_open(false, cx);
             return;
@@ -484,17 +970,22 @@ impl Workspace {
     /// commands in the system menu bar.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
-        let menu = (!cfg!(target_os = "macos")).then(|| {
+        let menu = (!cfg!(target_os = "macos")).then(|| self.render_app_menu(cx));
+        // One cell for the leading controls, so the menu button shares the
+        // toolbar's fill and bottom hairline with the strip.
+        let leading = menu.is_some().then(|| {
             div()
                 .flex()
+                .flex_row()
                 .flex_none()
                 .items_center()
+                .gap(px(2.))
                 .h(px(TOOLBAR_HEIGHT))
                 .px(px(4.))
                 .bg(theme.surface)
                 .border_b_1()
                 .border_color(theme.border)
-                .child(self.render_app_menu(cx))
+                .children(menu)
         });
 
         div()
@@ -503,7 +994,7 @@ impl Workspace {
             .flex_none()
             .items_center()
             .w_full()
-            .children(menu)
+            .children(leading)
             .child(div().flex_1().min_w_0().child(self.render_tab_bar(cx)))
             .into_any_element()
     }
@@ -512,12 +1003,21 @@ impl Workspace {
     ///
     /// Every row dispatches the action its keyboard shortcut dispatches, so the
     /// menu adds a way in rather than a second implementation.
+    ///
+    /// Breaking a pane out is here; merging a tab in is not, and cannot be: a
+    /// merge needs a *source* tab, which a menu of static commands has no way to
+    /// name. That half of splitting lives in the tab context menu — see
+    /// [`Workspace::render_tab_context`] — and the same asymmetry shapes
+    /// [`app_menus`].
     fn render_app_menu(&self, cx: &mut Context<Self>) -> MenuButton {
         let this = cx.entity();
         let entries = vec![
             MenuEntry::new(ts!("menu.new_session"))
                 .shortcut(format!("{SHORTCUT_MODIFIER}+T"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(NewSession), cx)),
+            MenuEntry::new(ts!("menu.break_out_pane"))
+                .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+B"))
+                .on_activate(|window, cx| window.dispatch_action(Box::new(BreakOutPane), cx)),
             MenuEntry::new(ts!("menu.settings"))
                 .shortcut(format!("{SHORTCUT_MODIFIER}+,"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
@@ -546,7 +1046,10 @@ impl Workspace {
             .iter()
             .enumerate()
             .map(|(index, tab)| {
-                let session = tab.view.read(cx).session().read(cx);
+                // A split tab is labelled after its active pane, so the strip
+                // says what the user is looking at rather than what the tab
+                // happened to be opened as.
+                let session = tab.active_view().read(cx).session().read(cx);
                 TabItem::new(("session-tab", index), session.title()).status(session.tab_status())
             })
             .collect();
@@ -574,22 +1077,114 @@ impl Workspace {
                     this.update(cx, |workspace, cx| workspace.close_tab(index, window, cx));
                 }
             })
+            .on_context_menu({
+                let this = this.clone();
+                move |index, at, _window, cx| {
+                    this.update(cx, |workspace, cx| {
+                        workspace.open_tab_context(index, at, cx)
+                    });
+                }
+            })
             .on_new(move |_window, cx| {
                 this.update(cx, |workspace, cx| workspace.open_dialog(cx));
             })
     }
 
-    /// Renders the active terminal, or the empty state.
-    fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
-        match self.tabs.get(self.active) {
-            Some(tab) => div()
-                .flex()
-                .flex_grow()
-                .min_h_0()
-                .child(tab.view.clone())
-                .into_any_element(),
-            None => self.render_empty_state(cx),
+    /// Renders the context menu of a right-clicked tab, if one is open.
+    ///
+    /// The commands depend on which tab was clicked, because both of them are
+    /// about the active tab:
+    ///
+    /// * on another tab, the menu merges *that* tab into the active one as a
+    ///   split — the only way to create a split, and the reason there is no
+    ///   shortcut for it;
+    /// * on the active tab, it offers the reverse, moving the active pane back
+    ///   out into a tab of its own, and only while that tab is actually split.
+    ///
+    /// A row whose command would be refused is left out rather than shown doing
+    /// nothing, so the menu can come down to nothing but "close this tab".
+    fn render_tab_context(&self, cx: &mut Context<Self>) -> Option<ContextMenu> {
+        let (index, position) = self.tab_context?;
+        // The strip and the stored index are a frame apart: a tab can be gone by
+        // now — closed from the menu itself, or by the session that owned it.
+        let tab = self.tabs.get(index)?;
+        let this = cx.entity();
+
+        let mut entries = Vec::new();
+        if index == self.active {
+            if tab.panes.leaf_count() > 1 {
+                entries.push(
+                    MenuEntry::new(ts!("menu.break_out_pane"))
+                        .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+B"))
+                        .on_activate(|window, cx| {
+                            window.dispatch_action(Box::new(BreakOutPane), cx)
+                        }),
+                );
+                entries.push(MenuEntry::separator());
+            }
+        } else {
+            // A split that would leave an unusably small pane is refused, so the
+            // row asking for it is left out rather than offered and ignored.
+            for (label, axis) in [
+                (ts!("tab.split_right"), Axis::Horizontal),
+                (ts!("tab.split_below"), Axis::Vertical),
+            ] {
+                if !self.can_split_active(axis, cx) {
+                    continue;
+                }
+                let this = this.clone();
+                entries.push(MenuEntry::new(label).on_activate(move |window, cx| {
+                    this.update(cx, |workspace, cx| {
+                        workspace.merge_tab_into_active(index, axis, window, cx);
+                    });
+                }));
+            }
+            if !entries.is_empty() {
+                entries.push(MenuEntry::separator());
+            }
         }
+        entries.push(MenuEntry::new(ts!("tab.close")).on_activate({
+            let this = this.clone();
+            move |window, cx| {
+                this.update(cx, |workspace, cx| workspace.close_tab(index, window, cx));
+            }
+        }));
+
+        Some(
+            ContextMenu::new("tab-context")
+                .position(position)
+                .entries(entries)
+                .on_dismiss(move |_window, cx| {
+                    this.update(cx, |workspace, cx| workspace.close_tab_context(cx));
+                }),
+        )
+    }
+
+    /// Renders the panes of the active tab, or the empty state.
+    fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return self.render_empty_state(cx);
+        };
+
+        let theme = theme(cx);
+        // An unsplit tab is drawn exactly as it was before panes existed: no
+        // frame, no divider, the terminal filling the body.
+        let split = tab.panes.leaf_count() > 1;
+        let active = tab.active_pane();
+
+        div()
+            .flex()
+            .flex_row()
+            .flex_grow()
+            .min_w_0()
+            .min_h_0()
+            .child(div().flex().flex_1().min_w_0().min_h_0().child(render_pane(
+                tab.panes.root(),
+                active,
+                split,
+                &theme,
+            )))
+            .into_any_element()
     }
 
     /// Renders the placeholder shown while no session is open.
@@ -671,8 +1266,10 @@ impl Workspace {
         let theme = theme(cx);
         let (target, status, grid): (SharedString, SharedString, SharedString) =
             match self.tabs.get(self.active) {
+                // The active pane, not the tab: on a split tab the bar reports
+                // the session the keyboard is aimed at.
                 Some(tab) => {
-                    let session = tab.view.read(cx).session().read(cx);
+                    let session = tab.active_view().read(cx).session().read(cx);
                     let (cols, rows) = session.terminal().size();
                     (
                         session.profile().label().into(),
@@ -712,12 +1309,85 @@ impl Workspace {
     }
 }
 
+/// Renders one node of a pane tree.
+///
+/// A split becomes a flex box in the direction of its axis, with each child
+/// sized by `flex_basis`; the `min_w_0` / `min_h_0` on the box *and* on both
+/// children is what lets those bases actually divide the space, instead of the
+/// terminals inside insisting on their measured width. The pty follows on its
+/// own: [`TerminalView`]'s element recomputes the grid from whatever bounds it
+/// is given and only pushes a resize when the cell count changed.
+///
+/// A leaf renders the terminal view itself. Once a tab holds more than one pane
+/// every leaf is framed with a hairline, accent coloured on the active one. The
+/// frames double as the divider between neighbours, which is why there is no
+/// separate divider element — a third hairline squeezed between two of them
+/// would only thicken the seam. Every pane is framed, not just the active one,
+/// so that moving focus recolours the frame without shifting the layout by a
+/// pixel. It is a border rather than a fill because a translucent window allows
+/// only one tinted fill per pixel and the terminal surface already owns it.
+fn render_pane(
+    node: &PaneNode<PaneLeaf>,
+    active: PaneId,
+    split: bool,
+    theme: &Theme,
+) -> AnyElement {
+    match node {
+        PaneNode::Leaf { id, payload } => {
+            let border = if *id == active {
+                theme.accent
+            } else {
+                theme.border
+            };
+            div()
+                .id(("pane", id.as_u64()))
+                .flex()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .when(split, |pane| pane.border_1().border_color(border))
+                .child(payload.view.clone())
+                .into_any_element()
+        }
+        PaneNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => {
+            let ratio = ratio.clamp(MIN_SPLIT_RATIO, 1. - MIN_SPLIT_RATIO);
+            let half = |share: f32, node: &PaneNode<PaneLeaf>| {
+                div()
+                    .flex()
+                    .flex_basis(relative(share))
+                    .min_w_0()
+                    .min_h_0()
+                    .child(render_pane(node, active, split, theme))
+            };
+
+            div()
+                .flex()
+                .map(|container| match axis {
+                    Axis::Horizontal => container.flex_row(),
+                    Axis::Vertical => container.flex_col(),
+                })
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .child(half(ratio, first))
+                .child(half(1. - ratio, second))
+                .into_any_element()
+        }
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
         let toolbar = self.render_toolbar(cx);
         let body = self.render_body(cx);
         let status_bar = self.render_status_bar(cx);
+        let tab_context = self.render_tab_context(cx);
         let dialog = self
             .dialog
             .read(cx)
@@ -751,6 +1421,9 @@ impl Render for Workspace {
             .text_size(px(13.))
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::close_session_action))
+            .on_action(cx.listener(Self::focus_next_pane_action))
+            .on_action(cx.listener(Self::focus_prev_pane_action))
+            .on_action(cx.listener(Self::break_out_pane_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::show_about_action))
             .on_action(cx.listener(Self::select_tab_action))
@@ -758,6 +1431,9 @@ impl Render for Workspace {
             .child(toolbar)
             .child(body)
             .child(status_bar)
+            // Deferred inside, so it paints above the three bands whatever its
+            // place in this list.
+            .children(tab_context)
             .children(dialog)
             .children(settings)
             .children(about)
@@ -820,17 +1496,40 @@ fn app_menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action(ts!("menu.mac.new_session"), NewSession),
                 MenuItem::action(ts!("menu.mac.close_session"), CloseSession),
+                // Only half of splitting is here, for the reason given on
+                // [`Workspace::render_app_menu`]: a merge has to name a source
+                // tab, so it belongs to the tab context menu alone.
+                MenuItem::action(ts!("menu.mac.break_out_pane"), BreakOutPane),
+                MenuItem::separator(),
             ],
         },
     ]
 }
 
 /// Registers every shortcut the workspace listens for.
+///
+/// A binding here beats the terminal: gpui matches key bindings along the whole
+/// dispatch path before it delivers the key event itself, so every chord bound
+/// in this function is taken away from the remote shell. That is what decides
+/// the pane modifier below.
 fn bind_shortcuts(cx: &mut App) {
     let modifier = if cfg!(target_os = "macos") {
         "cmd"
     } else {
         "ctrl"
+    };
+
+    // Pane navigation follows iTerm2 on macOS, where `cmd` never reaches the
+    // shell. Elsewhere the same chords would swallow `Ctrl+[` — which every
+    // remote shell reads as ESC — and `Ctrl+]`, so those platforms use `alt`
+    // instead, the modifier Windows Terminal also keeps for pane navigation.
+    // The bracket keys stay unshifted on purpose: both macOS and Windows report
+    // a shifted bracket as `}` with the shift flag already consumed, so a
+    // `shift-]` binding would never match. Hence a letter for the break-out.
+    let pane_modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "alt"
     };
 
     let mut bindings = vec![
@@ -839,6 +1538,21 @@ fn bind_shortcuts(cx: &mut App) {
         KeyBinding::new(&format!("{modifier}-w"), CloseSession, Some(KEY_CONTEXT)),
         KeyBinding::new(&format!("{modifier}-,"), OpenSettings, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", DismissDialog, Some(KEY_CONTEXT)),
+        KeyBinding::new(
+            &format!("{pane_modifier}-]"),
+            FocusNextPane,
+            Some(KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            &format!("{pane_modifier}-["),
+            FocusPrevPane,
+            Some(KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            &format!("{pane_modifier}-shift-b"),
+            BreakOutPane,
+            Some(KEY_CONTEXT),
+        ),
     ];
     for index in 0..QUICK_SELECT_TABS {
         bindings.push(KeyBinding::new(
@@ -854,6 +1568,8 @@ fn bind_shortcuts(cx: &mut App) {
 fn main() {
     env_logger::init();
 
+    // The icon set has to be installed before the app runs: `svg()` resolves
+    // every path through this source, and the default one answers `None`.
     Application::new().run(|cx: &mut App| {
         if let Err(error) = logman_core::init_secrets() {
             log::warn!("the OS keychain is unavailable: {error}");
