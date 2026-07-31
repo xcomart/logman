@@ -12,6 +12,7 @@ common:
 
 menu:
   new_session: Neue Sitzung
+  break_out_pane: Bereich abtrennen
   settings: Einstellungen…
   about: Über logman
   quit: Beenden
@@ -19,7 +20,31 @@ menu:
   mac:
     new_session: Neue Sitzung
     close_session: Sitzung schließen
+    break_out_pane: Bereich abtrennen
     quit: logman beenden
+
+tab:
+  split_right: Rechts vom aktuellen Tab teilen
+  split_below: Unter aktuellem Tab teilen
+  close: Tab schließen
+
+files:
+  title: Entfernte Dateien
+  toggle: Entfernte Dateien
+  mac:
+    toggle: Entfernte Dateien
+  no_session: Keine Sitzung geöffnet.
+  not_connected: Die entfernten Dateien erscheinen, sobald die Sitzung verbunden ist.
+  loading: Wird geladen…
+  empty: Dieses Verzeichnis ist leer.
+  select_upload: Hochladen
+  uploading: "%{name} wird hochgeladen…"
+  uploaded: "%{name} wurde hochgeladen."
+  uploaded_many: "%{count} Dateien wurden hochgeladen."
+  downloading: "%{name} wird heruntergeladen…"
+  downloaded: "Gespeichert unter %{path}."
+  skipped_directory: "%{name} wurde übersprungen: Es können nur Dateien hochgeladen werden."
+  failed: "Entfernte Dateien: %{error}"
 
 empty:
   hint: Drücken Sie %{shortcut}, um sich mit einem Host zu verbinden.

@@ -21,7 +21,7 @@ pub mod theme;
 
 pub use button::{Button, ButtonVariant};
 pub use checkbox::Checkbox;
-pub use menu::{MenuButton, MenuEntry};
+pub use menu::{ContextMenu, MenuButton, MenuEntry};
 pub use modal::{form_row, modal};
 pub use scheme_picker::{SchemePicker, SchemePreview, SchemeSwatch};
 pub use segmented::Segmented;

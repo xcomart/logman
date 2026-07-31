@@ -12,6 +12,7 @@ common:
 
 menu:
   new_session: 새 세션
+  break_out_pane: 창을 새 탭으로 분리
   settings: 설정…
   about: logman 정보
   quit: 종료
@@ -19,7 +20,31 @@ menu:
   mac:
     new_session: 새 세션
     close_session: 세션 닫기
+    break_out_pane: 창을 새 탭으로 분리
     quit: logman 종료
+
+tab:
+  split_right: 현재 탭 오른쪽에 분할로 추가
+  split_below: 현재 탭 아래쪽에 분할로 추가
+  close: 탭 닫기
+
+files:
+  title: 원격 파일
+  toggle: 원격 파일 패널
+  mac:
+    toggle: 원격 파일 패널
+  no_session: 열린 세션이 없습니다.
+  not_connected: 세션이 연결되면 원격 파일이 표시됩니다.
+  loading: 불러오는 중…
+  empty: 이 디렉터리는 비어 있습니다.
+  select_upload: 업로드
+  uploading: "%{name} 업로드 중…"
+  uploaded: "%{name}을(를) 업로드했습니다."
+  uploaded_many: "파일 %{count}개를 업로드했습니다."
+  downloading: "%{name} 다운로드 중…"
+  downloaded: "%{path}에 저장했습니다."
+  skipped_directory: "%{name}은(는) 건너뛰었습니다. 파일만 업로드할 수 있습니다."
+  failed: "원격 파일: %{error}"
 
 empty:
   hint: "%{shortcut} 키를 눌러 호스트에 접속하세요."

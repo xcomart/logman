@@ -13,6 +13,8 @@
 //!   registry of built-in schemes selectable by id ([`TerminalTheme::builtin`],
 //!   [`TerminalTheme::by_name`]).
 //! * [`encode_key`] / [`encode_paste`] encode user input.
+//! * [`CwdTracker`] watches the same byte stream for the `OSC 7` / `OSC 1337`
+//!   sequences that tell us which directory the remote shell is in.
 //!
 //! ```
 //! use logman_term::{TerminalModel, TerminalTheme};
@@ -24,11 +26,13 @@
 
 #![deny(missing_docs)]
 
+pub mod cwd;
 pub mod keys;
 pub mod model;
 pub mod snapshot;
 pub mod theme;
 
+pub use cwd::CwdTracker;
 pub use keys::{KeyCode, KeyInput, TermModes, encode_key, encode_paste};
 pub use model::TerminalModel;
 pub use snapshot::{CursorPos, RunFlags, StyledRun, TerminalLine, TerminalSnapshot};

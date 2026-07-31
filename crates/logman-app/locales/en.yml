@@ -28,6 +28,10 @@ common:
 # them, so they are separate keys.
 menu:
   new_session: New session
+  # Moves the focused pane of a split tab out into a tab of its own. Also the
+  # label of the matching row in the tab context menu, which is in sentence case
+  # too.
+  break_out_pane: Move pane to its own tab
   settings: Settings…
   about: About logman
   quit: Quit
@@ -35,7 +39,46 @@ menu:
   mac:
     new_session: New Session
     close_session: Close Session
+    break_out_pane: Move Pane to Its Own Tab
     quit: Quit logman
+
+# The menu a right-click on a tab opens. "Current tab" is the active one, which
+# a right-click deliberately leaves as it is: both split commands attach the
+# clicked tab to the tab already on screen.
+tab:
+  split_right: Split right of current tab
+  split_below: Split below current tab
+  close: Close tab
+
+# The remote file panel: the SFTP browser to the left of the terminal.
+#
+# `%{name}` is a file name, `%{path}` a local path and `%{error}` the sentence
+# the SFTP layer produced; all three are values rather than words and stay as
+# they are. Only the sentence framing `%{error}` is translated, the same policy
+# the connection and session messages follow.
+files:
+  title: Remote files
+  # The row of the in-app dropdown menu that shows and hides the panel, and its
+  # macOS menu bar counterpart. They differ only in capitalisation in English,
+  # like the `menu` pair above.
+  toggle: Remote files
+  mac:
+    toggle: Remote Files
+  no_session: No session is open.
+  not_connected: The remote files appear once the session is connected.
+  loading: Loading…
+  empty: This directory is empty.
+  # Confirmation button of the platform file picker for an upload.
+  select_upload: Upload
+  uploading: "Uploading %{name}…"
+  uploaded: "Uploaded %{name}."
+  # Two keys rather than a plural rule: only "exactly one" and "more than one"
+  # are ever needed, as with the session overrides.
+  uploaded_many: "Uploaded %{count} files."
+  downloading: "Downloading %{name}…"
+  downloaded: "Saved to %{path}."
+  skipped_directory: "%{name} was skipped: only files can be uploaded."
+  failed: "Remote files: %{error}"
 
 # The placeholder shown while no session is open.
 empty:

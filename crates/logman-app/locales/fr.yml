@@ -12,6 +12,7 @@ common:
 
 menu:
   new_session: Nouvelle session
+  break_out_pane: Détacher dans un onglet
   settings: Préférences…
   about: À propos de logman
   quit: Quitter
@@ -19,7 +20,31 @@ menu:
   mac:
     new_session: Nouvelle session
     close_session: Fermer la session
+    break_out_pane: Détacher dans un onglet
     quit: Quitter logman
+
+tab:
+  split_right: Diviser à droite de l'onglet actuel
+  split_below: Diviser sous l'onglet actuel
+  close: Fermer l'onglet
+
+files:
+  title: Fichiers distants
+  toggle: Fichiers distants
+  mac:
+    toggle: Fichiers Distants
+  no_session: Aucune session ouverte.
+  not_connected: Les fichiers distants apparaîtront une fois la session connectée.
+  loading: Chargement…
+  empty: Ce répertoire est vide.
+  select_upload: Envoyer
+  uploading: "Envoi de %{name}…"
+  uploaded: "%{name} a été envoyé."
+  uploaded_many: "%{count} fichiers ont été envoyés."
+  downloading: "Téléchargement de %{name}…"
+  downloaded: "Enregistré dans %{path}."
+  skipped_directory: "%{name} a été ignoré : seuls les fichiers peuvent être envoyés."
+  failed: "Fichiers distants : %{error}"
 
 empty:
   hint: Appuyez sur %{shortcut} pour vous connecter à un hôte.

@@ -13,7 +13,7 @@ use std::fmt;
 use futures::StreamExt;
 use gpui::{App, Context, SharedString, Task};
 use logman_core::{EffectiveTerminal, SessionProfile};
-use logman_ssh::{SshAuth, SshConfig, SshErrorKind, SshEvent, SshSession};
+use logman_ssh::{SftpClient, SshAuth, SshConfig, SshErrorKind, SshEvent, SshSession};
 use logman_term::{TerminalModel, TerminalTheme};
 
 use crate::app_settings;
@@ -170,6 +170,36 @@ impl Session {
         }
     }
 
+    /// The working directory of the remote shell, if it announced one.
+    ///
+    /// Fed by the `OSC 7` / `OSC 1337` sequences a configured prompt emits, so
+    /// it stays `None` for shells that do not report their directory. The value
+    /// survives a disconnect - the last known directory is still the one the
+    /// session ended in - and is cleared by [`Session::reconnect`], because the
+    /// new shell has not reported anything yet.
+    pub fn cwd(&self) -> Option<&str> {
+        self.terminal.cwd()
+    }
+
+    /// An SFTP client riding on this session's transport, or `None` while the
+    /// session is not carrying a live shell.
+    ///
+    /// Gated on [`SessionStatus::Connected`] rather than merely on the transport
+    /// existing: during `Connecting` the handle is already there and the SFTP
+    /// service would happily queue requests behind the authentication, so a file
+    /// panel would sit on a pending listing with nothing to show for it. Once
+    /// the session ends the client is gone and every call would answer
+    /// [`SftpError::Disconnected`](logman_ssh::SftpError::Disconnected) anyway.
+    ///
+    /// Cheap: the returned client only clones the request channel, and the SFTP
+    /// channel itself is opened lazily on the first request and then reused.
+    pub fn sftp(&self) -> Option<SftpClient> {
+        match self.status {
+            SessionStatus::Connected => self.ssh.as_ref().map(SshSession::sftp),
+            _ => None,
+        }
+    }
+
     /// The terminal model, for rendering.
     pub fn terminal(&self) -> &TerminalModel {
         &self.terminal
@@ -312,7 +342,17 @@ impl Session {
                 }
             }
             SshEvent::Data(bytes) | SshEvent::ExtendedData(bytes) => {
-                self.terminal.feed(&bytes);
+                // A directory change needs no extra notification: this arm ends
+                // in the `cx.notify` below on every chunk of output anyway, so
+                // observers see the new `Session::cwd` on the next frame.
+                let cwd_changed = self.terminal.feed(&bytes);
+                if cwd_changed {
+                    log::debug!(
+                        "{}: remote cwd is now {:?}",
+                        self.profile.label(),
+                        self.terminal.cwd()
+                    );
+                }
                 self.flush_terminal_replies();
             }
             SshEvent::ExitStatus(code) => {

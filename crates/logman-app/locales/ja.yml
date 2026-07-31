@@ -12,6 +12,7 @@ common:
 
 menu:
   new_session: 新規セッション
+  break_out_pane: ペインを新しいタブに分離
   settings: 設定…
   about: logman について
   quit: 終了
@@ -19,7 +20,31 @@ menu:
   mac:
     new_session: 新規セッション
     close_session: セッションを閉じる
+    break_out_pane: ペインを新しいタブに分離
     quit: logman を終了
+
+tab:
+  split_right: 現在のタブの右に分割して追加
+  split_below: 現在のタブの下に分割して追加
+  close: タブを閉じる
+
+files:
+  title: リモートファイル
+  toggle: リモートファイルパネル
+  mac:
+    toggle: リモートファイルパネル
+  no_session: 開いているセッションがありません。
+  not_connected: セッションが接続されるとリモートファイルが表示されます。
+  loading: 読み込み中…
+  empty: このディレクトリは空です。
+  select_upload: アップロード
+  uploading: "%{name} をアップロード中…"
+  uploaded: "%{name} をアップロードしました。"
+  uploaded_many: "%{count} 個のファイルをアップロードしました。"
+  downloading: "%{name} をダウンロード中…"
+  downloaded: "%{path} に保存しました。"
+  skipped_directory: "%{name} はスキップされました。アップロードできるのはファイルのみです。"
+  failed: "リモートファイル: %{error}"
 
 empty:
   hint: "%{shortcut} を押してホストに接続します。"
