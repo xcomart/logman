@@ -3,8 +3,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ElementId, Hsla, MouseButton, Pixels, Point, ScrollHandle, SharedString, Window, div,
-    prelude::*, px, transparent_black,
+    App, ElementId, Hsla, IsZero, MouseButton, Pixels, Point, ScrollHandle, SharedString, Window,
+    div, prelude::*, px, transparent_black,
 };
 
 use super::menu::{MenuButton, MenuEntry};
@@ -235,7 +235,7 @@ impl TabBar {
 }
 
 impl RenderOnce for TabBar {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = theme(cx);
         let id = self.id;
         let active = self.active;
@@ -243,6 +243,15 @@ impl RenderOnce for TabBar {
         let on_close = self.on_close;
         let on_context_menu = self.on_context_menu;
         let close_tooltip = self.close_tooltip;
+        let scroll_handle = self.scroll_handle.clone();
+        // Read here rather than inside the wheel handler below. gpui pushes an
+        // element's text style around its children's layout, so this is the
+        // line height the scrolling row itself is laid out with — the very one
+        // gpui would convert a line-based wheel delta with. By the time an event
+        // is dispatched that stack is empty again and the same call would answer
+        // with the default font instead, scrolling a tab faster than the gap
+        // beside it.
+        let line_height = window.line_height();
 
         // An empty bar has nothing to list, so its dropdown stays away.
         let on_menu_open_change = self.on_menu_open_change.filter(|_| !self.tabs.is_empty());
@@ -327,6 +336,35 @@ impl RenderOnce for TabBar {
                         // underneath the strip.
                         cx.stop_propagation();
                         handler(index, event.position, window, cx);
+                    })
+                })
+                .when_some(scroll_handle.clone(), |this, handle| {
+                    // The occlusion above cuts the scrolling row out of the hit
+                    // test wherever a tab covers it, and gpui asks the row's own
+                    // hit box before it scrolls anything — so a wheel turned
+                    // over a tab, which is most of the strip, would move
+                    // nothing. Answering it here puts that back.
+                    //
+                    // Deliberately the same arithmetic gpui applies to the row
+                    // itself, so the two are indistinguishable: a wheel over a
+                    // tab and one over the gap beside it move the strip by the
+                    // same amount. The row scrolls on one axis, which is why a
+                    // vertical wheel — every plain mouse has one, and no
+                    // horizontal one — folds onto it. Nothing is clamped here
+                    // either: gpui pins the offset to the scrollable range on
+                    // the next layout pass, and this writes to the very cell it
+                    // pins.
+                    this.on_scroll_wheel(move |event, window, _cx| {
+                        let delta = event.delta.pixel_delta(line_height);
+                        let delta_x = if delta.x.is_zero() { delta.y } else { delta.x };
+                        if delta_x.is_zero() {
+                            return;
+                        }
+
+                        let mut offset = handle.offset();
+                        offset.x += delta_x;
+                        handle.set_offset(offset);
+                        window.refresh();
                     })
                 })
                 .when_some(tab.status, |this, status| {
@@ -437,7 +475,8 @@ mod tests {
     use std::ops::Deref;
 
     use gpui::{
-        Context, Modifiers, Render, TestAppContext, VisualTestContext, WindowControlArea, point,
+        Context, Modifiers, Render, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
+        VisualTestContext, WindowControlArea, point,
     };
 
     use super::*;
@@ -445,11 +484,37 @@ mod tests {
     /// Vertical middle of the strip; every row of it is one tab tall.
     const ROW_MIDDLE: f32 = 18.;
 
+    /// Vertical middle of the reference row, which sits under the strip.
+    const REFERENCE_MIDDLE: f32 = 54.;
+
+    /// A column comfortably inside the first tab, whatever its title.
+    const INSIDE_FIRST_TAB: f32 = 12.;
+
     /// How far right of the strip's left edge the sweep looks for the button.
     ///
     /// Wide enough to clear one short tab title at any font the test platform
     /// picks, and still short of the "+" that follows the strip.
     const SWEEP_WIDTH: i32 = 200;
+
+    /// Width of the reference row's single child.
+    ///
+    /// Only has to overflow the window by enough that a wheel turn or two never
+    /// reaches the end of the scrollable range, where clamping would hide a
+    /// difference in how far the two rows moved.
+    const REFERENCE_CONTENT: f32 = 8000.;
+
+    /// How many tabs the scrolling tests put in the strip.
+    ///
+    /// Same reasoning as [`REFERENCE_CONTENT`]: enough that the strip overflows
+    /// any plausible test display several times over.
+    const CROWDED: usize = 200;
+
+    /// The text size the workspace root sets, which the strip inherits.
+    ///
+    /// The harness repeats it because it is what a line-based wheel delta is
+    /// converted with — a harness in the default font would be measuring a
+    /// conversion the app never performs.
+    const INHERITED_TEXT: f32 = 13.;
 
     /// What a sweep of the tab row answered with, counted per handler.
     #[derive(Clone, Default)]
@@ -466,8 +531,15 @@ mod tests {
     /// The drag area counts the presses that reach it. That stands in for what
     /// the real title bar does with them — start a window move on Linux, answer
     /// `HTCAPTION` on Windows — and both read the same hit test this does.
+    ///
+    /// Under it is a bare horizontally scrolling row with nothing occluding it,
+    /// laid out in the same inherited text style: gpui's own answer to a wheel,
+    /// to hold the strip's against.
     struct Harness {
         tally: Tally,
+        tabs: Vec<TabItem>,
+        strip: ScrollHandle,
+        reference: ScrollHandle,
     }
 
     impl Render for Harness {
@@ -479,22 +551,97 @@ mod tests {
             } = self.tally.clone();
 
             div()
-                .id("toolbar")
-                .occlude()
-                .window_control_area(WindowControlArea::Drag)
-                .on_mouse_down(MouseButton::Left, move |_, _, _| {
-                    dragged.set(dragged.get() + 1)
-                })
-                .w_full()
-                .h(px(36.))
+                .flex()
+                .flex_col()
+                .size_full()
+                .text_size(px(INHERITED_TEXT))
                 .child(
-                    TabBar::new("tabs")
-                        .tabs(vec![TabItem::new("tab-0", "one")])
-                        .active(0)
-                        .on_select(move |_, _, _| selected.set(selected.get() + 1))
-                        .on_close(move |_, _, _| closed.set(closed.get() + 1)),
+                    div()
+                        .id("toolbar")
+                        .occlude()
+                        .window_control_area(WindowControlArea::Drag)
+                        .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                            dragged.set(dragged.get() + 1)
+                        })
+                        .w_full()
+                        .h(px(36.))
+                        .child(
+                            TabBar::new("tabs")
+                                .tabs(self.tabs.clone())
+                                .active(0)
+                                .scroll_handle(&self.strip)
+                                .on_select(move |_, _, _| selected.set(selected.get() + 1))
+                                .on_close(move |_, _, _| closed.set(closed.get() + 1)),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("reference")
+                        .flex()
+                        .flex_row()
+                        .w_full()
+                        .h(px(36.))
+                        .overflow_x_scroll()
+                        .track_scroll(&self.reference)
+                        .child(div().flex_none().w(px(REFERENCE_CONTENT)).h_full()),
                 )
         }
+    }
+
+    /// Everything a test needs to read back out of a running harness.
+    struct Handles {
+        tally: Tally,
+        strip: ScrollHandle,
+        reference: ScrollHandle,
+    }
+
+    /// Opens a window on a strip of `tabs` and hands back its handles.
+    fn open(cx: &mut TestAppContext, tabs: Vec<TabItem>) -> (Handles, VisualTestContext) {
+        let handles = Handles {
+            tally: Tally::default(),
+            strip: ScrollHandle::new(),
+            reference: ScrollHandle::new(),
+        };
+
+        let window = cx.add_window({
+            let tally = handles.tally.clone();
+            let strip = handles.strip.clone();
+            let reference = handles.reference.clone();
+            move |_, _| Harness {
+                tally,
+                tabs,
+                strip,
+                reference,
+            }
+        });
+        let cx = VisualTestContext::from_window(*window.deref(), cx);
+        cx.run_until_parked();
+
+        (handles, cx)
+    }
+
+    /// One tab, which is all the click tests need.
+    fn one_tab() -> Vec<TabItem> {
+        vec![TabItem::new("tab-0", "one")]
+    }
+
+    /// Enough tabs that the strip overflows and can be scrolled.
+    fn many_tabs() -> Vec<TabItem> {
+        (0..CROWDED)
+            .map(|index| TabItem::new(ElementId::from(("tab", index)), format!("tab {index}")))
+            .collect()
+    }
+
+    /// Turns a wheel over `position`, hovering it first so the hit test is
+    /// settled by the time the wheel arrives.
+    fn turn_the_wheel(cx: &mut VisualTestContext, position: Point<Pixels>, delta: ScrollDelta) {
+        cx.simulate_mouse_move(position, None, Modifiers::none());
+        cx.simulate_event(ScrollWheelEvent {
+            position,
+            delta,
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
     }
 
     /// What a single clicked column answered with.
@@ -517,14 +664,8 @@ mod tests {
     /// pretend to know. Each column is hovered before it is clicked, because the
     /// button only exists once the pointer is on the tab.
     fn sweep_the_strip(cx: &mut TestAppContext) -> Vec<Answer> {
-        let tally = Tally::default();
-
-        let window = cx.add_window({
-            let tally = tally.clone();
-            move |_, _| Harness { tally }
-        });
-        let mut cx = VisualTestContext::from_window(*window.deref(), cx);
-        cx.run_until_parked();
+        let (handles, mut cx) = open(cx, one_tab());
+        let tally = handles.tally;
 
         let mut answers = Vec::new();
         let mut seen = (0, 0, 0);
@@ -591,5 +732,71 @@ mod tests {
             first_drag_column > last_tab_column,
             "the drag area answered a press aimed at a tab: {answers:?}"
         );
+    }
+
+    /// The other cost of the tab's occlusion: it hides the scrolling row from
+    /// the hit test wherever a tab covers it, which is nearly all of a crowded
+    /// strip, so gpui's own wheel handling never ran. The tab answers the wheel
+    /// itself now.
+    #[gpui::test]
+    fn a_wheel_over_a_tab_scrolls_the_strip(cx: &mut TestAppContext) {
+        let (handles, mut cx) = open(cx, many_tabs());
+
+        assert!(
+            handles.strip.max_offset().width > px(0.),
+            "the strip did not overflow, so there was nothing to scroll"
+        );
+        assert_eq!(
+            handles.strip.offset().x,
+            px(0.),
+            "the strip started scrolled"
+        );
+
+        turn_the_wheel(
+            &mut cx,
+            point(px(INSIDE_FIRST_TAB), px(ROW_MIDDLE)),
+            ScrollDelta::Lines(point(0., -3.)),
+        );
+
+        assert!(
+            handles.strip.offset().x < px(0.),
+            "a wheel over a tab left the strip where it was"
+        );
+    }
+
+    /// And it answers it the way the row itself would have. The reference row
+    /// below the strip is plain gpui scrolling in the same inherited text style,
+    /// so a wheel delta has to land both rows in the same place — otherwise a
+    /// wheel would carry further over a tab than over the bare strip beside it.
+    ///
+    /// Both a line delta and a pixel delta, because only the first is converted
+    /// through the line height, which is exactly what is easy to get wrong.
+    #[gpui::test]
+    fn a_wheel_moves_a_tab_and_plain_gpui_the_same_distance(cx: &mut TestAppContext) {
+        for delta in [
+            ScrollDelta::Lines(point(0., -3.)),
+            ScrollDelta::Lines(point(-2., 0.)),
+            ScrollDelta::Pixels(point(px(-40.), px(0.))),
+            ScrollDelta::Pixels(point(px(0.), px(-40.))),
+        ] {
+            let (handles, mut cx) = open(cx, many_tabs());
+
+            turn_the_wheel(&mut cx, point(px(INSIDE_FIRST_TAB), px(ROW_MIDDLE)), delta);
+            turn_the_wheel(
+                &mut cx,
+                point(px(INSIDE_FIRST_TAB), px(REFERENCE_MIDDLE)),
+                delta,
+            );
+
+            assert_eq!(
+                handles.strip.offset().x,
+                handles.reference.offset().x,
+                "a {delta:?} moved the strip and plain gpui different distances"
+            );
+            assert!(
+                handles.strip.offset().x < px(0.),
+                "a {delta:?} moved neither row, so they agreed on nothing"
+            );
+        }
     }
 }
