@@ -28,6 +28,24 @@ tab:
   split_below: Diviser sous l'onglet actuel
   close: Fermer l'onglet
 
+files:
+  title: Fichiers distants
+  toggle: Fichiers distants
+  mac:
+    toggle: Fichiers Distants
+  no_session: Aucune session ouverte.
+  not_connected: Les fichiers distants apparaîtront une fois la session connectée.
+  loading: Chargement…
+  empty: Ce répertoire est vide.
+  select_upload: Envoyer
+  uploading: "Envoi de %{name}…"
+  uploaded: "%{name} a été envoyé."
+  uploaded_many: "%{count} fichiers ont été envoyés."
+  downloading: "Téléchargement de %{name}…"
+  downloaded: "Enregistré dans %{path}."
+  skipped_directory: "%{name} a été ignoré : seuls les fichiers peuvent être envoyés."
+  failed: "Fichiers distants : %{error}"
+
 empty:
   hint: Appuyez sur %{shortcut} pour vous connecter à un hôte.
   saved_profiles: Profils enregistrés

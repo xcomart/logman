@@ -19,8 +19,10 @@
 //!   `SshSession::connect`), so the test thread only ever blocks on the
 //!   *server's* runtime. The two never nest.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -32,14 +34,18 @@ use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
 use russh::server::{Auth, ChannelOpenHandle, Handler as ServerHandler, Msg, Session};
 use russh::{Channel, ChannelId, Pty};
+use russh_sftp::protocol::{
+    Attrs, Data, File as SftpFile, FileAttributes, Handle as SftpFileHandle, Name, OpenFlags,
+    Status, StatusCode, Version,
+};
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use logman_ssh::{
-    AcceptAllVerifier, HostKeyVerifier, RejectAllVerifier, SshAuth, SshConfig, SshErrorKind,
-    SshEvent, SshSession, fingerprint,
+    AcceptAllVerifier, HostKeyVerifier, RejectAllVerifier, SftpError, SshAuth, SshConfig,
+    SshErrorKind, SshEvent, SshSession, fingerprint,
 };
 
 /// Upper bound on any single wait for an expected event or server observation.
@@ -103,6 +109,9 @@ struct ServerState {
     refuse_pty: bool,
     /// When set, `shell` requests are answered with a failure.
     refuse_shell: bool,
+    /// Directory served over the `sftp` subsystem, or `None` on a server that
+    /// offers no subsystems at all.
+    sftp_root: Option<PathBuf>,
     /// `TERM` from the most recent `pty-req`, if one arrived.
     term: Mutex<Option<String>>,
     /// Window size, seeded by `pty-req` and updated by `window-change`.
@@ -147,6 +156,16 @@ struct TestHandler {
     state: Arc<ServerState>,
     /// Bytes received on the shell channel that do not yet form a whole line.
     pending: Vec<u8>,
+    /// Open channels kept until it is clear what they are for.
+    ///
+    /// Only populated on a server that offers SFTP: russh delivers every
+    /// channel message to a retained [`Channel`] *and* to this handler, so a
+    /// channel nobody reads would eventually block the session. A `shell`
+    /// request drops the entry again; a `subsystem` request takes it over.
+    channels: HashMap<ChannelId, Channel<Msg>>,
+    /// Channels handed to the SFTP subsystem. Their traffic belongs to
+    /// [`russh_sftp`] and must not reach the fake shell.
+    sftp: HashSet<ChannelId>,
 }
 
 impl ServerHandler for TestHandler {
@@ -176,10 +195,13 @@ impl ServerHandler for TestHandler {
 
     async fn channel_open_session(
         &mut self,
-        _channel: Channel<Msg>,
+        channel: Channel<Msg>,
         reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self.state.sftp_root.is_some() {
+            self.channels.insert(channel.id(), channel);
+        }
         reply.accept().await;
         Ok(())
     }
@@ -211,6 +233,9 @@ impl ServerHandler for TestHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // The fake shell answers out of `data` below, so the retained channel
+        // is no longer needed — and keeping an unread one would stall.
+        self.channels.remove(&channel);
         self.state.shell_requests.fetch_add(1, Ordering::SeqCst);
         if self.state.refuse_shell {
             session.channel_failure(channel)?;
@@ -234,12 +259,41 @@ impl ServerHandler for TestHandler {
         Ok(())
     }
 
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let accepted = self.state.sftp_root.clone().filter(|_| name == "sftp");
+        let Some(root) = accepted else {
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
+        let Some(stream) = self.channels.remove(&channel) else {
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
+
+        session.channel_success(channel)?;
+        self.sftp.insert(channel);
+        // Returns as soon as the serving task is spawned, so the session loop
+        // stays free to carry the shell channel alongside it.
+        russh_sftp::server::run(stream.into_stream(), SftpTestHandler::new(root)).await;
+        Ok(())
+    }
+
     async fn data(
         &mut self,
         channel: ChannelId,
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // SFTP traffic is framed binary, not shell lines; it is already being
+        // read by the subsystem task through the channel itself.
+        if self.sftp.contains(&channel) {
+            return Ok(());
+        }
         self.pending.extend_from_slice(data);
 
         // Only whole lines are answered, which keeps the wire protocol
@@ -264,6 +318,239 @@ impl ServerHandler for TestHandler {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SFTP subsystem
+// ---------------------------------------------------------------------------
+
+/// A minimal SFTP server backed by a real directory on disk.
+///
+/// Only the requests the client under test actually makes are implemented;
+/// everything else falls through to `unimplemented` and is answered with
+/// `OP_UNSUPPORTED`, which is exactly how a restricted real server behaves.
+///
+/// Paths on the wire are POSIX and rooted at `/`, which maps to [`root`]. They
+/// are normalised lexically — `..` pops a component and never escapes the root
+/// — so a test can assert on the canonical form the client gets back.
+///
+/// [`root`]: SftpTestHandler::root
+struct SftpTestHandler {
+    /// Directory that stands in for the remote file system's root.
+    root: PathBuf,
+    /// Snapshots taken by `opendir`, drained by the first `readdir`.
+    dirs: HashMap<String, Vec<SftpFile>>,
+    /// Files opened by `open`, keyed by the handle handed to the client.
+    files: HashMap<String, std::fs::File>,
+    /// Source of unique handle strings.
+    next_handle: u64,
+}
+
+impl SftpTestHandler {
+    /// Serves `root` as the remote file system.
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            dirs: HashMap::new(),
+            files: HashMap::new(),
+            next_handle: 0,
+        }
+    }
+
+    /// Mints a handle that cannot collide with an earlier one.
+    fn handle(&mut self, prefix: &str) -> String {
+        self.next_handle += 1;
+        format!("{prefix}{}", self.next_handle)
+    }
+
+    /// Maps a wire path onto the served directory.
+    fn local(&self, path: &str) -> PathBuf {
+        let normalized = normalize(path);
+        let relative = normalized.trim_start_matches('/');
+        if relative.is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(relative)
+        }
+    }
+}
+
+/// Reduces a POSIX path to its canonical absolute form, without touching disk.
+///
+/// `.` and empty components are dropped, `..` pops — including at the root,
+/// where it is simply a no-op, so no client can walk out of the served tree.
+fn normalize(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
+
+/// The success answer to a request that reports only a status.
+fn ok_status(id: u32) -> Status {
+    Status {
+        id,
+        status_code: StatusCode::Ok,
+        error_message: "Ok".to_owned(),
+        language_tag: "en-US".to_owned(),
+    }
+}
+
+/// Translates a local I/O failure into the status code SFTP defines for it.
+fn to_status(error: std::io::Error) -> StatusCode {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => StatusCode::NoSuchFile,
+        std::io::ErrorKind::PermissionDenied => StatusCode::PermissionDenied,
+        _ => StatusCode::Failure,
+    }
+}
+
+impl russh_sftp::server::Handler for SftpTestHandler {
+    type Error = StatusCode;
+
+    fn unimplemented(&self) -> Self::Error {
+        StatusCode::OpUnsupported
+    }
+
+    async fn init(
+        &mut self,
+        _version: u32,
+        _extensions: HashMap<String, String>,
+    ) -> Result<Version, Self::Error> {
+        // No extensions: the client must work against a plain SFTP 3 server,
+        // which is the lowest common denominator it will meet in the wild.
+        Ok(Version::new())
+    }
+
+    async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+        Ok(Name {
+            id,
+            files: vec![SftpFile::dummy(normalize(&path))],
+        })
+    }
+
+    async fn opendir(&mut self, id: u32, path: String) -> Result<SftpFileHandle, Self::Error> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(self.local(&path)).map_err(to_status)? {
+            let entry = entry.map_err(to_status)?;
+            // `symlink_metadata`, not `metadata`: a listing describes the link
+            // itself, which is precisely what makes the client resolve targets.
+            let metadata = std::fs::symlink_metadata(entry.path()).map_err(to_status)?;
+            files.push(SftpFile::new(
+                entry.file_name().to_string_lossy().into_owned(),
+                FileAttributes::from(&metadata),
+            ));
+        }
+
+        let handle = self.handle("dir-");
+        self.dirs.insert(handle.clone(), files);
+        Ok(SftpFileHandle { id, handle })
+    }
+
+    async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
+        match self.dirs.get_mut(&handle) {
+            // The whole snapshot goes out in one packet; the second call ends
+            // the listing, which is the sequence the client expects.
+            Some(files) if !files.is_empty() => Ok(Name {
+                id,
+                files: std::mem::take(files),
+            }),
+            Some(_) => Err(StatusCode::Eof),
+            None => Err(StatusCode::Failure),
+        }
+    }
+
+    async fn open(
+        &mut self,
+        id: u32,
+        filename: String,
+        pflags: OpenFlags,
+        _attrs: FileAttributes,
+    ) -> Result<SftpFileHandle, Self::Error> {
+        let options: std::fs::OpenOptions = pflags.into();
+        let file = options.open(self.local(&filename)).map_err(to_status)?;
+
+        let handle = self.handle("file-");
+        self.files.insert(handle.clone(), file);
+        Ok(SftpFileHandle { id, handle })
+    }
+
+    async fn read(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        len: u32,
+    ) -> Result<Data, Self::Error> {
+        let file = self.files.get_mut(&handle).ok_or(StatusCode::Failure)?;
+        file.seek(SeekFrom::Start(offset)).map_err(to_status)?;
+
+        let mut data = vec![0u8; len as usize];
+        let mut filled = 0;
+        while filled < data.len() {
+            let read = file.read(&mut data[filled..]).map_err(to_status)?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+        if filled == 0 {
+            return Err(StatusCode::Eof);
+        }
+        data.truncate(filled);
+        Ok(Data { id, data })
+    }
+
+    async fn write(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<Status, Self::Error> {
+        let file = self.files.get_mut(&handle).ok_or(StatusCode::Failure)?;
+        file.seek(SeekFrom::Start(offset)).map_err(to_status)?;
+        file.write_all(&data).map_err(to_status)?;
+        Ok(ok_status(id))
+    }
+
+    async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
+        self.dirs.remove(&handle);
+        self.files.remove(&handle);
+        Ok(ok_status(id))
+    }
+
+    async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        let metadata = std::fs::metadata(self.local(&path)).map_err(to_status)?;
+        Ok(Attrs {
+            id,
+            attrs: FileAttributes::from(&metadata),
+        })
+    }
+
+    async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        let metadata = std::fs::symlink_metadata(self.local(&path)).map_err(to_status)?;
+        Ok(Attrs {
+            id,
+            attrs: FileAttributes::from(&metadata),
+        })
+    }
+
+    async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
+        let file = self.files.get(&handle).ok_or(StatusCode::Failure)?;
+        let metadata = file.metadata().map_err(to_status)?;
+        Ok(Attrs {
+            id,
+            attrs: FileAttributes::from(&metadata),
+        })
+    }
+}
+
 /// An SSH server running inside the test process, plus the runtime driving it.
 struct TestServer {
     /// Runtime the listener, the sessions and the test's own waits all use.
@@ -284,7 +571,14 @@ impl TestServer {
     /// `refuse_pty` and `refuse_shell` answer the corresponding channel
     /// request with a failure, which is how the two "the session must not
     /// become ready" tests get a request they can watch be turned down.
-    fn start(auth: AuthPolicy, refuse_pty: bool, refuse_shell: bool) -> Self {
+    /// `sftp_root`, when given, makes the server offer the `sftp` subsystem
+    /// over that directory; without it no subsystem is accepted at all.
+    fn start(
+        auth: AuthPolicy,
+        refuse_pty: bool,
+        refuse_shell: bool,
+        sftp_root: Option<PathBuf>,
+    ) -> Self {
         let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
             .expect("generating a host key must succeed");
         let public_host_key = host_key.public_key().clone();
@@ -314,6 +608,7 @@ impl TestServer {
             auth,
             refuse_pty,
             refuse_shell,
+            sftp_root,
             term: Mutex::new(None),
             size: Mutex::new(None),
             shell_requests: AtomicUsize::new(0),
@@ -352,6 +647,7 @@ impl TestServer {
             },
             false,
             false,
+            None,
         )
     }
 
@@ -364,6 +660,7 @@ impl TestServer {
             },
             false,
             true,
+            None,
         )
     }
 
@@ -376,6 +673,7 @@ impl TestServer {
             },
             true,
             false,
+            None,
         )
     }
 
@@ -388,6 +686,21 @@ impl TestServer {
             },
             false,
             false,
+            None,
+        )
+    }
+
+    /// As [`TestServer::with_password`], and additionally serves `root` over
+    /// the `sftp` subsystem.
+    fn with_sftp(user: &str, password: &str, root: &Path) -> Self {
+        Self::start(
+            AuthPolicy::Password {
+                user: user.to_owned(),
+                password: password.to_owned(),
+            },
+            false,
+            false,
+            Some(root.to_path_buf()),
         )
     }
 
@@ -441,6 +754,18 @@ impl TestServer {
     /// How many connections this server has accepted.
     fn accepted_connections(&self) -> usize {
         self.state.accepted.load(Ordering::SeqCst)
+    }
+
+    /// Drives `future` to completion on the server's runtime, bounded by
+    /// [`EVENT_TIMEOUT`].
+    ///
+    /// Used for SFTP calls, whose futures resolve on the *client's* worker
+    /// thread; this side only ever waits for the answer to come back, so a
+    /// hung request fails the test instead of wedging it.
+    fn run<F: Future>(&self, future: F) -> F::Output {
+        self.runtime
+            .block_on(async move { tokio::time::timeout(EVENT_TIMEOUT, future).await })
+            .unwrap_or_else(|_| panic!("the request did not finish within {EVENT_TIMEOUT:?}"))
     }
 
     /// Blocks the test thread for `duration` on the server's runtime.
@@ -506,6 +831,8 @@ async fn accept_loop(
             let handler = TestHandler {
                 state: Arc::clone(&state),
                 pending: Vec::new(),
+                channels: HashMap::new(),
+                sftp: HashSet::new(),
             };
             if let Ok(session) = russh::server::run_stream(config, stream, handler).await {
                 let _ = session.await;
@@ -1369,4 +1696,235 @@ fn the_verifier_receives_the_host_port_and_key() {
         Some(fingerprint(server.host_key()).as_str()),
         "the verifier must be told the real host, port and key; saw {seen:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SFTP
+// ---------------------------------------------------------------------------
+
+/// Builds the directory the SFTP tests serve as the remote file system.
+///
+/// The layout is deliberately mixed — a file, a directory, and (where the
+/// platform has them) a symlink pointing at that directory — because the three
+/// take different paths through the listing code.
+fn remote_tree() -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("creating the remote tree must succeed");
+    std::fs::write(root.path().join("notes.txt"), b"remote notes\n")
+        .expect("writing the remote file must succeed");
+    std::fs::create_dir(root.path().join("logs")).expect("creating the remote dir must succeed");
+    std::fs::write(root.path().join("logs").join("app.log"), b"line\n")
+        .expect("writing the nested file must succeed");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("logs", root.path().join("shortcut"))
+        .expect("creating the remote symlink must succeed");
+    root
+}
+
+/// Connects a ready session against a server offering SFTP over `root`.
+fn sftp_session(server: &TestServer) -> (SshSession, Events) {
+    let config = server.config("alice", SshAuth::Password("hunter2".into()));
+    let (session, mut events) = server.connect(config, Arc::new(AcceptAllVerifier));
+    events.wait_ready();
+    (session, events)
+}
+
+/// The login directory is what the server canonicalises `"."` to — and asking
+/// for it must work even when the request is made before the session is ready,
+/// because the file panel opens at the same moment the terminal does.
+#[test]
+fn sftp_reports_the_login_directory() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let config = server.config("alice", SshAuth::Password("hunter2".into()));
+    let (session, _events) = server.connect(config, Arc::new(AcceptAllVerifier));
+
+    let home = server.run(session.sftp().home());
+    assert_eq!(home, Ok("/".to_owned()));
+}
+
+/// A listing must name every entry, size the files, and — the point of the
+/// extra round trip — describe a symlink by what it points at.
+#[test]
+fn sftp_lists_a_remote_directory() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+
+    let entries = server
+        .run(session.sftp().read_dir("/"))
+        .expect("listing the remote root must succeed");
+    let by_name: HashMap<&str, &logman_ssh::RemoteEntry> = entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry))
+        .collect();
+
+    let notes = by_name
+        .get("notes.txt")
+        .unwrap_or_else(|| panic!("notes.txt must be listed; saw {entries:?}"));
+    assert!(
+        !notes.is_dir,
+        "a regular file must not look like a directory"
+    );
+    assert!(!notes.is_symlink);
+    assert_eq!(notes.size, b"remote notes\n".len() as u64);
+
+    let logs = by_name
+        .get("logs")
+        .unwrap_or_else(|| panic!("logs must be listed; saw {entries:?}"));
+    assert!(logs.is_dir, "a directory must be reported as one");
+
+    // `.` and `..` are the server's business, never the caller's.
+    assert!(!by_name.contains_key("."), "listings must not include .");
+    assert!(!by_name.contains_key(".."), "listings must not include ..");
+
+    #[cfg(unix)]
+    {
+        let shortcut = by_name
+            .get("shortcut")
+            .unwrap_or_else(|| panic!("shortcut must be listed; saw {entries:?}"));
+        assert!(
+            shortcut.is_symlink,
+            "the link itself must still be recognisable"
+        );
+        assert!(
+            shortcut.is_dir,
+            "a symlink to a directory must be navigable; saw {shortcut:?}"
+        );
+    }
+}
+
+/// Walking upwards is done by canonicalising `<current>/..` rather than by
+/// slicing the path locally, so the server has to answer that form.
+#[test]
+fn sftp_resolves_a_parent_path() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+    let sftp = session.sftp();
+
+    assert_eq!(server.run(sftp.realpath("/logs/..")), Ok("/".to_owned()));
+    assert_eq!(server.run(sftp.realpath("/logs/.")), Ok("/logs".to_owned()));
+}
+
+/// A download must reproduce the remote bytes exactly, including across the
+/// chunk boundaries a payload larger than one transfer buffer forces.
+#[test]
+fn sftp_downloads_a_remote_file() {
+    let root = remote_tree();
+    let payload: Vec<u8> = (0..300_000u32).map(|index| (index % 251) as u8).collect();
+    std::fs::write(root.path().join("payload.bin"), &payload)
+        .expect("writing the payload must succeed");
+
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+
+    let local = tempfile::tempdir().expect("creating the local dir must succeed");
+    let target = local.path().join("payload.bin");
+    let outcome = server.run(session.sftp().download("/payload.bin", target.clone()));
+
+    assert_eq!(outcome, Ok(()));
+    let written = std::fs::read(&target).expect("the downloaded file must exist");
+    assert_eq!(written.len(), payload.len());
+    assert!(
+        written == payload,
+        "the downloaded bytes must match exactly"
+    );
+}
+
+/// An upload keeps the local file name, lands in the requested directory, and
+/// overwrites whatever was there before.
+#[test]
+fn sftp_uploads_a_local_file() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+
+    let local = tempfile::tempdir().expect("creating the local dir must succeed");
+    let source = local.path().join("report.txt");
+    let payload: Vec<u8> = (0..200_000u32).map(|index| (index % 97) as u8).collect();
+    std::fs::write(&source, &payload).expect("writing the local file must succeed");
+
+    let remote = server
+        .run(session.sftp().upload(source.clone(), "/logs"))
+        .expect("uploading must succeed");
+    assert_eq!(remote, "/logs/report.txt");
+
+    let landed = std::fs::read(root.path().join("logs").join("report.txt"))
+        .expect("the uploaded file must exist on the server");
+    assert!(landed == payload, "the uploaded bytes must match exactly");
+
+    // A second, shorter upload must truncate rather than leave a tail behind.
+    std::fs::write(&source, b"short").expect("rewriting the local file must succeed");
+    let remote = server
+        .run(session.sftp().upload(source, "/logs"))
+        .expect("overwriting must succeed");
+    assert_eq!(remote, "/logs/report.txt");
+    assert_eq!(
+        std::fs::read(root.path().join("logs").join("report.txt"))
+            .expect("the overwritten file must exist"),
+        b"short"
+    );
+}
+
+/// The whole point of a separate channel: SFTP traffic must leave the shell
+/// untouched, and the shell must keep answering while the file panel works.
+#[test]
+fn sftp_does_not_disturb_the_shell() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, mut events) = sftp_session(&server);
+
+    session.send_input(b"before\n".to_vec());
+    assert_eq!(events.read_line(b"before\n"), b"before\n");
+
+    let entries = server
+        .run(session.sftp().read_dir("/logs"))
+        .expect("listing must succeed while the shell is live");
+    assert_eq!(entries.len(), 1, "saw {entries:?}");
+
+    session.send_input(b"after\n".to_vec());
+    assert!(
+        events.read_line(b"after\n").ends_with(b"after\n"),
+        "the shell must still answer after an SFTP request; events: {:?}",
+        events.seen()
+    );
+    assert_eq!(
+        server.shell_requests(),
+        1,
+        "SFTP must not open a second shell"
+    );
+}
+
+/// A server that does not offer the subsystem must produce an explanation, not
+/// a hang: the client asks with `want_reply` precisely so the refusal is seen.
+#[test]
+fn sftp_reports_a_server_without_the_subsystem() {
+    let server = TestServer::with_password("alice", "hunter2");
+    let (session, _events) = sftp_session(&server);
+
+    let outcome = server.run(session.sftp().home());
+    assert!(
+        matches!(outcome, Err(SftpError::Subsystem(_))),
+        "expected a subsystem error, got {outcome:?}"
+    );
+}
+
+/// Once the session is gone every request must fail immediately and by name.
+/// Silence or a panic here would strand the file panel.
+#[test]
+fn sftp_after_a_disconnect_reports_it() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, mut events) = sftp_session(&server);
+
+    // Proves the channel worked before the disconnect, so the failure below
+    // cannot be blamed on the subsystem never having started.
+    assert!(server.run(session.sftp().home()).is_ok());
+
+    let sftp = session.sftp();
+    session.disconnect();
+    events.wait_terminal();
+
+    assert_eq!(server.run(sftp.read_dir("/")), Err(SftpError::Disconnected));
+    assert_eq!(server.run(sftp.home()), Err(SftpError::Disconnected));
 }

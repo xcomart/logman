@@ -16,6 +16,7 @@ use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 
+use crate::cwd::CwdTracker;
 use crate::keys::TermModes;
 use crate::snapshot::{CursorPos, RunFlags, StyledRun, TerminalLine, TerminalSnapshot};
 use crate::theme::{Rgb, TerminalTheme};
@@ -97,6 +98,9 @@ pub struct TerminalModel {
     theme: TerminalTheme,
     scrollback: usize,
     title: Option<String>,
+    /// Watches the same bytes for working directory announcements, which the
+    /// `alacritty` parser discards.
+    cwd: CwdTracker,
 }
 
 impl std::fmt::Debug for TerminalModel {
@@ -107,6 +111,7 @@ impl std::fmt::Debug for TerminalModel {
             .field("rows", &rows)
             .field("scrollback", &self.scrollback)
             .field("title", &self.title)
+            .field("cwd", &self.cwd.cwd())
             .finish_non_exhaustive()
     }
 }
@@ -130,6 +135,7 @@ impl TerminalModel {
             theme,
             scrollback,
             title: None,
+            cwd: CwdTracker::new(),
         }
     }
 
@@ -148,12 +154,22 @@ impl TerminalModel {
     }
 
     /// Feed raw bytes coming from the remote shell into the parser.
-    pub fn feed(&mut self, bytes: &[u8]) {
+    ///
+    /// Returns `true` when the bytes announced a new working directory, so a
+    /// caller can react to a directory change without polling
+    /// [`TerminalModel::cwd`] on every chunk.
+    pub fn feed(&mut self, bytes: &[u8]) -> bool {
+        // Runs before the emulator because the sequences it looks for are the
+        // ones `alacritty` drops; it only observes and never rewrites `bytes`.
+        let cwd_changed = self.cwd.feed(bytes).is_some();
+
         self.parser.advance(&mut self.term, bytes);
 
         if let Some(title) = self.state.borrow_mut().pending_title.take() {
             self.title = title;
         }
+
+        cwd_changed
     }
 
     /// Resize the terminal, clamping both dimensions to at least one cell.
@@ -302,6 +318,15 @@ impl TerminalModel {
         self.title.as_deref()
     }
 
+    /// Working directory of the remote shell, as announced through `OSC 7` or
+    /// `OSC 1337`.
+    ///
+    /// `None` until a shell reports one; shells that never emit either sequence
+    /// leave this empty for the whole session.
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.cwd()
+    }
+
     /// Terminal modes relevant for key encoding.
     pub fn modes(&self) -> TermModes {
         let mode = self.term.mode();
@@ -323,12 +348,13 @@ impl TerminalModel {
     }
 
     /// Reset the terminal to its initial state, dropping screen, scrollback,
-    /// title and any half-parsed escape sequence.
+    /// title, working directory and any half-parsed escape sequence.
     pub fn reset(&mut self) {
         let (cols, rows) = self.size();
         self.term = Self::build_term(cols, rows, self.scrollback, Rc::clone(&self.state));
         self.parser = Processor::new();
         self.title = None;
+        self.cwd.reset();
         *self.state.borrow_mut() = SharedState::default();
     }
 }
@@ -545,6 +571,45 @@ mod tests {
 
         term.reset();
         assert_eq!(term.title(), None);
+    }
+
+    #[test]
+    fn osc_7_and_1337_track_the_remote_directory() {
+        let mut term = model(20, 5);
+        assert_eq!(term.cwd(), None);
+
+        assert!(term.feed(b"\x1b]7;file://remote/home/dennis\x07"));
+        assert_eq!(term.cwd(), Some("/home/dennis"));
+
+        // The same directory again is not a change.
+        assert!(!term.feed(b"\x1b]7;file://remote/home/dennis\x07"));
+        assert!(!term.feed(b"plain output\r\n"));
+        assert_eq!(term.cwd(), Some("/home/dennis"));
+
+        assert!(term.feed(b"\x1b]1337;CurrentDir=/var/log\x1b\\"));
+        assert_eq!(term.cwd(), Some("/var/log"));
+
+        term.reset();
+        assert_eq!(term.cwd(), None);
+    }
+
+    #[test]
+    fn a_directory_sequence_leaves_no_text_on_the_screen() {
+        let mut term = model(40, 3);
+        term.feed(b"a\x1b]7;file://h/tmp\x07b");
+
+        assert_eq!(term.snapshot().lines[0].text(), "ab");
+        assert_eq!(term.cwd(), Some("/tmp"));
+    }
+
+    #[test]
+    fn a_directory_sequence_split_across_feeds_is_resumed() {
+        let mut term = model(40, 3);
+        assert!(!term.feed(b"\x1b]7;file://h/ho"));
+        assert!(term.feed(b"me/x\x07done"));
+
+        assert_eq!(term.cwd(), Some("/home/x"));
+        assert_eq!(term.snapshot().lines[0].text(), "done");
     }
 
     #[test]

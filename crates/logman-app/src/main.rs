@@ -19,7 +19,9 @@ mod about_dialog;
 mod app_settings;
 mod caption;
 mod connection;
+mod file_panel;
 mod i18n;
+mod icons;
 // The pane tree is written as a self-contained data structure with its own
 // tests rather than for the two call sites the shell currently has, so it
 // offers operations nothing reaches yet — splitting a pane in place, editing a
@@ -55,7 +57,9 @@ use logman_ssh::SshAuth;
 use about_dialog::{AboutDialog, AboutDialogEvent};
 use caption::apply_caption_theme;
 use connection::{ConnectionDialog, ConnectionDialogEvent};
+use file_panel::FilePanel;
 use i18n::ts;
+use icons::Icons;
 use pane_tree::{Axis, PaneId, PaneNode, PaneTree};
 use session::{Session, SessionStatus};
 use settings_dialog::{SettingsDialog, SettingsDialogEvent};
@@ -80,6 +84,8 @@ actions!(
         FocusPrevPane,
         /// Move the active pane out of its tab and into a tab of its own.
         BreakOutPane,
+        /// Show or hide the remote file panel.
+        ToggleFilePanel,
         /// Open the settings dialog.
         OpenSettings,
         /// Open the about dialog.
@@ -130,6 +136,33 @@ const PANE_SHORTCUT_MODIFIER: &str = if cfg!(target_os = "macos") {
 } else {
     "Alt"
 };
+
+/// Chord that shows and hides the remote file panel, as [`bind_shortcuts`]
+/// registers it.
+///
+/// `Cmd+B` on macOS, where the modifier never reaches the shell. Elsewhere the
+/// obvious `Ctrl+B` is out: it is tmux's prefix key and readline's
+/// *backward-char*, and `Alt+B` — the modifier the pane commands fall back to —
+/// is readline's *backward-word*. The shifted chord is free in a way neither of
+/// those is, because a terminal cannot encode `Ctrl+Shift+B` distinctly from
+/// `Ctrl+B` in the first place: taking it costs the remote shell nothing.
+const PANEL_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "cmd-b"
+} else {
+    "ctrl-shift-b"
+};
+
+/// Name of [`PANEL_SHORTCUT`] as the menus print it. Never translated, for the
+/// same reason [`SHORTCUT_MODIFIER`] is not.
+const PANEL_SHORTCUT_LABEL: &str = if cfg!(target_os = "macos") {
+    "Cmd+B"
+} else {
+    "Ctrl+Shift+B"
+};
+
+/// Style group of the toolbar button that shows and hides the remote file
+/// panel, so hovering the button recolours the icon inside it.
+const PANEL_TOGGLE_GROUP: &str = "toggle-file-panel";
 
 /// Narrowest pane, in terminal columns, a horizontal split may produce.
 ///
@@ -243,6 +276,18 @@ struct Workspace {
     settings: Entity<SettingsDialog>,
     /// The about dialog, rendered only while it reports itself open.
     about: Entity<AboutDialog>,
+    /// The remote file panel, shown to the left of the panes.
+    ///
+    /// One panel for the whole window rather than one per session: it keeps the
+    /// browsing state of every session itself and shows whichever one the active
+    /// pane belongs to.
+    panel: Entity<FilePanel>,
+    /// Whether the remote file panel is showing.
+    ///
+    /// Session state only. Persisting it would mean a settings key, and the
+    /// panel is cheap enough to reopen that the key would earn its keep only
+    /// once there is more to remember about it than one flag.
+    panel_open: bool,
     /// Whether the application dropdown menu is showing.
     menu_open: bool,
     /// Whether the tab strip's dropdown tab list is showing.
@@ -342,6 +387,8 @@ impl Workspace {
             async {}
         });
 
+        let panel = cx.new(FilePanel::new);
+
         Self {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
@@ -350,6 +397,8 @@ impl Workspace {
             dialog,
             settings,
             about,
+            panel,
+            panel_open: true,
             menu_open: false,
             tab_menu_open: false,
             tab_context: None,
@@ -465,6 +514,7 @@ impl Workspace {
 
         let tab = self.tabs.remove(index);
         for session in tab.sessions(cx) {
+            self.forget_panel_session(session.entity_id(), cx);
             session.update(cx, |session, cx| session.disconnect(cx));
         }
 
@@ -563,6 +613,7 @@ impl Workspace {
         // session has to be told to hang up first. Hanging up twice — the
         // automatic path arrives here already disconnected — is a no-op.
         let session = leaf.view.read(cx).session().clone();
+        self.forget_panel_session(session.entity_id(), cx);
         session.update(cx, |session, cx| session.disconnect(cx));
 
         if index == self.active {
@@ -800,6 +851,34 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Shows or hides the remote file panel.
+    fn toggle_file_panel(&mut self, cx: &mut Context<Self>) {
+        self.panel_open = !self.panel_open;
+        cx.notify();
+    }
+
+    /// Tells the file panel which session it is looking at.
+    ///
+    /// Called from the render pass rather than from each of the eight places
+    /// that can change the active pane, so there is no site left to forget. The
+    /// panel compares the session against the one it already holds and returns
+    /// without repainting when they match, which is every frame but the ones
+    /// that actually switch.
+    fn sync_file_panel(&self, cx: &mut Context<Self>) {
+        let session = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.active_view().read(cx).session().clone());
+        self.panel
+            .update(cx, |panel, cx| panel.set_session(session, cx));
+    }
+
+    /// Drops a closed session's browsing state from the file panel.
+    fn forget_panel_session(&self, session: EntityId, cx: &mut Context<Self>) {
+        self.panel
+            .update(cx, |panel, cx| panel.forget_session(session, cx));
+    }
+
     /// Shows or hides the application dropdown menu.
     fn set_menu_open(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.menu_open == open {
@@ -892,6 +971,16 @@ impl Workspace {
         self.break_out_active_pane(window, cx);
     }
 
+    /// Handles the shortcut that shows and hides the remote file panel.
+    fn toggle_file_panel_action(
+        &mut self,
+        _: &ToggleFilePanel,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_file_panel(cx);
+    }
+
     /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>,</kbd>.
     fn open_settings_action(
         &mut self,
@@ -971,9 +1060,45 @@ impl Workspace {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
         let menu = (!cfg!(target_os = "macos")).then(|| self.render_app_menu(cx));
-        // One cell for the leading controls, so the menu button shares the
-        // toolbar's fill and bottom hairline with the strip.
-        let leading = menu.is_some().then(|| {
+        // Nothing to browse without a session, so the toggle goes with the
+        // panel it would open.
+        let toggle = (!self.tabs.is_empty()).then(|| {
+            let open = self.panel_open;
+            let hover = theme.surface_hover;
+            // The open state is already carried by the accent colour, so only
+            // the closed button brightens on hover. The icon is tinted by its
+            // own `text_color` rather than the button's, so the hover shade has
+            // to reach it through the group.
+            let hover_text = if open { theme.accent } else { theme.text };
+            div()
+                .id("toggle-file-panel")
+                .group(PANEL_TOGGLE_GROUP)
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(28.))
+                .rounded_md()
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(|workspace, _, _window, cx| {
+                    workspace.toggle_file_panel(cx);
+                }))
+                .child(
+                    icons::icon(
+                        icons::PANEL,
+                        px(16.),
+                        if open { theme.accent } else { theme.text_muted },
+                    )
+                    .group_hover(PANEL_TOGGLE_GROUP, move |style| {
+                        style.text_color(hover_text)
+                    }),
+                )
+        });
+
+        // One cell for the leading controls, so the menu button and the panel
+        // toggle share the toolbar's fill and bottom hairline with the strip.
+        let leading = (menu.is_some() || toggle.is_some()).then(|| {
             div()
                 .flex()
                 .flex_row()
@@ -986,6 +1111,7 @@ impl Workspace {
                 .border_b_1()
                 .border_color(theme.border)
                 .children(menu)
+                .children(toggle)
         });
 
         div()
@@ -1018,6 +1144,9 @@ impl Workspace {
             MenuEntry::new(ts!("menu.break_out_pane"))
                 .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+B"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(BreakOutPane), cx)),
+            MenuEntry::new(ts!("files.toggle"))
+                .shortcut(PANEL_SHORTCUT_LABEL)
+                .on_activate(|window, cx| window.dispatch_action(Box::new(ToggleFilePanel), cx)),
             MenuEntry::new(ts!("menu.settings"))
                 .shortcut(format!("{SHORTCUT_MODIFIER}+,"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
@@ -1171,6 +1300,7 @@ impl Workspace {
         // frame, no divider, the terminal filling the body.
         let split = tab.panes.leaf_count() > 1;
         let active = tab.active_pane();
+        let panel = self.panel_open.then(|| self.panel.clone());
 
         div()
             .flex()
@@ -1178,6 +1308,7 @@ impl Workspace {
             .flex_grow()
             .min_w_0()
             .min_h_0()
+            .children(panel)
             .child(div().flex().flex_1().min_w_0().min_h_0().child(render_pane(
                 tab.panes.root(),
                 active,
@@ -1384,6 +1515,9 @@ fn render_pane(
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
+        // Before anything is built, so the panel is already pointed at the
+        // active pane's session by the time it renders itself as a child.
+        self.sync_file_panel(cx);
         let toolbar = self.render_toolbar(cx);
         let body = self.render_body(cx);
         let status_bar = self.render_status_bar(cx);
@@ -1424,6 +1558,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_next_pane_action))
             .on_action(cx.listener(Self::focus_prev_pane_action))
             .on_action(cx.listener(Self::break_out_pane_action))
+            .on_action(cx.listener(Self::toggle_file_panel_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::show_about_action))
             .on_action(cx.listener(Self::select_tab_action))
@@ -1501,6 +1636,7 @@ fn app_menus() -> Vec<Menu> {
                 // tab, so it belongs to the tab context menu alone.
                 MenuItem::action(ts!("menu.mac.break_out_pane"), BreakOutPane),
                 MenuItem::separator(),
+                MenuItem::action(ts!("files.mac.toggle"), ToggleFilePanel),
             ],
         },
     ]
@@ -1553,6 +1689,7 @@ fn bind_shortcuts(cx: &mut App) {
             BreakOutPane,
             Some(KEY_CONTEXT),
         ),
+        KeyBinding::new(PANEL_SHORTCUT, ToggleFilePanel, Some(KEY_CONTEXT)),
     ];
     for index in 0..QUICK_SELECT_TABS {
         bindings.push(KeyBinding::new(
@@ -1570,7 +1707,7 @@ fn main() {
 
     // The icon set has to be installed before the app runs: `svg()` resolves
     // every path through this source, and the default one answers `None`.
-    Application::new().run(|cx: &mut App| {
+    Application::new().with_assets(Icons).run(|cx: &mut App| {
         if let Err(error) = logman_core::init_secrets() {
             log::warn!("the OS keychain is unavailable: {error}");
         }

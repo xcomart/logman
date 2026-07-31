@@ -28,6 +28,24 @@ tab:
   split_below: Разделить под вкладкой
   close: Закрыть вкладку
 
+files:
+  title: Удалённые файлы
+  toggle: Удалённые файлы
+  mac:
+    toggle: Удалённые файлы
+  no_session: Нет открытых сеансов.
+  not_connected: Удалённые файлы появятся, когда сеанс будет подключён.
+  loading: Загрузка…
+  empty: Этот каталог пуст.
+  select_upload: Загрузить
+  uploading: "Загрузка %{name}…"
+  uploaded: "Файл %{name} загружен."
+  uploaded_many: "Загружено файлов: %{count}."
+  downloading: "Скачивание %{name}…"
+  downloaded: "Сохранено в %{path}."
+  skipped_directory: "%{name} пропущен: загружать можно только файлы."
+  failed: "Удалённые файлы: %{error}"
+
 empty:
   hint: "Нажмите %{shortcut}, чтобы подключиться к узлу."
   saved_profiles: Сохранённые профили

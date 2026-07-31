@@ -56,6 +56,30 @@ tab:
 # the SFTP layer produced; all three are values rather than words and stay as
 # they are. Only the sentence framing `%{error}` is translated, the same policy
 # the connection and session messages follow.
+files:
+  title: Remote files
+  # The row of the in-app dropdown menu that shows and hides the panel, and its
+  # macOS menu bar counterpart. They differ only in capitalisation in English,
+  # like the `menu` pair above.
+  toggle: Remote files
+  mac:
+    toggle: Remote Files
+  no_session: No session is open.
+  not_connected: The remote files appear once the session is connected.
+  loading: Loading…
+  empty: This directory is empty.
+  # Confirmation button of the platform file picker for an upload.
+  select_upload: Upload
+  uploading: "Uploading %{name}…"
+  uploaded: "Uploaded %{name}."
+  # Two keys rather than a plural rule: only "exactly one" and "more than one"
+  # are ever needed, as with the session overrides.
+  uploaded_many: "Uploaded %{count} files."
+  downloading: "Downloading %{name}…"
+  downloaded: "Saved to %{path}."
+  skipped_directory: "%{name} was skipped: only files can be uploaded."
+  failed: "Remote files: %{error}"
+
 # The placeholder shown while no session is open.
 empty:
   # `%{shortcut}` is "Cmd+T" or "Ctrl+T"; neither is translated.
