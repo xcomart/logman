@@ -12,6 +12,8 @@ common:
 
 menu:
   new_session: Новый сеанс
+  duplicate_right: Разделить справа с новым подключением
+  duplicate_below: Разделить снизу с новым подключением
   break_out_pane: Вынести в новую вкладку
   settings: Настройки…
   about: О программе logman
@@ -20,12 +22,16 @@ menu:
   mac:
     new_session: Новый сеанс
     close_session: Закрыть сеанс
+    duplicate_right: Разделить справа с новым подключением
+    duplicate_below: Разделить снизу с новым подключением
     break_out_pane: Вынести в новую вкладку
     quit: Завершить logman
 
 tab:
   split_right: Разделить справа от вкладки
   split_below: Разделить под вкладкой
+  duplicate_right: Разделить справа с новым подключением
+  duplicate_below: Разделить снизу с новым подключением
   close: Закрыть вкладку
 
 files:

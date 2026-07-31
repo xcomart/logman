@@ -19,8 +19,9 @@ A multi-platform GUI SSH terminal written in Rust, built on
 
 - **Multiple sessions** in one window, as tabs, each with its own connection and
   scrollback.
-- **Split panes**: pull one tab in beside another and work in both sessions at
-  once, dragging the divider to give either as much room as it needs; a pane
+- **Split panes**: split a pane into a second connection to the same host with
+  one shortcut, or pull an open tab in beside another, and work in both sessions
+  at once, dragging the divider to give either as much room as it needs; a pane
   closes itself when its connection ends.
 - **A remote files panel**: an SFTP browser beside the terminal that follows the
   shell's working directory, with drag-and-drop upload and download and a
@@ -92,12 +93,23 @@ so the next connection is one click from the empty-state screen.
 
 ### Splitting a tab
 
-A tab shows one session per pane. To put two sessions side by side, right-click
-the tab you want to move and pick **Split right of current tab** or **Split
-below current tab**: that tab leaves the strip and its sessions appear next to
-the pane you are looking at. There is no shortcut for it, because a split has to
-say *which* tab to pull in. Right-clicking the active tab offers the reverse,
-moving its focused pane back out into a tab of its own.
+A tab shows one session per pane, and there are two ways to get a second one.
+
+**A second connection to the same host.**
+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> splits the focused pane to the
+right and <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> splits it downwards,
+opening a fresh session to the same host in the new half — same profile, same
+credentials, no dialog. The two sessions are independent from that moment on,
+each with its own shell and scrollback. Both commands are also in the
+application menu and in the menu a right-click on the active tab opens, and
+both work even when the pane you are splitting has failed or disconnected.
+
+**An existing tab, moved in.** Right-click the tab you want to move and pick
+**Split right of current tab** or **Split below current tab**: that tab leaves
+the strip and its sessions appear next to the pane you are looking at. There is
+no shortcut for *this* one, because it has to say which tab to pull in.
+Right-clicking the active tab offers the reverse, moving its focused pane back
+out into a tab of its own.
 
 When a connection ends — the remote shell exits, or the server hangs up — its
 pane closes on its own: siblings grow into the space, a tab closes with its
@@ -151,6 +163,8 @@ directory, at which point the panel follows again.
 | <kbd>Ctrl</kbd>+<kbd>W</kbd> | Close the active pane, and the tab with its last one |
 | <kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd> | Switch to tab *n* |
 | <kbd>Alt</kbd>+<kbd>]</kbd> / <kbd>Alt</kbd>+<kbd>[</kbd> | Next / previous pane of the tab |
+| <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> | Split right, with a new connection to the same host |
+| <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> | Split below, with a new connection to the same host |
 | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | Move the active pane into its own tab |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | Show or hide the remote files panel |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> | Copy the selection |
@@ -163,7 +177,10 @@ copy/paste are plain <kbd>Cmd</kbd>+<kbd>C</kbd>/<kbd>V</kbd>, and the files
 panel is plain <kbd>Cmd</kbd>+<kbd>B</kbd>. The pane shortcuts use
 <kbd>Alt</kbd> elsewhere because <kbd>Ctrl</kbd>+<kbd>[</kbd> is ESC to a remote
 shell; the files panel takes the shifted chord for the same reason, since
-<kbd>Ctrl</kbd>+<kbd>B</kbd> is tmux's prefix key.
+<kbd>Ctrl</kbd>+<kbd>B</kbd> is tmux's prefix key. The split shortcuts are
+shifted because bare <kbd>Alt</kbd>+<kbd>D</kbd> is readline's *kill-word*,
+and a terminal cannot tell the shifted chord apart from it anyway — so taking
+it costs the remote shell nothing.
 
 Select text by dragging across the grid; scroll back with the mouse wheel.
 

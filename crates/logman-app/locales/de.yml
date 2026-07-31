@@ -12,6 +12,8 @@ common:
 
 menu:
   new_session: Neue Sitzung
+  duplicate_right: Rechts mit neuer Verbindung teilen
+  duplicate_below: Unten mit neuer Verbindung teilen
   break_out_pane: Bereich abtrennen
   settings: Einstellungen…
   about: Über logman
@@ -20,12 +22,16 @@ menu:
   mac:
     new_session: Neue Sitzung
     close_session: Sitzung schließen
+    duplicate_right: Rechts mit neuer Verbindung teilen
+    duplicate_below: Unten mit neuer Verbindung teilen
     break_out_pane: Bereich abtrennen
     quit: logman beenden
 
 tab:
   split_right: Rechts vom aktuellen Tab teilen
   split_below: Unter aktuellem Tab teilen
+  duplicate_right: Rechts mit neuer Verbindung teilen
+  duplicate_below: Unten mit neuer Verbindung teilen
   close: Tab schließen
 
 files:

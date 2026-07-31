@@ -140,19 +140,35 @@ A tab shows one session per pane. Splitting is how a tab comes to show several.
 
 ### Creating a split
 
-Right-click the tab you want to bring in and choose **Split right of current
-tab** or **Split below current tab**. That tab leaves the strip and its
-sessions appear next to the pane you are looking at, in the direction you
-picked. If the source tab was itself split, the whole arrangement moves over as
-a unit.
+There are two ways, and they differ in where the second session comes from.
 
-There is no keyboard shortcut for this, because a split has to name *which* tab
-to pull in and a static command cannot.
+**Open a second connection to the same host.**
+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> splits the focused pane to the
+right, <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> splits it downwards
+(<kbd>Cmd</kbd> instead of <kbd>Alt</kbd> on macOS). The same two commands sit
+in the application menu — the **Session** menu on macOS — and in the menu a
+right-click on the *active* tab opens.
 
-A split that would leave an unusably small pane is not offered: the menu row
-disappears once the active pane is under 40 columns wide (for a side-by-side
+The new pane connects afresh using the profile and the credentials the pane you
+split is already holding, so nothing is asked for again. From then on the two
+are unrelated: separate connections, separate shells, separate scrollback, and
+closing one leaves the other alone. Nothing about the state of the original
+matters either — a pane whose connection failed or has ended can still be
+split, which is a way to try again while keeping the error on screen.
+
+**Bring an existing tab in.** Right-click the tab you want to bring in and
+choose **Split right of current tab** or **Split below current tab**. That tab
+leaves the strip and its sessions appear next to the pane you are looking at, in
+the direction you picked. If the source tab was itself split, the whole
+arrangement moves over as a unit.
+
+There is no keyboard shortcut for *that* one, because it has to name **which**
+tab to pull in and a static command cannot.
+
+A split that would leave an unusably small pane is not offered: the menu rows
+disappear once the active pane is under 40 columns wide (for a side-by-side
 split) or under 12 rows tall (for a stacked one), since each half inherits about
-half the grid.
+half the grid. The shortcuts are refused on the same threshold.
 
 ### Working in a split
 
@@ -424,6 +440,8 @@ is plain <kbd>Cmd</kbd>+<kbd>B</kbd>.
 | <kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd> | <kbd>Cmd</kbd>+<kbd>1</kbd>…<kbd>9</kbd> | Switch to tab *n* |
 | <kbd>Alt</kbd>+<kbd>]</kbd> | <kbd>Cmd</kbd>+<kbd>]</kbd> | Focus the next pane of the tab |
 | <kbd>Alt</kbd>+<kbd>[</kbd> | <kbd>Cmd</kbd>+<kbd>[</kbd> | Focus the previous pane of the tab |
+| <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> | Split the active pane to the right, with a new connection to the same host |
+| <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> | Split the active pane downwards, with a new connection to the same host |
 | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | Move the active pane into its own tab |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | <kbd>Cmd</kbd>+<kbd>B</kbd> | Show or hide the remote files panel |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> | <kbd>Cmd</kbd>+<kbd>C</kbd> | Copy the selection |

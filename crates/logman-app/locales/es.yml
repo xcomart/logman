@@ -12,6 +12,8 @@ common:
 
 menu:
   new_session: Nueva sesión
+  duplicate_right: Dividir a la derecha con una conexión nueva
+  duplicate_below: Dividir debajo con una conexión nueva
   break_out_pane: Separar en nueva pestaña
   settings: Configuración…
   about: Acerca de logman
@@ -20,12 +22,16 @@ menu:
   mac:
     new_session: Nueva sesión
     close_session: Cerrar sesión
+    duplicate_right: Dividir a la derecha con una conexión nueva
+    duplicate_below: Dividir debajo con una conexión nueva
     break_out_pane: Separar en nueva pestaña
     quit: Salir de logman
 
 tab:
   split_right: Dividir a la derecha de la actual
   split_below: Dividir debajo de la actual
+  duplicate_right: Dividir a la derecha con una conexión nueva
+  duplicate_below: Dividir debajo con una conexión nueva
   close: Cerrar pestaña
 
 files:

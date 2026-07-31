@@ -28,6 +28,12 @@ common:
 # them, so they are separate keys.
 menu:
   new_session: New session
+  # Splits the focused pane and opens a *second* connection to the same host in
+  # the new half — a new session, not a view of the existing one. The same
+  # wording labels the matching rows of the tab context menu, which is in
+  # sentence case too.
+  duplicate_right: Split right with a new connection
+  duplicate_below: Split below with a new connection
   # Moves the focused pane of a split tab out into a tab of its own. Also the
   # label of the matching row in the tab context menu, which is in sentence case
   # too.
@@ -39,15 +45,20 @@ menu:
   mac:
     new_session: New Session
     close_session: Close Session
+    duplicate_right: Split Right with a New Connection
+    duplicate_below: Split Below with a New Connection
     break_out_pane: Move Pane to Its Own Tab
     quit: Quit logman
 
 # The menu a right-click on a tab opens. "Current tab" is the active one, which
-# a right-click deliberately leaves as it is: both split commands attach the
-# clicked tab to the tab already on screen.
+# a right-click deliberately leaves as it is: the `split_*` commands attach the
+# clicked tab to the tab already on screen, and the `duplicate_*` ones — offered
+# on the active tab itself — connect afresh instead of moving anything.
 tab:
   split_right: Split right of current tab
   split_below: Split below current tab
+  duplicate_right: Split right with a new connection
+  duplicate_below: Split below with a new connection
   close: Close tab
 
 # The remote file panel: the SFTP browser to the left of the terminal.
