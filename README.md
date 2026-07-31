@@ -20,9 +20,11 @@ A multi-platform GUI SSH terminal written in Rust, built on
 - **Multiple sessions** in one window, as tabs, each with its own connection and
   scrollback.
 - **Split panes**: pull one tab in beside another and work in both sessions at
-  once; a pane closes itself when its connection ends.
+  once, dragging the divider to give either as much room as it needs; a pane
+  closes itself when its connection ends.
 - **A remote files panel**: an SFTP browser beside the terminal that follows the
-  shell's working directory, with drag-and-drop upload and download.
+  shell's working directory, with drag-and-drop upload and download and a
+  draggable edge.
 - **Password and private key authentication**, with secrets kept in the OS
   keychain rather than on disk.
 - **A real terminal**, not a log view: `alacritty_terminal` drives the emulation,
@@ -79,6 +81,9 @@ cargo build --release
 Debug builds do not need it.
 
 ## Using it
+
+What follows is the short version; [docs/user-guide.md](docs/user-guide.md)
+covers every screen, setting and shortcut in full.
 
 Press <kbd>Ctrl</kbd>+<kbd>T</kbd> (<kbd>Cmd</kbd>+<kbd>T</kbd> on macOS) or
 click **New session** to open the connection dialog. Fill in the host and user,
@@ -192,9 +197,10 @@ than breaking the app.
 A profile can override the scheme, font size, scrollback and `TERM` for just
 that session — the "Session overrides" section of the connection dialog;
 empty fields inherit the global value. Theme and scheme changes apply to open
-sessions immediately; a changed scrollback or `TERM` takes effect on the next
-reconnect, since the first would clear the screen and the second has already
-been sent to the server.
+sessions immediately; a changed `TERM` takes effect on the next reconnect,
+since it has already been sent to the server; a changed scrollback applies to
+sessions opened afterwards, since resizing a live terminal's scrollback would
+rebuild the grid and clear the screen.
 
 ### Host key policy
 
@@ -298,10 +304,13 @@ and no external server is needed.
   <kbd>Alt</kbd> pane shortcuts are taken by the application, so the remote
   shell never sees them.
 - **The remote files panel browses and transfers, nothing more.** No rename,
-  delete or new directory, no recursive folder upload, no percentage while a
-  transfer runs, and its width is fixed.
-- **Panes cannot be resized or rearranged by dragging**, and a split layout is
-  not remembered across restarts. A split is always an even one.
+  delete or new directory, no recursive folder upload, and no percentage while a
+  transfer runs. Its edge can be dragged, but the width is session state and
+  reverts to the default on the next start.
+- **Panes cannot be rearranged by dragging.** A divider drag changes the
+  proportions of an existing split and nothing else — there is no way to move a
+  pane to another position, and a split layout is not remembered across
+  restarts. Every split starts out even.
 - **Runtime palette changes are ignored.** A program that redefines colors with
   `OSC 4` / `OSC 10-11` will render with the static theme.
 - A selection is anchored to the viewport and is not re-anchored when the
