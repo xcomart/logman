@@ -269,6 +269,9 @@ The destructive button is last on purpose. The row starts with the button
 pressed most often and ends with the one that cannot be undone, so a click that
 lands one button early hits a refresh rather than a delete.
 
+Resting the pointer on any of them names it. Dimmed buttons are included, so a
+button that will not take a click can still say what it would have done.
+
 ### Transferring files
 
 - **↑** opens the platform file picker and uploads the chosen files into the

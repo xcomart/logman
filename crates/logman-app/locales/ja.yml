@@ -53,6 +53,13 @@ files:
   menu_upload: ファイルをアップロード…
   menu_upload_folder: フォルダーをアップロード…
   menu_refresh: 再読み込み
+  tip_refresh: 再読み込み
+  tip_new_folder: 新規フォルダー
+  tip_upload: ファイルをアップロード
+  tip_upload_folder: フォルダーをアップロード
+  tip_download: ダウンロード
+  tip_rename: 名前を変更
+  tip_delete: 削除
   uploading: "%{name} をアップロード中… %{percent}%"
   downloading: "%{name} をダウンロード中… %{percent}%"
   deleting: "%{name} を削除中… %{percent}%"

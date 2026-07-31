@@ -53,6 +53,13 @@ files:
   menu_upload: Subir archivos…
   menu_upload_folder: Subir carpeta…
   menu_refresh: Actualizar
+  tip_refresh: Actualizar
+  tip_new_folder: Nueva carpeta
+  tip_upload: Subir archivos
+  tip_upload_folder: Subir carpeta
+  tip_download: Descargar
+  tip_rename: Cambiar nombre
+  tip_delete: Eliminar
   uploading: "Subiendo %{name}… %{percent} %"
   downloading: "Descargando %{name}… %{percent} %"
   deleting: "Eliminando %{name}… %{percent} %"
