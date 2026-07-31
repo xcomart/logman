@@ -1,13 +1,17 @@
-//! Keeps the Windows title bar readable and in step with the app theme.
+//! Keeps the native title bar readable and in step with the app theme.
 //!
-//! logman uses the standard DWM caption (no custom-drawn title bar), so the
-//! title text and the minimise / maximise / close glyphs are painted by
-//! Windows, not by us. Two things make that go wrong:
+//! Windows and macOS both draw the caption themselves, and both drive it from
+//! the *system* theme. A light app on a dark desktop — or the reverse — thus
+//! gets a title bar that clashes with its own chrome. The remedy differs per
+//! platform.
 //!
-//! * gpui only ever tells DWM which *system* theme is in use
+//! On Windows, logman uses the standard DWM caption (no custom-drawn title
+//! bar), so the title text and the minimise / maximise / close glyphs are
+//! painted by Windows, not by us. Two things make that go wrong:
+//!
+//! * gpui only ever tells DWM which system theme is in use
 //!   (`DWMWA_USE_IMMERSIVE_DARK_MODE`, set once at window creation and again
-//!   when the OS theme changes). A light app on a dark desktop — or the
-//!   reverse — therefore gets a caption that clashes with its own chrome.
+//!   when the OS theme changes).
 //! * With `background_blur` on, gpui asks for `ACCENT_ENABLE_ACRYLICBLURBEHIND`
 //!   via the undocumented `SetWindowCompositionAttribute`. That accent policy
 //!   covers the *whole* window, caption included, and DWM then paints the
@@ -22,6 +26,12 @@
 //! two attributes need Windows 11 (build 22000); on older builds the calls
 //! fail harmlessly and the immersive-dark-mode flag, which we also set from
 //! the *app* theme rather than the system one, still gets the contrast right.
+//!
+//! On macOS none of our colors are wanted: AppKit already draws the title and
+//! the traffic lights correctly for whichever `NSAppearance` the window
+//! carries, and the window carries the wrong one only because it inherits the
+//! system's. Pinning the window's appearance to `NSAppearanceNameDarkAqua` or
+//! `NSAppearanceNameAqua` from the app theme is the whole fix.
 
 use gpui::Window;
 
@@ -105,10 +115,74 @@ mod platform {
     }
 }
 
+#[cfg(target_os = "macos")]
+// objc 0.2's `msg_send!` and `class!` expand to a `cfg(feature =
+// "cargo-clippy")` test, and the feature belongs to objc, not to us — so the
+// check-cfg lint fires at every call site here. CI builds with `-D warnings`.
+#[allow(unexpected_cfgs)]
+mod platform {
+    use gpui::Window;
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    use logman_core::UiTheme;
+
+    type Id = *mut Object;
+
+    /// Extracts the `NSWindow` backing `window`, if it has one yet.
+    ///
+    /// gpui hands out the `NSView`, not the window, so this hops one link up
+    /// the responder chain; a view that has not been installed in a window
+    /// answers `nil`. Spelled as an explicit trait call because gpui's
+    /// `Window` also has an inherent `window_handle()` — a gpui-internal id,
+    /// not the OS handle — which would otherwise win name resolution.
+    fn ns_window(window: &Window) -> Option<Id> {
+        let handle = HasWindowHandle::window_handle(window).ok()?;
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return None;
+        };
+        let view = handle.ns_view.as_ptr() as Id;
+        let ns_window: Id = unsafe { msg_send![view, window] };
+        (!ns_window.is_null()).then_some(ns_window)
+    }
+
+    /// Pins the window's appearance to the app theme.
+    ///
+    /// `theme` is deliberately absent: the caption's colors are AppKit's to
+    /// choose, and it chooses them well once told which side of light/dark the
+    /// window is on. Without this the appearance is inherited from the system.
+    pub fn apply(window: &Window, ui_theme: UiTheme) {
+        let Some(ns_window) = ns_window(window) else {
+            return;
+        };
+        unsafe {
+            let name = match ui_theme {
+                UiTheme::Dark => NSAppearanceNameDarkAqua,
+                UiTheme::Light => NSAppearanceNameAqua,
+            };
+            let appearance: Id = msg_send![class!(NSAppearance), appearanceNamed: name];
+            if appearance.is_null() {
+                return;
+            }
+            let _: () = msg_send![ns_window, setAppearance: appearance];
+        }
+    }
+
+    // The appearance names are AppKit globals with no binding in the crates we
+    // already depend on, so they are linked directly. Both have existed since
+    // 10.14, well below anything this app targets.
+    #[link(name = "AppKit", kind = "framework")]
+    unsafe extern "C" {
+        static NSAppearanceNameAqua: Id;
+        static NSAppearanceNameDarkAqua: Id;
+    }
+}
+
 /// Repaints the window caption to match `ui_theme` / `theme`.
 ///
-/// A no-op away from Windows: macOS and Linux windows here have no separately
-/// themed caption to correct.
+/// A no-op on Linux, whose windows here have no separately themed caption to
+/// correct.
 #[cfg(target_os = "windows")]
 pub fn apply_caption_theme(window: &Window, ui_theme: UiTheme, theme: &Theme) {
     platform::apply(window, ui_theme, theme);
@@ -116,7 +190,16 @@ pub fn apply_caption_theme(window: &Window, ui_theme: UiTheme, theme: &Theme) {
 
 /// Repaints the window caption to match `ui_theme` / `theme`.
 ///
-/// A no-op away from Windows: macOS and Linux windows here have no separately
-/// themed caption to correct.
-#[cfg(not(target_os = "windows"))]
+/// A no-op on Linux, whose windows here have no separately themed caption to
+/// correct.
+#[cfg(target_os = "macos")]
+pub fn apply_caption_theme(window: &Window, ui_theme: UiTheme, _theme: &Theme) {
+    platform::apply(window, ui_theme);
+}
+
+/// Repaints the window caption to match `ui_theme` / `theme`.
+///
+/// A no-op on Linux, whose windows here have no separately themed caption to
+/// correct.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn apply_caption_theme(_window: &Window, _ui_theme: UiTheme, _theme: &Theme) {}

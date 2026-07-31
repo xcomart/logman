@@ -3815,6 +3815,7 @@ dependencies = [
  "logman-core",
  "logman-ssh",
  "logman-term",
+ "objc",
  "parking_lot",
  "raw-window-handle",
  "russh",
