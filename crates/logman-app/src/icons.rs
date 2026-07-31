@@ -63,8 +63,16 @@ pub const DELETE: &str = "icons/delete.svg";
 /// The toolbar button that shows and hides the remote file panel.
 pub const PANEL: &str = "icons/panel.svg";
 
+/// The button at the end of the tab strip that lists every open tab.
+///
+/// A plain chevron rather than a stack of lines: the strip's other end already
+/// carries the application menu's `☰`, and two list-shaped glyphs facing each
+/// other across one toolbar would read as the same control twice. A chevron
+/// says "this opens downwards", which is the one thing the button does.
+pub const TAB_LIST: &str = "icons/tab-list.svg";
+
 /// Every icon, paired with the bytes [`Icons`] hands back for it.
-const ICONS: [(&str, &[u8]); 11] = [
+const ICONS: [(&str, &[u8]); 12] = [
     (FOLDER, include_bytes!("../assets/icons/folder.svg")),
     (FILE, include_bytes!("../assets/icons/file.svg")),
     (SYMLINK, include_bytes!("../assets/icons/symlink.svg")),
@@ -79,6 +87,7 @@ const ICONS: [(&str, &[u8]); 11] = [
     (RENAME, include_bytes!("../assets/icons/rename.svg")),
     (DELETE, include_bytes!("../assets/icons/delete.svg")),
     (PANEL, include_bytes!("../assets/icons/panel.svg")),
+    (TAB_LIST, include_bytes!("../assets/icons/tab-list.svg")),
 ];
 
 /// The asset source backing every [`svg`](gpui::svg) element in the app.

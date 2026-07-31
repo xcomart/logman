@@ -9,6 +9,7 @@ use gpui::{
 
 use super::menu::{MenuButton, MenuEntry};
 use super::theme::{Theme, theme};
+use super::tooltip::tooltip_label;
 
 /// Glyph of the button opening the tab list.
 const TAB_MENU_GLYPH: &str = "\u{25be}";
@@ -106,6 +107,10 @@ pub struct TabBar {
     on_context_menu: Option<ContextHandler>,
     on_new: Option<PlainHandler>,
     on_menu_open_change: Option<OpenChangeHandler>,
+    menu_icon: Option<SharedString>,
+    menu_tooltip: Option<SharedString>,
+    new_tooltip: Option<SharedString>,
+    close_tooltip: Option<SharedString>,
 }
 
 impl TabBar {
@@ -122,7 +127,35 @@ impl TabBar {
             on_context_menu: None,
             on_new: None,
             on_menu_open_change: None,
+            menu_icon: None,
+            menu_tooltip: None,
+            new_tooltip: None,
+            close_tooltip: None,
         }
+    }
+
+    /// Draws the asset at `path` on the tab dropdown instead of its glyph.
+    pub fn menu_icon(mut self, path: impl Into<SharedString>) -> Self {
+        self.menu_icon = Some(path.into());
+        self
+    }
+
+    /// Sets the hover labels of the bar's three buttons: the tab dropdown, the
+    /// "+", and the close button on every tab.
+    ///
+    /// Passed in rather than looked up, like every other string here: this layer
+    /// carries no text of its own, so the localised wording belongs to the view
+    /// that builds the bar. Any of them left unset simply shows no tooltip.
+    pub fn tooltips(
+        mut self,
+        menu: impl Into<SharedString>,
+        new: impl Into<SharedString>,
+        close: impl Into<SharedString>,
+    ) -> Self {
+        self.menu_tooltip = Some(menu.into());
+        self.new_tooltip = Some(new.into());
+        self.close_tooltip = Some(close.into());
+        self
     }
 
     /// Sets the tabs to render, in display order.
@@ -209,6 +242,7 @@ impl RenderOnce for TabBar {
         let on_select = self.on_select;
         let on_close = self.on_close;
         let on_context_menu = self.on_context_menu;
+        let close_tooltip = self.close_tooltip;
 
         // An empty bar has nothing to list, so its dropdown stays away.
         let on_menu_open_change = self.on_menu_open_change.filter(|_| !self.tabs.is_empty());
@@ -231,6 +265,8 @@ impl RenderOnce for TabBar {
 
             MenuButton::new(ElementId::from((id.clone(), "tab-menu")))
                 .glyph(TAB_MENU_GLYPH)
+                .when_some(self.menu_icon.clone(), MenuButton::icon)
+                .when_some(self.menu_tooltip.clone(), MenuButton::tooltip)
                 .open(self.menu_open)
                 .entries(entries)
                 .on_open_change(move |open, window, cx| on_open_change(open, window, cx))
@@ -317,6 +353,9 @@ impl RenderOnce for TabBar {
                             // Keep the click from also selecting the tab.
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(move |_, window, cx| handler(index, window, cx))
+                            .when_some(close_tooltip.clone(), |this, tooltip| {
+                                this.tooltip(tooltip_label(tooltip))
+                            })
                             .child("\u{00d7}"),
                     )
                 })
@@ -364,6 +403,9 @@ impl RenderOnce for TabBar {
                         .cursor_pointer()
                         .hover(|style| style.bg(theme.surface_hover).text_color(theme.text))
                         .on_click(move |_, window, cx| handler(window, cx))
+                        .when_some(self.new_tooltip.clone(), |this, tooltip| {
+                            this.tooltip(tooltip_label(tooltip))
+                        })
                         .child("+"),
                 )
             })

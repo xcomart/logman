@@ -66,7 +66,7 @@ use settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use terminal_view::{PaneFocused, TerminalView};
 use ui::{
     Button, ButtonVariant, ContextMenu, MenuButton, MenuEntry, TabBar, TabItem, Theme, set_theme,
-    theme,
+    theme, tooltip_label,
 };
 
 actions!(
@@ -1182,6 +1182,14 @@ impl Workspace {
                 .on_click(cx.listener(|workspace, _, _window, cx| {
                     workspace.toggle_file_panel(cx);
                 }))
+                // The shortcut rides along, the way the dropdown row for the
+                // same command carries it: this button is the only place the
+                // binding is discoverable on macOS, where there is no in-app
+                // menu to read it off.
+                .tooltip(tooltip_label(ts!(
+                    "files.tip_toggle",
+                    shortcut = PANEL_SHORTCUT_LABEL
+                )))
                 .child(
                     icons::icon(
                         icons::PANEL,
@@ -1269,6 +1277,7 @@ impl Workspace {
         ];
 
         MenuButton::new("app-menu")
+            .tooltip(ts!("menu.tip_menu"))
             .open(self.menu_open)
             .entries(entries)
             .on_open_change(move |open, _window, cx| {
@@ -1296,6 +1305,14 @@ impl Workspace {
             .tabs(tabs)
             .active(self.active)
             .scroll_handle(&self.tab_scroll)
+            .menu_icon(icons::TAB_LIST)
+            // The close button reuses the tab menu's own row: it is the same
+            // command, worded the same way, and neither takes an ellipsis.
+            .tooltips(
+                ts!("tab.tip_list"),
+                ts!("tab.tip_new", shortcut = format!("{SHORTCUT_MODIFIER}+T")),
+                ts!("tab.close"),
+            )
             .menu_open(self.tab_menu_open)
             .on_menu_open_change({
                 let this = this.clone();
