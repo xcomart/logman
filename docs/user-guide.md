@@ -241,8 +241,18 @@ authentication.
   *displayed* in — directories first, then by name — which is the only order
   visible on screen.
 - The `..` row is never part of a selection.
-- The header shows the current path. A path longer than about 38 characters is
-  elided from the *front*, so the directory you are actually in stays readable.
+- **The header is a breadcrumb**: the current path, broken into one pressable
+  piece per directory. Pressing a piece opens a menu of the directories *beside*
+  it — everything in its parent — and choosing one goes straight there. So the
+  way from `/srv/app/releases/2026-07-30` into last week's release is one press
+  on the last piece and one on the date you want, rather than a trip through
+  `..`. The leading `/` has no parent, so it offers what is inside the root
+  instead, which is the same menu the first name gives.
+- A path too long for the header keeps its leaf and as many directories above it
+  as fit; the rest fold into a single `…` piece. Pressing that piece lists
+  exactly the directories that were folded away, so nothing in the path becomes
+  unreachable. How much fits follows the panel's own width — dragging the edge
+  wider unfolds the path as you go, and narrower folds more of it.
 - **⟳** lists the directory again. It is also the way out of a failed first
   listing, which is not retried on its own — otherwise every chunk of terminal
   output would trigger another attempt.

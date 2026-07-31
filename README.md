@@ -24,7 +24,8 @@ A multi-platform GUI SSH terminal written in Rust, built on
   at once, dragging the divider to give either as much room as it needs; a pane
   closes itself when its connection ends.
 - **A remote files panel**: an SFTP browser beside the terminal that follows the
-  shell's working directory, with drag-and-drop upload and download — whole
+  shell's working directory, with a breadcrumb header whose every piece drops
+  down the directories beside it, drag-and-drop upload and download — whole
   folders included, with a progress bar while they move — and a draggable edge.
 - **Password and private key authentication**, with secrets kept in the OS
   keychain rather than on disk.
@@ -130,6 +131,10 @@ is shown by default.
 
 - Double-click a directory to enter it, or `..` to go up. Directories sort
   before files, ignoring case.
+- **The header path is a breadcrumb**: pressing a piece of it lists the
+  directories beside that one, and choosing a row goes there. A path too long
+  for the panel's current width folds its front into a `…` piece which lists
+  what it hid.
 - **⟳** lists the directory again, **↑** uploads local files into it, the folder
   button beside it uploads a whole folder, and **↓** saves the selection —
   a file, several files, or an entire directory — locally.

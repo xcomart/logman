@@ -71,11 +71,37 @@ const MAX_PANEL_WIDTH: f32 = 560.;
 /// listing no room.
 const PANEL_HANDLE: f32 = 6.;
 
-/// Longest remote path the header shows in full, in characters.
+/// Horizontal padding of the header, per side, in pixels.
 ///
-/// Beyond this the *front* is dropped, not the tail: the leaf directory is what
-/// identifies where you are, and it is the part a plain `truncate` would eat.
-const PATH_CHARS: usize = 38;
+/// Also what [`fold_budget`] takes off the panel's width before working out how
+/// much path fits, so the two cannot drift apart.
+const HEADER_PADDING: f32 = 8.;
+
+/// Width of one character of the header's path, in pixels — an average, not a
+/// measurement.
+///
+/// The header is drawn in the UI font at 11px, which is proportional: `i` and
+/// `W` are nothing like each other. This is the figure that makes a 260px
+/// panel — the width the panel opens at — hold about 38 characters, which is
+/// what the header showed in full before it could be resized.
+const CRUMB_CHAR: f32 = 6.4;
+
+/// Fewest characters of path the breadcrumb is ever folded down to.
+///
+/// At [`MIN_PANEL_WIDTH`] the arithmetic already leaves more than this; the
+/// floor is here so that no future width, padding or font change can produce a
+/// budget too small for the root and a leaf to survive it.
+const MIN_PATH_CHARS: usize = 12;
+
+/// Label of the piece standing for the filesystem root. Punctuation, never
+/// translated — and the one label that carries its own separator.
+const ROOT_CRUMB: &str = "/";
+
+/// Label of the piece standing for everything the header could not fit.
+const FOLD_CRUMB: &str = "\u{2026}";
+
+/// What goes between two breadcrumb pieces.
+const CRUMB_SEPARATOR: &str = "/";
 
 /// Size of the icon leading a listing row, in pixels.
 const ROW_ICON: f32 = 14.;
@@ -270,14 +296,79 @@ enum Prompt {
     },
 }
 
-/// An open context menu: where it hangs, and which of the two it is.
+/// An open menu over the panel: where it hangs, and what it lists.
 struct PanelMenu {
     /// Top-left corner of the panel, in window coordinates.
     at: Point<Pixels>,
-    /// Whether the click landed on a row rather than on empty space. Decides
-    /// which commands the menu offers, not which rows are selected — the
-    /// selection was already settled before the menu opened.
-    on_rows: bool,
+    /// Which menu it is, and what it was built from.
+    kind: MenuKind,
+}
+
+/// Which of the panel's menus is open.
+///
+/// One slot serves both because they cannot be open at once: every menu draws a
+/// full-window backdrop that swallows the next press and closes itself, so the
+/// gesture that would open the second one only ever dismisses the first.
+enum MenuKind {
+    /// A right-click over the listing. The flag says whether the press landed
+    /// on a row rather than on empty space, which decides which commands the
+    /// menu offers — not which rows are selected, since the selection was
+    /// already settled before the menu opened.
+    Listing { on_rows: bool },
+    /// A breadcrumb piece's dropdown: the directories it offers to move to, in
+    /// listing order.
+    Crumb(Vec<CrumbTarget>),
+}
+
+/// One row of a breadcrumb dropdown: what it says, and where it goes.
+#[derive(Clone)]
+struct CrumbTarget {
+    /// Name of the directory, as the row shows it.
+    label: SharedString,
+    /// Absolute remote path the row navigates to.
+    path: String,
+}
+
+/// One directory on the way to the listed one, as the header draws it.
+struct Crumb {
+    /// Text drawn for the piece: a directory name, `/` for the root, or an
+    /// ellipsis for the pieces the header had no room for.
+    label: SharedString,
+    /// What a press on the piece offers.
+    menu: CrumbMenu,
+}
+
+/// What a breadcrumb piece's dropdown lists.
+#[derive(Clone)]
+enum CrumbMenu {
+    /// The directories beside this one, still to be read from the server. The
+    /// string is the directory whose subdirectories they are — this piece's
+    /// parent.
+    ///
+    /// The root has no parent, so it lists its *own* subdirectories. That makes
+    /// its menu identical to the first name's, which is the natural reading of
+    /// "somewhere else at this level" for a piece that has no level above it,
+    /// and is better than a root that cannot be pressed at all.
+    Siblings(String),
+    /// The pieces that were folded away, in path order. Already known, so this
+    /// menu opens without asking the server anything.
+    Folded(Vec<CrumbTarget>),
+}
+
+impl Crumb {
+    /// The absolute path this piece stands for, or `None` for the ellipsis —
+    /// which stands for several directories rather than for one.
+    fn path(&self) -> Option<String> {
+        match &self.menu {
+            // The root is its own parent, so its path *is* the directory it
+            // lists; every other piece hangs off the one it lists.
+            CrumbMenu::Siblings(directory) if self.label.as_ref() == ROOT_CRUMB => {
+                Some(directory.clone())
+            }
+            CrumbMenu::Siblings(directory) => Some(join(directory, &self.label)),
+            CrumbMenu::Folded(_) => None,
+        }
+    }
 }
 
 /// What one session is looking at, kept while the session lives.
@@ -424,12 +515,20 @@ pub struct FilePanel {
     /// the key would earn its keep only once there is more to remember about the
     /// panel than a flag and a number.
     width: f32,
-    /// The context menu currently open over the panel, if any.
+    /// The menu currently open over the panel, if any.
     ///
     /// Panel state rather than session state: a menu is a gesture in progress,
     /// and a gesture does not survive the tab switch that would be the only way
     /// to leave it behind.
     context: Option<PanelMenu>,
+    /// Whether a breadcrumb dropdown is waiting on the listing behind it.
+    ///
+    /// A breadcrumb press asks the server which directories sit beside the
+    /// piece, and the menu opens only when the answer lands. Without this a
+    /// second press meanwhile would put a second request in flight, and the
+    /// menu would open twice — the second time at a position the pointer has
+    /// already left.
+    crumb_pending: bool,
     /// Whether the rename field should be given the keyboard on the next
     /// render.
     ///
@@ -449,6 +548,7 @@ impl FilePanel {
             states: HashMap::new(),
             width: DEFAULT_PANEL_WIDTH,
             context: None,
+            crumb_pending: false,
             focus_prompt: false,
             _observer: None,
         }
@@ -886,15 +986,128 @@ impl FilePanel {
             }
             _ => false,
         };
-        self.context = Some(PanelMenu { at, on_rows });
+        self.context = Some(PanelMenu {
+            at,
+            kind: MenuKind::Listing { on_rows },
+        });
         cx.notify();
     }
 
-    /// Puts the context menu away, if one is open.
+    /// Puts the open menu away, if there is one.
     fn close_context(&mut self, cx: &mut Context<Self>) {
         if self.context.take().is_some() {
             cx.notify();
         }
+    }
+
+    /// Opens the dropdown of the breadcrumb piece pressed at `at`.
+    ///
+    /// A folded piece already knows what it offers — the ancestors the header
+    /// had no room for — so its menu opens on the spot. Every other piece has
+    /// to ask the server which directories sit beside it, and opens once that
+    /// answer lands.
+    fn open_crumb(&mut self, menu: CrumbMenu, at: Point<Pixels>, cx: &mut Context<Self>) {
+        // Both kinds navigate, and a session that cannot navigate — one whose
+        // connection has since dropped — must not be offered a menu of places
+        // its rows could not take it.
+        if self.acting_on(cx).is_none() {
+            return;
+        }
+        match menu {
+            CrumbMenu::Folded(targets) => {
+                self.context = Some(PanelMenu {
+                    at,
+                    kind: MenuKind::Crumb(targets),
+                });
+                cx.notify();
+            }
+            CrumbMenu::Siblings(directory) => self.list_siblings(directory, at, cx),
+        }
+    }
+
+    /// Asks for the contents of `directory`, to open a breadcrumb dropdown on.
+    fn list_siblings(&mut self, directory: String, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some((session, sftp, _)) = self.acting_on(cx) else {
+            return;
+        };
+        if self.crumb_pending {
+            return;
+        }
+        self.crumb_pending = true;
+
+        cx.spawn(async move |panel, cx| {
+            let result = sftp.read_dir(&directory).await;
+            panel
+                .update(cx, |panel, cx| {
+                    panel.siblings_arrived(session, directory, at, result, cx);
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Opens the breadcrumb dropdown the listing of `directory` was asked for.
+    ///
+    /// Only directories go on it — a breadcrumb piece can only ever stand for
+    /// one — and only those whose names are safe to append to a path, since the
+    /// rows are built by joining a server-sent name onto `directory`. A
+    /// directory with nothing in it to offer opens no menu at all: an empty
+    /// panel hanging off the header says less than the header already did.
+    fn siblings_arrived(
+        &mut self,
+        session: EntityId,
+        directory: String,
+        at: Point<Pixels>,
+        result: Result<Vec<RemoteEntry>, SftpError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.crumb_pending = false;
+        // The answer describes the directory of a session that may no longer be
+        // the one on screen; opening a menu of its paths over another session's
+        // listing would navigate the wrong panel.
+        if self.session.as_ref().map(Entity::entity_id) != Some(session) {
+            return;
+        }
+
+        let mut entries = match result {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.show_notice(session, Notice::from_error(&error), cx);
+                return;
+            }
+        };
+        // Sorted before the filter rather than after so the rows come out in
+        // exactly the order the listing itself would show them in.
+        sort_entries(&mut entries);
+        let targets: Vec<CrumbTarget> = entries
+            .into_iter()
+            .filter(|entry| entry.is_dir && is_plain_name(&entry.name))
+            .map(|entry| CrumbTarget {
+                path: join(&directory, &entry.name),
+                label: SharedString::from(entry.name),
+            })
+            .collect();
+
+        if targets.is_empty() {
+            cx.notify();
+            return;
+        }
+        self.context = Some(PanelMenu {
+            at,
+            kind: MenuKind::Crumb(targets),
+        });
+        cx.notify();
+    }
+
+    /// Lists `path`, as a breadcrumb row asks.
+    ///
+    /// Allowed while a transfer is running, like the double-click that opens a
+    /// directory: navigating changes what is listed, not what is moving.
+    fn open_path(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some((session, sftp, _)) = self.acting_on(cx) else {
+            return;
+        };
+        self.go(session, sftp, Target::Exact(path), cx);
     }
 
     /// Opens the entry named `name`, if it is a directory.
@@ -1527,35 +1740,45 @@ impl FilePanel {
     /// Renders the header: the current path and the action buttons.
     fn render_header(&self, state: Option<&SessionState>, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
-        let path = state
-            .and_then(|state| state.path.as_deref())
-            .map_or_else(|| ts!("files.title"), |path| elide_start(path).into());
+        let path = state.and_then(|state| state.path.as_deref());
         let ready = state.is_some_and(|state| state.path.is_some());
         // Directories included: a selected folder is copied whole.
         let downloadable = state.is_some_and(|state| state.selected_count() > 0);
+
+        let title = match path {
+            Some(path) => self.render_crumbs(path, &theme, cx),
+            // Nothing is listed yet, so there is no path to break up and the
+            // header carries the panel's own name instead.
+            None => {
+                // Mirrors the status bar: `truncate` needs a row flexing the
+                // text child, not a bare `w_full`, to resolve its width.
+                div()
+                    .flex()
+                    .flex_row()
+                    .w_full()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(theme.text_muted)
+                            .child(ts!("files.title")),
+                    )
+                    .into_any_element()
+            }
+        };
 
         div()
             .flex()
             .flex_col()
             .flex_none()
             .gap(px(4.))
-            .px(px(8.))
+            .px(px(HEADER_PADDING))
             .py(px(6.))
             .border_b_1()
             .border_color(theme.border)
-            .child(
-                // Mirrors the status bar: `truncate` needs a row flexing the
-                // text child, not a bare `w_full`, to resolve its width.
-                div().flex().flex_row().w_full().child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(11.))
-                        .text_color(theme.text_muted)
-                        .child(path),
-                ),
-            )
+            .child(title)
             .child(
                 div()
                     .flex()
@@ -1596,6 +1819,82 @@ impl FilePanel {
                     )),
             )
             .into_any_element()
+    }
+
+    /// Renders the current path as a row of pressable pieces.
+    ///
+    /// Each piece opens a menu of the directories beside it, which is what
+    /// makes the header a way of *moving* rather than a label: the way out of
+    /// `/srv/app/releases/2026-07-30` into last week's release is one press on
+    /// the last piece, not four double-clicks through `..`.
+    ///
+    /// The row wraps rather than truncating. [`crumbs`] has already folded away
+    /// what the panel's own width could not hold, but [`fold_budget`] is an
+    /// estimate over a proportional font; wrapping costs a line of header, while
+    /// truncating would cost the leaf directory — the one piece the user needs
+    /// to see. A drag of the panel's edge repaints, so the fold follows the
+    /// width as it moves.
+    fn render_crumbs(&self, path: &str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let crumbs = crumbs(path, fold_budget(self.width));
+        // Taken before the pieces are consumed: a separator belongs in front of
+        // every piece except the first and those following the root, whose own
+        // label is already the slash that would go there.
+        let separators: Vec<bool> = std::iter::once(false)
+            .chain(
+                crumbs
+                    .windows(2)
+                    .map(|pair| needs_separator(&pair[0].label)),
+            )
+            .collect();
+        let hover = theme.surface_hover;
+        let text = theme.text;
+        // Fainter than the pieces on either side of it: a separator is
+        // punctuation, and the header's job is to read as a path with parts
+        // rather than as a row of equally loud buttons.
+        let separator = theme.text_muted.opacity(0.6);
+
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .w_full()
+            .min_w_0()
+            .text_size(px(11.))
+            .text_color(theme.text_muted);
+
+        for (index, crumb) in crumbs.into_iter().enumerate() {
+            if separators.get(index).copied().unwrap_or_default() {
+                row = row.child(
+                    div()
+                        .flex_none()
+                        .text_color(separator)
+                        .child(CRUMB_SEPARATOR),
+                );
+            }
+            let menu = crumb.menu;
+            row = row.child(
+                div()
+                    .id(ElementId::from(("file-crumb", index)))
+                    .flex_none()
+                    .px(px(2.))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hover).text_color(text))
+                    // A press rather than a click, for the position: a menu has
+                    // to hang where the pointer is, and the press is where the
+                    // right-click menus below take theirs from too.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |panel, event: &MouseDownEvent, _window, cx| {
+                            panel.open_crumb(menu.clone(), event.position, cx);
+                        }),
+                    )
+                    .child(crumb.label),
+            );
+        }
+
+        row.into_any_element()
     }
 
     /// Renders the directory listing, or the placeholder standing in for it.
@@ -1789,12 +2088,13 @@ impl FilePanel {
         }
     }
 
-    /// Renders the context menu, if one is open.
+    /// Renders the open menu, if there is one.
     ///
-    /// Two menus, picked by where the press landed. A row whose command would
-    /// be refused is left out rather than shown greyed: "Rename…" appears only
-    /// over a selection of exactly one, because renaming several things to one
-    /// name is not a thing to offer and then decline.
+    /// Three menus, picked by where the press landed: the two the listing
+    /// offers, and the directories a breadcrumb piece can be swapped for. A row
+    /// whose command would be refused is left out rather than shown greyed:
+    /// "Rename…" appears only over a selection of exactly one, because renaming
+    /// several things to one name is not a thing to offer and then decline.
     fn render_context(
         &self,
         state: Option<&SessionState>,
@@ -1804,8 +2104,36 @@ impl FilePanel {
         let selected = state.map_or(0, SessionState::selected_count);
         let this = cx.entity();
 
+        let on_rows = match &menu.kind {
+            MenuKind::Listing { on_rows } => *on_rows,
+            // Nothing but destinations: a breadcrumb dropdown is navigation,
+            // and the commands the listing menus carry act on a selection this
+            // menu was never about.
+            MenuKind::Crumb(targets) => {
+                let entries = targets
+                    .iter()
+                    .map(|target| {
+                        let this = this.clone();
+                        let path = target.path.clone();
+                        MenuEntry::new(target.label.clone()).on_activate(move |_window, cx| {
+                            let path = path.clone();
+                            this.update(cx, |panel, cx| panel.open_path(path, cx));
+                        })
+                    })
+                    .collect();
+                return Some(
+                    ContextMenu::new("file-panel-context")
+                        .position(menu.at)
+                        .entries(entries)
+                        .on_dismiss(move |_window, cx| {
+                            this.update(cx, |panel, cx| panel.close_context(cx));
+                        }),
+                );
+            }
+        };
+
         let mut entries = Vec::new();
-        if menu.on_rows && selected > 0 {
+        if on_rows && selected > 0 {
             entries.push(MenuEntry::new(ts!("files.menu_download")).on_activate({
                 let this = this.clone();
                 move |_window, cx| {
@@ -2536,20 +2864,150 @@ fn join(directory: &str, name: &str) -> String {
     }
 }
 
-/// Shortens `path` from the front, marking the cut with an ellipsis.
+/// How much path the header can hold at a panel `width` pixels wide, in
+/// characters.
 ///
-/// The tail is what the header is for: `/srv/app/releases/2026-07-30/logs` says
-/// where you are, `/srv/app/releases/2026-07…` does not.
-fn elide_start(path: &str) -> String {
-    let count = path.chars().count();
-    if count <= PATH_CHARS {
-        return path.to_owned();
+/// An estimate, and deliberately so: the header's font is proportional, so the
+/// only exact answer would be to lay the row out and measure it, and a header
+/// that reflowed after layout would need a second pass every repaint. The
+/// estimate is allowed to be wrong because being wrong is cheap — the row wraps
+/// rather than truncating, so a budget that came out too generous costs a line
+/// of header and never the leaf directory the user is standing in.
+///
+/// Tied to the width rather than fixed because the panel is dragged between
+/// [`MIN_PANEL_WIDTH`] and [`MAX_PANEL_WIDTH`]: one number for both ends would
+/// fold a path that had room to spare at 560px, or overflow at 180px.
+fn fold_budget(width: f32) -> usize {
+    let usable = width - 2. * HEADER_PADDING;
+    if !usable.is_finite() || usable <= 0. {
+        return MIN_PATH_CHARS;
     }
-    let tail: String = path
-        .chars()
-        .skip(count.saturating_sub(PATH_CHARS.saturating_sub(1)))
+    let chars = (usable / CRUMB_CHAR).floor();
+    // Saturating rather than wrapping: `as` on a float out of range would give
+    // a budget the row could never spend.
+    let chars = if chars >= 0. { chars as usize } else { 0 };
+    chars.max(MIN_PATH_CHARS)
+}
+
+/// Breaks `path` into the pieces the header draws.
+///
+/// `/srv/app/logs` becomes `/`, `srv`, `app`, `logs`, each carrying the
+/// directory whose subdirectories could take its place. What does not fit in
+/// `budget` is folded away by [`fold`].
+///
+/// Remote paths are POSIX and absolute whatever the server runs on, so this
+/// splits on `/` and nothing else; anything relative — which the panel never
+/// produces — is read as if it hung off the root.
+fn crumbs(path: &str, budget: usize) -> Vec<Crumb> {
+    let mut crumbs = vec![Crumb {
+        label: SharedString::new_static(ROOT_CRUMB),
+        menu: CrumbMenu::Siblings(ROOT_CRUMB.to_owned()),
+    }];
+
+    let mut directory = ROOT_CRUMB.to_owned();
+    for name in path.split('/').filter(|name| !name.is_empty()) {
+        crumbs.push(Crumb {
+            label: SharedString::from(name.to_owned()),
+            menu: CrumbMenu::Siblings(directory.clone()),
+        });
+        directory = join(&directory, name);
+    }
+
+    fold(crumbs, budget)
+}
+
+/// Replaces the pieces `budget` characters cannot hold with a single ellipsis.
+///
+/// The tail is what a header is for: `/srv/app/releases/2026-07-30/logs` says
+/// where you are and `/srv/app/releases/2026-07…` does not, so the pieces are
+/// kept from the *back* — the leaf always, then as many of its ancestors as
+/// fit. The root survives whatever the budget, at one character; it is the one
+/// destination reachable from nowhere else in the row.
+///
+/// The folded pieces are not lost: they become the rows of the ellipsis's own
+/// dropdown, which is the only reason a piece may be dropped at all.
+fn fold(crumbs: Vec<Crumb>, budget: usize) -> Vec<Crumb> {
+    if crumb_width(&crumbs) <= budget {
+        return crumbs;
+    }
+
+    // The root and the ellipsis are one character each, and every kept piece
+    // costs its own text plus the separator drawn in front of it — the same
+    // arithmetic `crumb_width` does, over the row this is about to build.
+    let mut spent = ROOT_CRUMB.chars().count() + FOLD_CRUMB.chars().count();
+    let mut kept = 0;
+    for crumb in crumbs.iter().skip(1).rev() {
+        let cost = crumb.label.chars().count() + CRUMB_SEPARATOR.chars().count();
+        // The leaf is kept whatever it costs: a row that folded away the
+        // directory you are standing in would say nothing at all.
+        if kept > 0 && spent + cost > budget {
+            break;
+        }
+        spent += cost;
+        kept += 1;
+    }
+
+    let mut pieces = crumbs.into_iter();
+    let Some(root) = pieces.next() else {
+        return Vec::new();
+    };
+    let mut rest: Vec<Crumb> = pieces.collect();
+    let tail = rest.split_off(rest.len().saturating_sub(kept));
+
+    let folded: Vec<CrumbTarget> = rest
+        .into_iter()
+        .filter_map(|crumb| {
+            let path = crumb.path()?;
+            Some(CrumbTarget {
+                label: crumb.label,
+                path,
+            })
+        })
         .collect();
-    format!("\u{2026}{tail}")
+    // A single piece too long for the budget folds nothing away, and an
+    // ellipsis with an empty menu behind it would be a dead end.
+    if folded.is_empty() {
+        return std::iter::once(root).chain(tail).collect();
+    }
+
+    let ellipsis = Crumb {
+        label: SharedString::new_static(FOLD_CRUMB),
+        menu: CrumbMenu::Folded(folded),
+    };
+    std::iter::once(root)
+        .chain(std::iter::once(ellipsis))
+        .chain(tail)
+        .collect()
+}
+
+/// How many characters the header spends on a run of pieces.
+///
+/// Every piece's own text, plus the separator in front of it — which the piece
+/// before it may already have supplied, as the root's `/` does.
+fn crumb_width(crumbs: &[Crumb]) -> usize {
+    crumbs
+        .iter()
+        .enumerate()
+        .map(|(index, crumb)| {
+            let separated = index
+                .checked_sub(1)
+                .is_some_and(|previous| needs_separator(&crumbs[previous].label));
+            crumb.label.chars().count()
+                + if separated {
+                    CRUMB_SEPARATOR.chars().count()
+                } else {
+                    0
+                }
+        })
+        .sum()
+}
+
+/// Whether a piece drawn after `label` needs a separator of its own.
+///
+/// Only the root does not ask for one: its label *is* a slash, and a second one
+/// after it would read as `//`.
+fn needs_separator(label: &str) -> bool {
+    !label.ends_with('/')
 }
 
 /// Renders a byte count the way a file manager does.
@@ -2699,16 +3157,142 @@ mod tests {
         assert_eq!(join("/srv/", "app"), "/srv/app");
     }
 
-    #[test]
-    fn a_long_path_keeps_its_tail() {
-        let short = "/home/alice";
-        assert_eq!(elide_start(short), short);
+    /// The labels of a breadcrumb row, in the order the header draws them.
+    fn labels(crumbs: &[Crumb]) -> Vec<&str> {
+        crumbs.iter().map(|crumb| crumb.label.as_ref()).collect()
+    }
 
-        let long = "/srv/application/releases/2026-07-30T12-00/logs/today";
-        let elided = elide_start(long);
-        assert_eq!(elided.chars().count(), PATH_CHARS);
-        assert!(elided.starts_with('\u{2026}'));
-        assert!(long.ends_with(elided.trim_start_matches('\u{2026}')));
+    /// The directory a piece would list to fill its dropdown, or `None` for the
+    /// ellipsis, which already knows.
+    fn sibling_of(crumb: &Crumb) -> Option<&str> {
+        match &crumb.menu {
+            CrumbMenu::Siblings(directory) => Some(directory.as_str()),
+            CrumbMenu::Folded(_) => None,
+        }
+    }
+
+    /// The budget the panel gets at the width it opens at, which is the one
+    /// every fold test below is written against.
+    fn budget() -> usize {
+        fold_budget(DEFAULT_PANEL_WIDTH)
+    }
+
+    #[test]
+    fn the_root_is_a_single_crumb_listing_itself() {
+        let crumbs = crumbs("/", budget());
+        assert_eq!(labels(&crumbs), ["/"]);
+        // No parent to take siblings from, so the root offers what is inside
+        // it: the alternative is a piece that cannot be pressed at all.
+        assert_eq!(sibling_of(&crumbs[0]), Some("/"));
+        assert_eq!(crumbs[0].path().as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn a_short_path_keeps_every_crumb_and_names_its_parent() {
+        let crumbs = crumbs("/srv/app/logs", budget());
+        assert_eq!(labels(&crumbs), ["/", "srv", "app", "logs"]);
+
+        let parents: Vec<Option<&str>> = crumbs.iter().map(sibling_of).collect();
+        assert_eq!(
+            parents,
+            [Some("/"), Some("/"), Some("/srv"), Some("/srv/app")]
+        );
+        // Pressing a row of the leaf's menu must land beside the leaf, not
+        // inside it.
+        assert_eq!(crumbs[3].path().as_deref(), Some("/srv/app/logs"));
+    }
+
+    /// The budget follows the panel's edge: dragging it wider must never fold
+    /// *more* of the path away, and the width the panel opens at must still
+    /// hold the 38 characters the header showed before it could be resized.
+    #[test]
+    fn the_budget_grows_with_the_panel_and_never_falls_below_its_floor() {
+        let narrow = fold_budget(MIN_PANEL_WIDTH);
+        let default = fold_budget(DEFAULT_PANEL_WIDTH);
+        let wide = fold_budget(MAX_PANEL_WIDTH);
+
+        assert!(narrow < default, "{narrow} is not narrower than {default}");
+        assert!(default < wide, "{default} is not narrower than {wide}");
+        assert_eq!(default, 38);
+
+        // The floor holds whatever arrives: a width smaller than the padding
+        // itself, and the degenerate values a drag outside the window could
+        // otherwise arrive with.
+        assert!(narrow >= MIN_PATH_CHARS);
+        assert_eq!(fold_budget(0.), MIN_PATH_CHARS);
+        assert_eq!(fold_budget(-100.), MIN_PATH_CHARS);
+        assert_eq!(fold_budget(f32::NAN), MIN_PATH_CHARS);
+
+        // Even at the floor there is room for the root, the ellipsis and a leaf
+        // of a useful length.
+        let crumbs = crumbs("/srv/application/logs/today", MIN_PATH_CHARS);
+        assert_eq!(labels(&crumbs).first(), Some(&"/"));
+        assert_eq!(labels(&crumbs).last(), Some(&"today"));
+    }
+
+    /// The fold: what does not fit goes behind one ellipsis, and stays
+    /// reachable through the menu that ellipsis carries.
+    #[test]
+    fn a_long_path_folds_its_middle_and_keeps_the_leaf() {
+        let path = "/srv/application/releases/2026-07-30T12-00/logs/today";
+        let crumbs = crumbs(path, budget());
+
+        assert_eq!(labels(&crumbs).first(), Some(&"/"));
+        assert_eq!(labels(&crumbs).get(1), Some(&"\u{2026}"));
+        assert_eq!(labels(&crumbs).last(), Some(&"today"));
+        assert!(
+            crumb_width(&crumbs) <= budget(),
+            "the folded row is still {} characters wide",
+            crumb_width(&crumbs)
+        );
+
+        // Every dropped piece is on the ellipsis's menu, in path order, with
+        // the absolute path that moves there.
+        let CrumbMenu::Folded(folded) = &crumbs[1].menu else {
+            panic!("the second piece must carry the folded ancestors");
+        };
+        let names: Vec<&str> = folded.iter().map(|target| target.label.as_ref()).collect();
+        let paths: Vec<&str> = folded.iter().map(|target| target.path.as_str()).collect();
+        assert_eq!(names, ["srv", "application", "releases"]);
+        assert_eq!(
+            paths,
+            ["/srv", "/srv/application", "/srv/application/releases"]
+        );
+    }
+
+    /// The budget counts characters, not bytes: a Korean directory name is
+    /// three bytes a letter, and folding on bytes would hide a row that fits on
+    /// screen with room to spare.
+    #[test]
+    fn the_fold_budget_counts_characters_rather_than_bytes() {
+        let path = "/사용자문서/보고서모음/분기별매출자료";
+        assert!(path.len() > budget(), "the byte length must exceed it");
+        assert!(path.chars().count() <= budget(), "but the length must not");
+
+        let crumbs = crumbs(path, budget());
+        assert_eq!(
+            labels(&crumbs),
+            ["/", "사용자문서", "보고서모음", "분기별매출자료"]
+        );
+        assert_eq!(crumb_width(&crumbs), path.chars().count());
+    }
+
+    /// The narrowest the panel goes still has to say where you are, even when a
+    /// single name is longer than the whole budget.
+    #[test]
+    fn a_leaf_wider_than_the_budget_is_kept_without_an_ellipsis() {
+        let deep = crumbs("/srv/a-directory-with-a-very-long-name-indeed", 10);
+        assert_eq!(
+            labels(&deep),
+            ["/", "\u{2026}", "a-directory-with-a-very-long-name-indeed"]
+        );
+
+        // Nothing but the root is left to fold when the leaf alone overflows.
+        let only = crumbs("/a-directory-with-a-very-long-name-indeed", 10);
+        assert_eq!(
+            labels(&only),
+            ["/", "a-directory-with-a-very-long-name-indeed"]
+        );
     }
 
     #[test]
