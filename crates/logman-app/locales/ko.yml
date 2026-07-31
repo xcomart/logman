@@ -12,6 +12,8 @@ common:
 
 menu:
   new_session: 새 세션
+  duplicate_right: 새 연결로 오른쪽에 분할
+  duplicate_below: 새 연결로 아래쪽에 분할
   break_out_pane: 창을 새 탭으로 분리
   settings: 설정…
   about: logman 정보
@@ -20,12 +22,16 @@ menu:
   mac:
     new_session: 새 세션
     close_session: 세션 닫기
+    duplicate_right: 새 연결로 오른쪽에 분할
+    duplicate_below: 새 연결로 아래쪽에 분할
     break_out_pane: 창을 새 탭으로 분리
     quit: logman 종료
 
 tab:
   split_right: 현재 탭 오른쪽에 분할로 추가
   split_below: 현재 탭 아래쪽에 분할로 추가
+  duplicate_right: 새 연결로 오른쪽에 분할
+  duplicate_below: 새 연결로 아래쪽에 분할
   close: 탭 닫기
 
 files:

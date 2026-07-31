@@ -23,9 +23,9 @@ mod file_panel;
 mod i18n;
 mod icons;
 // The pane tree is written as a self-contained data structure with its own
-// tests rather than for the two call sites the shell currently has, so it
-// offers operations nothing reaches yet — splitting a pane in place, editing a
-// payload — which inside a binary crate read as dead code.
+// tests rather than for the call sites the shell currently has, so it offers
+// operations nothing reaches yet — editing a payload, listing the pane ids —
+// which inside a binary crate read as dead code.
 #[allow(dead_code)]
 mod pane_tree;
 mod session;
@@ -84,6 +84,12 @@ actions!(
         FocusPrevPane,
         /// Move the active pane out of its tab and into a tab of its own.
         BreakOutPane,
+        /// Split the active pane, opening a second connection to the same host
+        /// in the new pane to its right.
+        DuplicateSplitRight,
+        /// Split the active pane, opening a second connection to the same host
+        /// in the new pane below it.
+        DuplicateSplitBelow,
         /// Show or hide the remote file panel.
         ToggleFilePanel,
         /// Open the settings dialog.
@@ -693,6 +699,56 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Splits the active pane along `axis` and opens a second connection to the
+    /// same host in the new half.
+    ///
+    /// The other half of splitting, and the one that needs no target: everything
+    /// it has to know — the profile and the credentials — is already in the pane
+    /// the user is looking at, which is why this one *can* have a shortcut where
+    /// [`Workspace::merge_tab_into_active`] cannot.
+    ///
+    /// The new session is independent from the moment it is created: its own
+    /// transport, its own shell, its own scrollback. Nothing about the state of
+    /// the original matters, so a pane whose connection failed can still be
+    /// split — that is how the user retries without losing the error on screen.
+    pub(crate) fn duplicate_split(
+        &mut self,
+        axis: Axis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        if !self.can_split_active(axis, cx) {
+            // Reachable from the keyboard at any size, unlike the menu rows,
+            // which are left out while the pane is this small.
+            log::info!("refusing to split: the active pane is too small");
+            return;
+        }
+
+        let target_pane = tab.active_pane();
+        let session = tab.active_view().read(cx).session().clone();
+        log::info!("opening a second session to {}", session.read(cx).title());
+
+        let session = session.update(cx, |session, cx| session.duplicate(cx));
+        let view = cx.new(|cx| TerminalView::new(session.clone(), window, cx));
+        let leaf = self.new_pane(view, session, window, cx);
+
+        let tab = &mut self.tabs[self.active];
+        let Some(pane) = tab.panes.split(target_pane, axis, leaf) else {
+            // `target_pane` came out of this very tab a moment ago, so this is
+            // unreachable; logged rather than ignored because reaching it would
+            // mean a live session has been dropped on the floor.
+            log::error!("the pane to split has vanished; the new session was dropped");
+            return;
+        };
+        tab.active_pane = pane;
+
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     /// Moves the active pane into a tab of its own, right after the current one.
     ///
     /// The session keeps running throughout: the pane, its view and its
@@ -993,6 +1049,26 @@ impl Workspace {
         self.break_out_active_pane(window, cx);
     }
 
+    /// Handles the shortcut that splits the active pane to the right.
+    fn duplicate_split_right_action(
+        &mut self,
+        _: &DuplicateSplitRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.duplicate_split(Axis::Horizontal, window, cx);
+    }
+
+    /// Handles the shortcut that splits the active pane downwards.
+    fn duplicate_split_below_action(
+        &mut self,
+        _: &DuplicateSplitBelow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.duplicate_split(Axis::Vertical, window, cx);
+    }
+
     /// Handles the shortcut that shows and hides the remote file panel.
     fn toggle_file_panel_action(
         &mut self,
@@ -1152,9 +1228,10 @@ impl Workspace {
     /// Every row dispatches the action its keyboard shortcut dispatches, so the
     /// menu adds a way in rather than a second implementation.
     ///
-    /// Breaking a pane out is here; merging a tab in is not, and cannot be: a
-    /// merge needs a *source* tab, which a menu of static commands has no way to
-    /// name. That half of splitting lives in the tab context menu — see
+    /// Splitting with a second connection is here, and so is breaking a pane
+    /// out; merging a tab in is not, and cannot be: a merge needs a *source*
+    /// tab, which a menu of static commands has no way to name. That one half of
+    /// splitting lives in the tab context menu alone — see
     /// [`Workspace::render_tab_context`] — and the same asymmetry shapes
     /// [`app_menus`].
     fn render_app_menu(&self, cx: &mut Context<Self>) -> MenuButton {
@@ -1163,6 +1240,16 @@ impl Workspace {
             MenuEntry::new(ts!("menu.new_session"))
                 .shortcut(format!("{SHORTCUT_MODIFIER}+T"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(NewSession), cx)),
+            MenuEntry::new(ts!("menu.duplicate_right"))
+                .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+D"))
+                .on_activate(|window, cx| {
+                    window.dispatch_action(Box::new(DuplicateSplitRight), cx)
+                }),
+            MenuEntry::new(ts!("menu.duplicate_below"))
+                .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+S"))
+                .on_activate(|window, cx| {
+                    window.dispatch_action(Box::new(DuplicateSplitBelow), cx)
+                }),
             MenuEntry::new(ts!("menu.break_out_pane"))
                 .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+B"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(BreakOutPane), cx)),
@@ -1247,10 +1334,12 @@ impl Workspace {
     /// about the active tab:
     ///
     /// * on another tab, the menu merges *that* tab into the active one as a
-    ///   split — the only way to create a split, and the reason there is no
-    ///   shortcut for it;
-    /// * on the active tab, it offers the reverse, moving the active pane back
-    ///   out into a tab of its own, and only while that tab is actually split.
+    ///   split — the only way to bring an existing session in, and the reason
+    ///   that half of splitting has no shortcut;
+    /// * on the active tab, it splits the active pane off into a second
+    ///   connection to the same host, and offers the reverse of a merge: moving
+    ///   the active pane back out into a tab of its own, which needs the tab to
+    ///   actually be split.
     ///
     /// A row whose command would be refused is left out rather than shown doing
     /// nothing, so the menu can come down to nothing but "close this tab".
@@ -1263,6 +1352,29 @@ impl Workspace {
 
         let mut entries = Vec::new();
         if index == self.active {
+            // A split that would leave an unusably small pane is refused, so the
+            // row asking for it is left out rather than offered and ignored.
+            if self.can_split_active(Axis::Horizontal, cx) {
+                entries.push(
+                    MenuEntry::new(ts!("tab.duplicate_right"))
+                        .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+D"))
+                        .on_activate(|window, cx| {
+                            window.dispatch_action(Box::new(DuplicateSplitRight), cx)
+                        }),
+                );
+            }
+            if self.can_split_active(Axis::Vertical, cx) {
+                entries.push(
+                    MenuEntry::new(ts!("tab.duplicate_below"))
+                        .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+S"))
+                        .on_activate(|window, cx| {
+                            window.dispatch_action(Box::new(DuplicateSplitBelow), cx)
+                        }),
+                );
+            }
+            if !entries.is_empty() {
+                entries.push(MenuEntry::separator());
+            }
             if tab.panes.leaf_count() > 1 {
                 entries.push(
                     MenuEntry::new(ts!("menu.break_out_pane"))
@@ -1684,6 +1796,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_next_pane_action))
             .on_action(cx.listener(Self::focus_prev_pane_action))
             .on_action(cx.listener(Self::break_out_pane_action))
+            .on_action(cx.listener(Self::duplicate_split_right_action))
+            .on_action(cx.listener(Self::duplicate_split_below_action))
             .on_action(cx.listener(Self::toggle_file_panel_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::show_about_action))
@@ -1760,6 +1874,8 @@ fn app_menus() -> Vec<Menu> {
                 // Only half of splitting is here, for the reason given on
                 // [`Workspace::render_app_menu`]: a merge has to name a source
                 // tab, so it belongs to the tab context menu alone.
+                MenuItem::action(ts!("menu.mac.duplicate_right"), DuplicateSplitRight),
+                MenuItem::action(ts!("menu.mac.duplicate_below"), DuplicateSplitBelow),
                 MenuItem::action(ts!("menu.mac.break_out_pane"), BreakOutPane),
                 MenuItem::separator(),
                 MenuItem::action(ts!("files.mac.toggle"), ToggleFilePanel),
@@ -1813,6 +1929,23 @@ fn bind_shortcuts(cx: &mut App) {
         KeyBinding::new(
             &format!("{pane_modifier}-shift-b"),
             BreakOutPane,
+            Some(KEY_CONTEXT),
+        ),
+        // Shifted for the same reason the break-out is: off macOS the pane
+        // modifier is `alt`, and bare `Alt+D` is readline's *kill-word*, which
+        // a user typing in the pane being split would miss immediately. The
+        // shifted chord is free in a way the bare one is not — a terminal
+        // cannot encode `Alt+Shift+D` distinctly from `Alt+D` — so taking it
+        // costs the remote shell nothing. `Alt+S` is shifted to match, since
+        // the two split directions have to read as one pair of commands.
+        KeyBinding::new(
+            &format!("{pane_modifier}-shift-d"),
+            DuplicateSplitRight,
+            Some(KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            &format!("{pane_modifier}-shift-s"),
+            DuplicateSplitBelow,
             Some(KEY_CONTEXT),
         ),
         KeyBinding::new(PANEL_SHORTCUT, ToggleFilePanel, Some(KEY_CONTEXT)),
