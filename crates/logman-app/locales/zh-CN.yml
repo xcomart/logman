@@ -44,12 +44,33 @@ files:
   loading: 正在加载…
   empty: 此目录为空。
   select_upload: 上传
-  uploading: "正在上传 %{name}…"
+  select_upload_folder: 上传文件夹
+  select_download_folder: 保存
+  menu_download: 下载…
+  menu_rename: 重命名…
+  menu_delete: 删除…
+  menu_upload: 上传文件…
+  menu_upload_folder: 上传文件夹…
+  menu_refresh: 刷新
+  uploading: "正在上传 %{name}… %{percent}%"
+  downloading: "正在下载 %{name}… %{percent}%"
+  deleting: "正在删除 %{name}… %{percent}%"
+  transfer_busy: 此处已有传输正在进行。
   uploaded: "已上传 %{name}。"
   uploaded_many: "已上传 %{count} 个文件。"
-  downloading: "正在下载 %{name}…"
+  uploaded_tree: "已上传 %{folders} 个文件夹中的 %{files} 个文件。"
+  nothing_to_upload: 没有读取到可上传的内容。
   downloaded: "已保存到 %{path}。"
-  skipped_directory: "已跳过 %{name}：只能上传文件。"
+  downloaded_tree: "已将 %{count} 个文件保存到 %{path}。"
+  delete_confirm_one: "要删除 %{name} 吗？"
+  delete_confirm: "要删除 %{count} 个项目吗？"
+  delete: 删除
+  deleted: "已删除 %{name}。"
+  deleted_many: "已删除 %{count} 个项目。"
+  rename_prompt: "将 %{name} 重命名为："
+  rename: 重命名
+  renamed: "已重命名为 %{name}。"
+  invalid_name: 无法使用该名称。
   failed: "远程文件：%{error}"
 
 empty:

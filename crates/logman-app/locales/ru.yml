@@ -44,12 +44,33 @@ files:
   loading: Загрузка…
   empty: Этот каталог пуст.
   select_upload: Загрузить
-  uploading: "Загрузка %{name}…"
+  select_upload_folder: Загрузить папку
+  select_download_folder: Сохранить
+  menu_download: Скачать…
+  menu_rename: Переименовать…
+  menu_delete: Удалить…
+  menu_upload: Загрузить файлы…
+  menu_upload_folder: Загрузить папку…
+  menu_refresh: Обновить
+  uploading: "Загрузка %{name}… %{percent} %"
+  downloading: "Скачивание %{name}… %{percent} %"
+  deleting: "Удаление %{name}… %{percent} %"
+  transfer_busy: Здесь уже идёт передача.
   uploaded: "Файл %{name} загружен."
   uploaded_many: "Загружено файлов: %{count}."
-  downloading: "Скачивание %{name}…"
+  uploaded_tree: "Загружено файлов: %{files} в папках: %{folders}."
+  nothing_to_upload: Не удалось прочитать ничего для загрузки.
   downloaded: "Сохранено в %{path}."
-  skipped_directory: "%{name} пропущен: загружать можно только файлы."
+  downloaded_tree: "Сохранено файлов: %{count} в %{path}."
+  delete_confirm_one: "Удалить %{name}?"
+  delete_confirm: "Удалить объектов: %{count}?"
+  delete: Удалить
+  deleted: "Объект %{name} удалён."
+  deleted_many: "Удалено объектов: %{count}."
+  rename_prompt: "Переименовать %{name} в:"
+  rename: Переименовать
+  renamed: "Переименовано в %{name}."
+  invalid_name: Это имя нельзя использовать.
   failed: "Удалённые файлы: %{error}"
 
 empty:

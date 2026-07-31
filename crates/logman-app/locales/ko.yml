@@ -44,12 +44,33 @@ files:
   loading: 불러오는 중…
   empty: 이 디렉터리는 비어 있습니다.
   select_upload: 업로드
-  uploading: "%{name} 업로드 중…"
+  select_upload_folder: 폴더 업로드
+  select_download_folder: 저장
+  menu_download: 다운로드…
+  menu_rename: 이름 변경…
+  menu_delete: 삭제…
+  menu_upload: 파일 업로드…
+  menu_upload_folder: 폴더 업로드…
+  menu_refresh: 새로 고침
+  uploading: "%{name} 업로드 중… %{percent}%"
+  downloading: "%{name} 다운로드 중… %{percent}%"
+  deleting: "%{name} 삭제 중… %{percent}%"
+  transfer_busy: 이미 전송이 진행 중입니다.
   uploaded: "%{name}을(를) 업로드했습니다."
   uploaded_many: "파일 %{count}개를 업로드했습니다."
-  downloading: "%{name} 다운로드 중…"
+  uploaded_tree: "폴더 %{folders}개에 파일 %{files}개를 업로드했습니다."
+  nothing_to_upload: 업로드할 수 있는 항목을 읽지 못했습니다.
   downloaded: "%{path}에 저장했습니다."
-  skipped_directory: "%{name}은(는) 건너뛰었습니다. 파일만 업로드할 수 있습니다."
+  downloaded_tree: "파일 %{count}개를 %{path}에 저장했습니다."
+  delete_confirm_one: "%{name}을(를) 삭제할까요?"
+  delete_confirm: "%{count}개 항목을 삭제할까요?"
+  delete: 삭제
+  deleted: "%{name}을(를) 삭제했습니다."
+  deleted_many: "%{count}개 항목을 삭제했습니다."
+  rename_prompt: "%{name}의 새 이름:"
+  rename: 이름 변경
+  renamed: "%{name}(으)로 이름을 변경했습니다."
+  invalid_name: 사용할 수 없는 이름입니다.
   failed: "원격 파일: %{error}"
 
 empty:

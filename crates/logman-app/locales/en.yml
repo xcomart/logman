@@ -66,7 +66,8 @@ tab:
 # `%{name}` is a file name, `%{path}` a local path and `%{error}` the sentence
 # the SFTP layer produced; all three are values rather than words and stay as
 # they are. Only the sentence framing `%{error}` is translated, the same policy
-# the connection and session messages follow.
+# the connection and session messages follow. `%{percent}`, `%{count}`,
+# `%{files}` and `%{folders}` are plain numbers.
 files:
   title: Remote files
   # The row of the in-app dropdown menu that shows and hides the panel, and its
@@ -79,16 +80,65 @@ files:
   not_connected: The remote files appear once the session is connected.
   loading: Loading…
   empty: This directory is empty.
-  # Confirmation button of the platform file picker for an upload.
+  # Confirmation button of the platform file picker for an upload. Two of them,
+  # because no platform picker offers files and folders in one dialog: Windows
+  # and the Linux portal both switch a picker into folder mode rather than
+  # widening it, so the panel asks with two buttons instead.
   select_upload: Upload
-  uploading: "Uploading %{name}…"
+  select_upload_folder: Upload folder
+  # Confirmation button of the folder picker that asks where a multi-entry
+  # download should land. Only a destination is being chosen — the entries keep
+  # the names they have on the server — so this says "save", not "download".
+  select_download_folder: Save
+  # Rows of the menu a right-click opens over the listing. The ellipsis marks
+  # the ones that ask something before they act, which is every one of them
+  # except the refresh.
+  menu_download: Download…
+  menu_rename: Rename…
+  menu_delete: Delete…
+  menu_upload: Upload files…
+  menu_upload_folder: Upload folder…
+  menu_refresh: Refresh
+  # The line under the listing while bytes are moving, one file at a time.
+  # `%{percent}` counts the whole batch, not this one file, so it keeps rising
+  # across a folder instead of restarting at every name.
+  uploading: "Uploading %{name}… %{percent}%"
+  downloading: "Downloading %{name}… %{percent}%"
+  # The same line for a delete, where `%{percent}` counts entries rather than
+  # bytes — nothing is moving — and a folder contributes every entry inside it,
+  # so the bar keeps going through a tree instead of jumping once per name.
+  deleting: "Deleting %{name}… %{percent}%"
+  # Refusal when a second transfer is asked for while one is still running. One
+  # progress bar per session can only describe one transfer honestly.
+  transfer_busy: A transfer is already running here.
   uploaded: "Uploaded %{name}."
   # Two keys rather than a plural rule: only "exactly one" and "more than one"
   # are ever needed, as with the session overrides.
   uploaded_many: "Uploaded %{count} files."
-  downloading: "Downloading %{name}…"
+  # Summary of a recursive upload, which is about folders as much as files.
+  uploaded_tree: "Uploaded %{files} files in %{folders} folders."
+  # Every chosen path turned out to be unreadable — a broken link, or something
+  # removed between the drop and the walk. Not a success, so not phrased as one.
+  nothing_to_upload: Nothing could be read to upload.
   downloaded: "Saved to %{path}."
-  skipped_directory: "%{name} was skipped: only files can be uploaded."
+  downloaded_tree: "Saved %{count} files to %{path}."
+  # The question asked before anything is deleted. Two keys rather than a plural
+  # rule, as with the upload summaries: naming the single entry is worth more
+  # than counting it, and past one only the count fits.
+  delete_confirm_one: "Delete %{name}?"
+  delete_confirm: "Delete %{count} items?"
+  # The button that answers it. Shorter than the menu row that promised the
+  # question; this one *is* the answer, so it names the act and nothing else.
+  delete: Delete
+  deleted: "Deleted %{name}."
+  deleted_many: "Deleted %{count} items."
+  # Label over the rename field, which opens prefilled with the current name.
+  rename_prompt: "Rename %{name} to:"
+  rename: Rename
+  renamed: "Renamed to %{name}."
+  # A name that cannot be sent: empty, or one carrying a path separator or
+  # `..`, which would rename the entry into a different directory entirely.
+  invalid_name: That name cannot be used.
   failed: "Remote files: %{error}"
 
 # The placeholder shown while no session is open.
