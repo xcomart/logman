@@ -1881,8 +1881,14 @@ impl FilePanel {
         let theme = theme(cx);
         let path = state.and_then(|state| state.path.as_deref());
         let ready = state.is_some_and(|state| state.path.is_some());
+        let selected = state.map_or(0, SessionState::selected_count);
         // Directories included: a selected folder is copied whole.
-        let downloadable = state.is_some_and(|state| state.selected_count() > 0);
+        let downloadable = selected > 0;
+        // The same rules the context menu applies, so that a command is offered
+        // in exactly one shape whichever way it is reached: renaming needs one
+        // target and only one, deleting takes as many as are selected.
+        let renameable = selected == 1;
+        let deletable = selected > 0;
 
         let title = match path {
             Some(path) => self.render_crumbs(path, &theme, cx),
@@ -1932,6 +1938,15 @@ impl FilePanel {
                         cx.listener(|panel, _: &ClickEvent, _window, cx| panel.refresh(cx)),
                     ))
                     .child(icon_button(
+                        "file-panel-new-folder",
+                        icons::NEW_FOLDER,
+                        ready,
+                        &theme,
+                        cx.listener(|panel, _: &ClickEvent, _window, cx| {
+                            panel.begin_new_folder(cx);
+                        }),
+                    ))
+                    .child(icon_button(
                         "file-panel-upload",
                         icons::UPLOAD,
                         ready,
@@ -1955,6 +1970,24 @@ impl FilePanel {
                         ready && downloadable,
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| panel.download(cx)),
+                    ))
+                    .child(icon_button(
+                        "file-panel-rename",
+                        icons::RENAME,
+                        ready && renameable,
+                        &theme,
+                        cx.listener(|panel, _: &ClickEvent, _window, cx| panel.begin_rename(cx)),
+                    ))
+                    // Last, and deliberately: the row starts with the button
+                    // pressed most often and ends with the one that cannot be
+                    // undone, so a click that lands a button early hits a
+                    // refresh rather than a delete.
+                    .child(icon_button(
+                        "file-panel-delete",
+                        icons::DELETE,
+                        ready && deletable,
+                        &theme,
+                        cx.listener(|panel, _: &ClickEvent, _window, cx| panel.confirm_delete(cx)),
                     )),
             )
             .into_any_element()

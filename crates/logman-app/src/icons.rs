@@ -47,11 +47,24 @@ pub const UPLOAD_FOLDER: &str = "icons/upload-folder.svg";
 /// The file panel button that saves the selected remote file locally.
 pub const DOWNLOAD: &str = "icons/download.svg";
 
+/// The file panel button that creates a directory in the listed one.
+///
+/// The same folder outline [`UPLOAD_FOLDER`] draws, carrying a plus where that
+/// one carries an arrow: the two sit side by side in the toolbar, and reading
+/// them as a pair is what says one adds a folder while the other sends one.
+pub const NEW_FOLDER: &str = "icons/new-folder.svg";
+
+/// The file panel button that renames the one selected entry.
+pub const RENAME: &str = "icons/rename.svg";
+
+/// The file panel button that deletes the selection.
+pub const DELETE: &str = "icons/delete.svg";
+
 /// The toolbar button that shows and hides the remote file panel.
 pub const PANEL: &str = "icons/panel.svg";
 
 /// Every icon, paired with the bytes [`Icons`] hands back for it.
-const ICONS: [(&str, &[u8]); 8] = [
+const ICONS: [(&str, &[u8]); 11] = [
     (FOLDER, include_bytes!("../assets/icons/folder.svg")),
     (FILE, include_bytes!("../assets/icons/file.svg")),
     (SYMLINK, include_bytes!("../assets/icons/symlink.svg")),
@@ -62,6 +75,9 @@ const ICONS: [(&str, &[u8]); 8] = [
         include_bytes!("../assets/icons/upload-folder.svg"),
     ),
     (DOWNLOAD, include_bytes!("../assets/icons/download.svg")),
+    (NEW_FOLDER, include_bytes!("../assets/icons/new-folder.svg")),
+    (RENAME, include_bytes!("../assets/icons/rename.svg")),
+    (DELETE, include_bytes!("../assets/icons/delete.svg")),
     (PANEL, include_bytes!("../assets/icons/panel.svg")),
 ];
 

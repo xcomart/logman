@@ -257,6 +257,18 @@ authentication.
   listing, which is not retried on its own — otherwise every chunk of terminal
   output would trigger another attempt.
 
+**The toolbar under the path** is ordered by what each button needs. It opens
+with the ones that act on the directory itself — **⟳** and the **folder-plus**
+button that creates one — then the three transfer buttons, and it ends with the
+**pencil** and the **bin**, which act on the selection. A button whose command
+does not apply right now is dimmed and does nothing: the pencil wants exactly
+one row selected, the bin and **↓** want at least one, and everything but **⟳**
+waits for the first listing to land.
+
+The destructive button is last on purpose. The row starts with the button
+pressed most often and ends with the one that cannot be undone, so a click that
+lands one button early hits a refresh rather than a delete.
+
 ### Transferring files
 
 - **↑** opens the platform file picker and uploads the chosen files into the
@@ -314,10 +326,11 @@ Both menus close on <kbd>Esc</kbd> or on a click outside them.
 
 ### Creating a folder
 
-Choosing **New folder…** opens an empty, focused field along the bottom of the
-panel. <kbd>Enter</kbd> or **Create** makes the directory in the one on screen,
-**Cancel** drops the question. The same names are refused as for a rename, and
-for the same reason.
+Choosing **New folder…** — or pressing the **folder-plus** button in the toolbar,
+which does the same thing — opens an empty, focused field along the bottom of
+the panel. <kbd>Enter</kbd> or **Create** makes the directory in the one on
+screen, **Cancel** drops the question. The same names are refused as for a
+rename, and for the same reason.
 
 A name already taken by a **directory** is not an error: the panel selects the
 folder that is already there and says so. Nothing is overwritten and nothing
@@ -326,8 +339,9 @@ server's refusal appears along the bottom.
 
 ### Renaming
 
-Choosing **Rename…** opens a field along the bottom of the panel, prefilled with
-the current name and focused. <kbd>Enter</kbd> or **Rename** applies it,
+Choosing **Rename…** — or pressing the **pencil** button, which needs exactly one
+row selected — opens a field along the bottom of the panel, prefilled with the
+current name and focused. <kbd>Enter</kbd> or **Rename** applies it,
 **Cancel** drops it. A name that is empty, or that carries a `/`, a `\` or `..`,
 is refused before anything is sent — such a name would move the entry into a
 different directory rather than rename it in this one.
@@ -340,9 +354,10 @@ The renamed row stays selected, so a second rename needs no second click.
 
 ### Deleting
 
-Choosing **Delete…** asks first, along the bottom of the panel: the question
-names the entry when there is one and counts them when there are more, and
-nothing is sent until **Delete** is pressed. Cancelling — or switching to
+Choosing **Delete…** — or pressing the **bin** button at the end of the toolbar —
+asks first, along the bottom of the panel: the question names the entry when
+there is one and counts them when there are more, and nothing is sent until
+**Delete** is pressed. Cancelling — or switching to
 another session, or leaving the directory — drops the question unasked.
 
 - **A file is removed with one call.**
