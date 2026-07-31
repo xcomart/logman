@@ -1785,6 +1785,25 @@ impl Window {
         self.platform_window.set_app_id(app_id);
     }
 
+    /// Switches the open window between a transparent title bar the app draws
+    /// itself and the caption the platform draws, without reopening it.
+    ///
+    /// `traffic_light_position` is where the macOS window buttons go while the
+    /// title bar is transparent, in window coordinates; pass `None` when the
+    /// platform's own placement is wanted. Every other platform ignores it.
+    ///
+    /// Supported on Windows and macOS. Elsewhere — Wayland and X11, where the
+    /// caption belongs to the compositor until the window opts into client-side
+    /// decorations — this does nothing.
+    pub fn set_titlebar_transparent(
+        &self,
+        transparent: bool,
+        traffic_light_position: Option<Point<Pixels>>,
+    ) {
+        self.platform_window
+            .set_titlebar_transparent(transparent, traffic_light_position);
+    }
+
     /// Sets the window background appearance.
     pub fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         self.platform_window

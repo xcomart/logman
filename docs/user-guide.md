@@ -120,8 +120,12 @@ session: its `user@host` label (with `:port` when the port is not 22), the
 status summary, and the terminal grid as `columns`×`rows`.
 
 Switching tabs: click one, press <kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd> for
-the first nine, or use the dropdown at the right of the strip when there are
-more tabs than fit. The strip scrolls the active tab into view on its own.
+the first nine, or use the **⌄** dropdown at the right of the strip when there
+are more tabs than fit — it lists every tab and ticks the active one. The strip
+scrolls the active tab into view on its own.
+
+Every icon button along the top of the window names itself when the pointer
+rests on it, shortcut included where the command has one.
 
 Closing: the **×** on a tab closes the whole tab, panes and all.
 <kbd>Ctrl</kbd>+<kbd>W</kbd> closes the *active pane*, which on an unsplit tab
@@ -232,6 +236,9 @@ authentication.
 - Directories sort before files, then by name, ignoring case.
 - Folders take the accent colour, symlinks carry a small badge, and files show
   their size in the right-hand column.
+- A name too long for the panel is cut off at the right. Resting the pointer on
+  such a row shows the whole name; names that already fit stay quiet. Dragging
+  the panel wider is the other way to read one.
 - A single click selects a row; the selection is what the download button and
   the context menu act on, and it is dropped whenever the directory changes.
 - **<kbd>Ctrl</kbd>-click** (<kbd>Cmd</kbd>-click on macOS) adds a row to the
@@ -256,6 +263,21 @@ authentication.
 - **⟳** lists the directory again. It is also the way out of a failed first
   listing, which is not retried on its own — otherwise every chunk of terminal
   output would trigger another attempt.
+
+**The toolbar under the path** is ordered by what each button needs. It opens
+with the ones that act on the directory itself — **⟳** and the **folder-plus**
+button that creates one — then the three transfer buttons, and it ends with the
+**pencil** and the **bin**, which act on the selection. A button whose command
+does not apply right now is dimmed and does nothing: the pencil wants exactly
+one row selected, the bin and **↓** want at least one, and everything but **⟳**
+waits for the first listing to land.
+
+The destructive button is last on purpose. The row starts with the button
+pressed most often and ends with the one that cannot be undone, so a click that
+lands one button early hits a refresh rather than a delete.
+
+Resting the pointer on any of them names it. Dimmed buttons are included, so a
+button that will not take a click can still say what it would have done.
 
 ### Transferring files
 
@@ -314,10 +336,11 @@ Both menus close on <kbd>Esc</kbd> or on a click outside them.
 
 ### Creating a folder
 
-Choosing **New folder…** opens an empty, focused field along the bottom of the
-panel. <kbd>Enter</kbd> or **Create** makes the directory in the one on screen,
-**Cancel** drops the question. The same names are refused as for a rename, and
-for the same reason.
+Choosing **New folder…** — or pressing the **folder-plus** button in the toolbar,
+which does the same thing — opens an empty, focused field along the bottom of
+the panel. <kbd>Enter</kbd> or **Create** makes the directory in the one on
+screen, **Cancel** drops the question. The same names are refused as for a
+rename, and for the same reason.
 
 A name already taken by a **directory** is not an error: the panel selects the
 folder that is already there and says so. Nothing is overwritten and nothing
@@ -326,8 +349,9 @@ server's refusal appears along the bottom.
 
 ### Renaming
 
-Choosing **Rename…** opens a field along the bottom of the panel, prefilled with
-the current name and focused. <kbd>Enter</kbd> or **Rename** applies it,
+Choosing **Rename…** — or pressing the **pencil** button, which needs exactly one
+row selected — opens a field along the bottom of the panel, prefilled with the
+current name and focused. <kbd>Enter</kbd> or **Rename** applies it,
 **Cancel** drops it. A name that is empty, or that carries a `/`, a `\` or `..`,
 is refused before anything is sent — such a name would move the entry into a
 different directory rather than rename it in this one.
@@ -340,9 +364,10 @@ The renamed row stays selected, so a second rename needs no second click.
 
 ### Deleting
 
-Choosing **Delete…** asks first, along the bottom of the panel: the question
-names the entry when there is one and counts them when there are more, and
-nothing is sent until **Delete** is pressed. Cancelling — or switching to
+Choosing **Delete…** — or pressing the **bin** button at the end of the toolbar —
+asks first, along the bottom of the panel: the question names the entry when
+there is one and counts them when there are more, and nothing is sent until
+**Delete** is pressed. Cancelling — or switching to
 another session, or leaving the directory — drops the question unasked.
 
 - **A file is removed with one call.**
@@ -451,6 +476,11 @@ accumulated so a trackpad scrolls smoothly. Typing snaps the viewport back to
 the bottom, the way every other terminal does. The depth of the scrollback is a
 setting, global or per profile.
 
+Every surface that scrolls — the terminal, the files panel, the tab strip and
+the settings dialog — shows a slim indicator over its edge while it is being
+scrolled, which you can drag to move around, and which fades two seconds after
+you stop.
+
 ### Input
 
 Printable characters go through the platform's text input path, so dead keys,
@@ -479,6 +509,7 @@ sections.
 | Setting | Values | Notes |
 | --- | --- | --- |
 | **UI theme** | Dark, Light | Dark by default. Also recolours the window caption on Windows. |
+| **Title bar** | Custom, System | Custom by default: the tab strip doubles as the title bar, with the application name at one end and the window buttons at the other. System brings back the caption the operating system draws. |
 | **Language** | System default, or one of eight | German, English, Spanish, French, Japanese, Korean, Russian, Simplified Chinese. Each is listed under its own name. |
 | **Opacity** | 50–100% | Below 100 the window becomes translucent. |
 | **Blur the desktop behind the window** | on/off | Where the platform supports it. Blur wins over plain translucency. |
@@ -511,6 +542,9 @@ elsewhere.
 ### When a change takes effect
 
 - **UI theme, language, opacity, blur** — immediately, across the whole window.
+- **Title bar** — immediately on Windows and macOS: the open window swaps its
+  caption in place. On Linux the window keeps the compositor's title bar either
+  way.
 - **Color scheme and font** — immediately, in every open session, background
   tabs included.
 - **`TERM`, keepalive, connect timeout** — on the next connect or reconnect. The

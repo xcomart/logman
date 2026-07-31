@@ -19,6 +19,7 @@ menu:
   about: logman 정보
   quit: 종료
   session: 세션
+  tip_menu: 메뉴
   mac:
     new_session: 새 세션
     close_session: 세션 닫기
@@ -33,10 +34,13 @@ tab:
   duplicate_right: 새 연결로 오른쪽에 분할
   duplicate_below: 새 연결로 아래쪽에 분할
   close: 탭 닫기
+  tip_list: 모든 탭
+  tip_new: "새 세션 (%{shortcut})"
 
 files:
   title: 원격 파일
   toggle: 원격 파일 패널
+  tip_toggle: "원격 파일 (%{shortcut})"
   mac:
     toggle: 원격 파일 패널
   no_session: 열린 세션이 없습니다.
@@ -53,6 +57,13 @@ files:
   menu_upload: 파일 업로드…
   menu_upload_folder: 폴더 업로드…
   menu_refresh: 새로 고침
+  tip_refresh: 새로 고침
+  tip_new_folder: 새 폴더
+  tip_upload: 파일 업로드
+  tip_upload_folder: 폴더 업로드
+  tip_download: 다운로드
+  tip_rename: 이름 변경
+  tip_delete: 삭제
   uploading: "%{name} 업로드 중… %{percent}%"
   downloading: "%{name} 다운로드 중… %{percent}%"
   deleting: "%{name} 삭제 중… %{percent}%"
@@ -97,6 +108,9 @@ settings:
   ui_theme: UI 테마
   theme_dark: 어둡게
   theme_light: 밝게
+  titlebar: 타이틀 바
+  titlebar_custom: 커스텀
+  titlebar_system: 시스템
   language: 언어
   opacity: 불투명도
   opacity_hint: "% (50–100)"

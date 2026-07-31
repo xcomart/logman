@@ -32,17 +32,22 @@ use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{
     AnyElement, App, AsyncApp, ClickEvent, Context, Div, DragMoveEvent, ElementId, Entity,
-    EntityId, ExternalPaths, Focusable, Modifiers, MouseButton, MouseDownEvent, PathPromptOptions,
-    Pixels, Point, ScrollHandle, SharedString, Subscription, WeakEntity, Window, div, prelude::*,
-    px, relative,
+    EntityId, ExternalPaths, Focusable, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+    PathPromptOptions, Pixels, Point, ScrollHandle, SharedString, Subscription, WeakEntity, Window,
+    div, prelude::*, px, relative,
 };
 use logman_ssh::{RemoteEntry, SftpClient, SftpError};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app_settings;
 use crate::i18n::ts;
 use crate::icons;
 use crate::session::Session;
-use crate::ui::{Button, ButtonVariant, ContextMenu, MenuEntry, TextInput, Theme, theme};
+use crate::ui::scrollbar::INSET;
+use crate::ui::{
+    Button, ButtonVariant, ContextMenu, DraggedThumb, MenuEntry, Scrollbar, ScrollbarAxis,
+    ScrollbarState, TextInput, Theme, hide_later, scroll_to, scrolled, theme, tooltip_label,
+};
 
 /// Width the panel opens at, in pixels.
 ///
@@ -70,6 +75,13 @@ const MAX_PANEL_WIDTH: f32 = 560.;
 /// handle is laid over it absolutely so that widening the grab area costs the
 /// listing no room.
 const PANEL_HANDLE: f32 = 6.;
+
+/// Element id of the listing's overlay scroll indicator.
+///
+/// One panel shows one session's listing at a time, so one id covers them all —
+/// and it is what tells a drag of this bar from a drag of any other in the
+/// window.
+const LIST_SCROLLBAR: &str = "file-panel-scrollbar";
 
 /// Horizontal padding of the header, per side, in pixels.
 ///
@@ -102,6 +114,28 @@ const FOLD_CRUMB: &str = "\u{2026}";
 
 /// What goes between two breadcrumb pieces.
 const CRUMB_SEPARATOR: &str = "/";
+
+/// Width of one column of a listing row's name, in pixels — an average, like
+/// [`CRUMB_CHAR`] and for the same reason.
+///
+/// The same figure scaled from the header's 11px to the row's 12px
+/// (`6.4 × 12 ÷ 11 ≈ 6.98`) and rounded *up*. The rounding direction is the
+/// point: a wider estimate yields a smaller budget and so a tooltip slightly
+/// before the name actually needs one, which is the harmless way to be wrong.
+const ROW_CHAR: f32 = 7.;
+
+/// Horizontal padding of a listing row, in pixels.
+const ROW_PADDING: f32 = 8.;
+
+/// Gap between a listing row's icon, name, badge and size, in pixels.
+const ROW_GAP: f32 = 6.;
+
+/// Width of one character of the size column, in pixels.
+///
+/// The column is drawn at 11px, so this is [`CRUMB_CHAR`] itself — but the
+/// strings are `"1023 B"` and `"1.5 MB"`, all digits, spaces and capitals,
+/// which run wider than an average of ordinary prose. Rounded up accordingly.
+const SIZE_CHAR: f32 = 7.;
 
 /// Size of the icon leading a listing row, in pixels.
 const ROW_ICON: f32 = 14.;
@@ -448,6 +482,8 @@ struct SessionState {
     /// Outranks [`SessionState::notice`] on screen and doubles as the lock that
     /// keeps a second transfer from starting.
     transfer: Option<TransferProgress>,
+    /// Whether this session's overlay scroll indicator is on screen.
+    scrollbar: ScrollbarState,
     /// Vertical scroll of the list, kept per session so returning to a tab
     /// returns to the same place in its directory.
     scroll: ScrollHandle,
@@ -471,6 +507,7 @@ impl SessionState {
             notice_epoch: 0,
             transfer: None,
             scroll: ScrollHandle::new(),
+            scrollbar: ScrollbarState::new(),
         }
     }
 
@@ -788,6 +825,71 @@ impl FilePanel {
             return;
         }
         state.notice = None;
+        cx.notify();
+    }
+
+    /// The listing's overlay scroll indicator, as it stands.
+    ///
+    /// Set in from the edge far enough to clear the panel's resize grip, which
+    /// is pinned to that same edge and drawn after the listing — so a thumb any
+    /// closer would be a thumb the grip took every press away from.
+    fn scrollbar(state: &SessionState) -> Scrollbar {
+        Scrollbar::for_handle(LIST_SCROLLBAR, ScrollbarAxis::Vertical, &state.scroll)
+            .inset(PANEL_HANDLE + INSET)
+            .fade(state.scrollbar.fade())
+    }
+
+    /// The state of the session the panel is showing, if it is showing one.
+    fn active_state(&mut self) -> Option<&mut SessionState> {
+        let session = self.session.as_ref()?.entity_id();
+        self.states.get_mut(&session)
+    }
+
+    /// Puts the listing's bar up whenever it has been scrolled, and starts the
+    /// clock that takes it down again.
+    fn watch_list_scroll(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.active_state() else {
+            return;
+        };
+        let scrolled = scrolled(&state.scroll, ScrollbarAxis::Vertical);
+        let Some(epoch) = state.scrollbar.moved(scrolled) else {
+            return;
+        };
+
+        // Looked up again when the timer fires rather than captured: the
+        // session may be closed by then, and with it the listing this bar
+        // belongs to.
+        hide_later(epoch, cx, |panel| {
+            panel.active_state().map(|s| &mut s.scrollbar)
+        });
+    }
+
+    /// Scrolls the listing to wherever its thumb has been dragged.
+    fn drag_scrollbar(&mut self, event: &DragMoveEvent<DraggedThumb>, cx: &mut Context<Self>) {
+        let Some(state) = self.active_state() else {
+            return;
+        };
+        let Some(progress) = Self::scrollbar(state).dragged(event, cx) else {
+            return;
+        };
+
+        state.scrollbar.hold();
+        scroll_to(&state.scroll, ScrollbarAxis::Vertical, progress);
+        cx.notify();
+    }
+
+    /// Lets go of the listing's thumb, and starts the clock on the bar again.
+    fn release_scrollbar(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.active_state() else {
+            return;
+        };
+        let Some(epoch) = state.scrollbar.release() else {
+            return;
+        };
+
+        hide_later(epoch, cx, |panel| {
+            panel.active_state().map(|s| &mut s.scrollbar)
+        });
         cx.notify();
     }
 
@@ -1881,8 +1983,14 @@ impl FilePanel {
         let theme = theme(cx);
         let path = state.and_then(|state| state.path.as_deref());
         let ready = state.is_some_and(|state| state.path.is_some());
+        let selected = state.map_or(0, SessionState::selected_count);
         // Directories included: a selected folder is copied whole.
-        let downloadable = state.is_some_and(|state| state.selected_count() > 0);
+        let downloadable = selected > 0;
+        // The same rules the context menu applies, so that a command is offered
+        // in exactly one shape whichever way it is reached: renaming needs one
+        // target and only one, deleting takes as many as are selected.
+        let renameable = selected == 1;
+        let deletable = selected > 0;
 
         let title = match path {
             Some(path) => self.render_crumbs(path, &theme, cx),
@@ -1927,13 +2035,25 @@ impl FilePanel {
                     .child(icon_button(
                         "file-panel-refresh",
                         icons::REFRESH,
+                        ts!("files.tip_refresh"),
                         self.session.is_some(),
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| panel.refresh(cx)),
                     ))
                     .child(icon_button(
+                        "file-panel-new-folder",
+                        icons::NEW_FOLDER,
+                        ts!("files.tip_new_folder"),
+                        ready,
+                        &theme,
+                        cx.listener(|panel, _: &ClickEvent, _window, cx| {
+                            panel.begin_new_folder(cx);
+                        }),
+                    ))
+                    .child(icon_button(
                         "file-panel-upload",
                         icons::UPLOAD,
+                        ts!("files.tip_upload"),
                         ready,
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| {
@@ -1943,6 +2063,7 @@ impl FilePanel {
                     .child(icon_button(
                         "file-panel-upload-folder",
                         icons::UPLOAD_FOLDER,
+                        ts!("files.tip_upload_folder"),
                         ready,
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| {
@@ -1952,9 +2073,30 @@ impl FilePanel {
                     .child(icon_button(
                         "file-panel-download",
                         icons::DOWNLOAD,
+                        ts!("files.tip_download"),
                         ready && downloadable,
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| panel.download(cx)),
+                    ))
+                    .child(icon_button(
+                        "file-panel-rename",
+                        icons::RENAME,
+                        ts!("files.tip_rename"),
+                        ready && renameable,
+                        &theme,
+                        cx.listener(|panel, _: &ClickEvent, _window, cx| panel.begin_rename(cx)),
+                    ))
+                    // Last, and deliberately: the row starts with the button
+                    // pressed most often and ends with the one that cannot be
+                    // undone, so a click that lands a button early hits a
+                    // refresh rather than a delete.
+                    .child(icon_button(
+                        "file-panel-delete",
+                        icons::DELETE,
+                        ts!("files.tip_delete"),
+                        ready && deletable,
+                        &theme,
+                        cx.listener(|panel, _: &ClickEvent, _window, cx| panel.confirm_delete(cx)),
                     )),
             )
             .into_any_element()
@@ -2093,24 +2235,36 @@ impl FilePanel {
             rows.push(placeholder(ts!("files.empty"), &theme));
         }
 
+        // The wrapper is what the overlay bar is placed against, and exists only
+        // for that: the scrolling box cannot hold its own bar, because its
+        // children are what scroll away.
         div()
-            .id("file-panel-list")
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
-            .py(px(2.))
-            .overflow_y_scroll()
-            .track_scroll(&state.scroll)
-            // Reached by the `..` row and by empty space alike: neither has an
-            // entry behind it, and both mean "do something to this directory".
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|panel, event: &MouseDownEvent, _window, cx| {
-                    panel.open_context(None, event.position, cx);
-                }),
+            .child(
+                div()
+                    .id("file-panel-list")
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .py(px(2.))
+                    .overflow_y_scroll()
+                    .track_scroll(&state.scroll)
+                    // Reached by the `..` row and by empty space alike: neither
+                    // has an entry behind it, and both mean "do something to
+                    // this directory".
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|panel, event: &MouseDownEvent, _window, cx| {
+                            panel.open_context(None, event.position, cx);
+                        }),
+                    )
+                    .children(rows),
             )
-            .children(rows)
+            .children(Self::scrollbar(state).render(&theme))
             .into_any_element()
     }
 
@@ -2131,6 +2285,15 @@ impl FilePanel {
         let parent = name == PARENT_NAME;
         let owned = label.clone();
         let clicked = label.clone();
+        // Recomputed every frame rather than cached, exactly as the breadcrumb's
+        // budget is: the answer depends on the panel's width, and the width
+        // changes continuously while the edge is being dragged.
+        let clipped = name_is_clipped(
+            self.width,
+            name,
+            is_symlink,
+            size.as_ref().map(SharedString::as_ref),
+        );
 
         div()
             .id(id)
@@ -2149,6 +2312,12 @@ impl FilePanel {
             .when(!selected, |row| {
                 row.hover(|style| style.bg(theme.surface_hover))
             })
+            // On the row rather than on the label: the label is a bare `div`
+            // with no id, and giving it one to carry a tooltip would add a
+            // second hitbox over every row for no gain — gpui places the
+            // tooltip at the pointer either way, and the pointer is over the
+            // name whenever the name is what the user is reading.
+            .when(clipped, |row| row.tooltip(tooltip_label(label.clone())))
             .on_click(cx.listener(move |panel, event: &ClickEvent, _window, cx| {
                 // A double click arrives as two events, so the first one has
                 // already selected the row by the time this opens it.
@@ -2516,6 +2685,7 @@ impl Render for FilePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
         self.apply_pending_focus(window, cx);
+        self.watch_list_scroll(cx);
         let state = self
             .session
             .as_ref()
@@ -2577,6 +2747,22 @@ impl Render for FilePanel {
             // edge — the one the new width is measured from — stays put.
             .on_drag_move::<DraggedPanelEdge>(
                 cx.listener(|panel, event, _window, cx| panel.drag_edge(event, cx)),
+            )
+            // Same reasoning one step over: the listing's thumb slides out from
+            // under the pointer, and the panel is what stays mounted for the
+            // whole gesture.
+            .on_drag_move::<DraggedThumb>(cx.listener(
+                |panel, event: &DragMoveEvent<DraggedThumb>, _window, cx| {
+                    panel.drag_scrollbar(event, cx);
+                },
+            ))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|panel, _: &MouseUpEvent, _window, cx| panel.release_scrollbar(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|panel, _: &MouseUpEvent, _window, cx| panel.release_scrollbar(cx)),
             )
             .child(header)
             .child(list)
@@ -3027,6 +3213,60 @@ fn join(directory: &str, name: &str) -> String {
     }
 }
 
+/// Whether a listing row's name is too long to be shown whole, and so wants a
+/// tooltip carrying it in full.
+///
+/// An estimate, like [`fold_budget`], and chosen over measuring for a reason
+/// specific to this list: **the listing is not virtualised**. Every entry of the
+/// directory is built on every repaint, so a directory with ten thousand files
+/// builds ten thousand rows a frame. Shaping each name through
+/// [`Window::text_system`](gpui::Window::text_system) to learn its exact width
+/// would put a text layout — the expensive half of drawing text — on that path,
+/// multiplied by the size of the directory, to decide something no one sees
+/// until they hover. The arithmetic below costs a few multiplications.
+///
+/// Being wrong is not symmetric here, so the estimate leans one way: a name cut
+/// off with no way to read it is a real loss, while a tooltip on a name that
+/// happened to fit is a moment of redundancy. Every constant therefore rounds
+/// *up* — [`ROW_CHAR`], [`SIZE_CHAR`] — and every subtraction below is taken at
+/// its most pessimistic, so the budget errs small and the tooltip errs present.
+///
+/// Widths count columns rather than characters: a Hangul or Han name occupies
+/// two columns per character at the same font size, and counting `chars` would
+/// let such a name run to twice the width before anyone thought it was long.
+fn name_is_clipped(width: f32, name: &str, badge: bool, size: Option<&str>) -> bool {
+    // Everything the row spends before the name gets what is left: the panel's
+    // own hairline border on both sides, the row's padding, the leading icon
+    // and the gap after it, then the symlink badge and the size column when
+    // they are there — each with the gap that precedes it.
+    let mut spent = 2. + 2. * ROW_PADDING + ROW_ICON + ROW_GAP;
+    if badge {
+        spent += ROW_GAP + BADGE_ICON;
+    }
+    if let Some(size) = size {
+        spent += ROW_GAP + columns(size) as f32 * SIZE_CHAR;
+    }
+
+    let usable = width - spent;
+    if !usable.is_finite() || usable <= 0. {
+        // No room to draw a name at all, so anything at all is clipped.
+        return !name.is_empty();
+    }
+    let budget = (usable / ROW_CHAR).floor();
+    let budget = if budget >= 0. { budget as usize } else { 0 };
+    columns(name) > budget
+}
+
+/// How many columns `text` occupies, counting East Asian wide characters twice.
+///
+/// [`UnicodeWidthStr`] answers the question the estimate actually asks — how
+/// much room this will take — for the one distinction that matters at this
+/// resolution. It is not a substitute for measuring a proportional font; it is
+/// what keeps a CJK name from being treated as half its real width.
+fn columns(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
 /// How much path the header can hold at a panel `width` pixels wide, in
 /// characters.
 ///
@@ -3251,6 +3491,7 @@ fn placeholder(message: SharedString, theme: &Theme) -> AnyElement {
 fn icon_button(
     id: impl Into<ElementId>,
     path: &'static str,
+    tip: SharedString,
     enabled: bool,
     theme: &Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -3272,6 +3513,12 @@ fn icon_button(
         .justify_center()
         .size(px(22.))
         .rounded_sm()
+        // Outside the `enabled` gate on purpose. These buttons carry no text, so
+        // a dimmed one is a glyph with no explanation at all — and "what would
+        // this have done?" is exactly the question a user has when a button will
+        // not take a click. gpui builds the tooltip's hitbox from the tooltip
+        // alone, so this keeps working with every listener below removed.
+        .tooltip(tooltip_label(tip))
         .when(enabled, |button| {
             button
                 .cursor_pointer()
@@ -3507,6 +3754,115 @@ mod tests {
         // The failure is what is on screen, so an expiry belonging to the
         // message before it has to be refused rather than clear the line.
         assert!(matches!(state.notice, Some(Notice::Error(_))));
+    }
+
+    /// A name the row has room for must not be explained, or every listing
+    /// would sprout tooltips nobody asked for.
+    #[test]
+    fn a_short_name_needs_no_tooltip() {
+        assert!(!name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            "notes.txt",
+            false,
+            None
+        ));
+        assert!(!name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            "notes.txt",
+            true,
+            Some("1.5 MB")
+        ));
+        // The narrowest the panel goes still holds an ordinary name.
+        assert!(!name_is_clipped(MIN_PANEL_WIDTH, "app.log", false, None));
+    }
+
+    /// The case the tooltip exists for: a name the row has to cut.
+    #[test]
+    fn a_name_too_long_for_the_row_is_explained() {
+        let long = "2026-07-30T12-00-00-application-server.log";
+        assert!(name_is_clipped(DEFAULT_PANEL_WIDTH, long, false, None));
+        assert!(name_is_clipped(MIN_PANEL_WIDTH, long, false, None));
+        // Even at its widest the panel is a sidebar, not a window.
+        assert!(name_is_clipped(
+            MAX_PANEL_WIDTH,
+            &"x".repeat(200),
+            false,
+            None
+        ));
+    }
+
+    /// The budget either side of the cut. Named columns rather than characters
+    /// because that is what the estimate counts.
+    #[test]
+    fn the_tooltip_appears_one_column_past_the_budget() {
+        // 260 − 2 border − 16 padding − 14 icon − 6 gap = 222px ÷ 7 = 31.
+        let budget = 31;
+        assert!(!name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            &"a".repeat(budget),
+            false,
+            None
+        ));
+        assert!(name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            &"a".repeat(budget + 1),
+            false,
+            None
+        ));
+    }
+
+    /// A Hangul name takes two columns per character, so counting `chars` would
+    /// let it run to twice the width before anyone called it long — which is
+    /// exactly the name most likely to be cut off.
+    #[test]
+    fn a_wide_name_is_measured_in_columns_not_characters() {
+        let hangul = "가".repeat(16);
+        let latin = "a".repeat(16);
+        assert_eq!(hangul.chars().count(), latin.chars().count());
+
+        assert!(name_is_clipped(DEFAULT_PANEL_WIDTH, &hangul, false, None));
+        assert!(!name_is_clipped(DEFAULT_PANEL_WIDTH, &latin, false, None));
+    }
+
+    /// Everything drawn beside the name takes room from it, so the same name
+    /// can fit on a directory row and not on a symlinked file's.
+    #[test]
+    fn the_badge_and_the_size_column_shrink_the_budget() {
+        let name = "a".repeat(26);
+
+        // A directory: no size column, no badge, so the name has the row.
+        assert!(!name_is_clipped(DEFAULT_PANEL_WIDTH, &name, false, None));
+        // The same name on a file, once the size column is beside it.
+        assert!(name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            &name,
+            false,
+            Some("1.5 MB")
+        ));
+
+        // And the badge takes a little more still: a name that survives the
+        // size column alone can lose to the two together.
+        let borderline = "a".repeat(23);
+        assert!(!name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            &borderline,
+            false,
+            Some("1.5 MB")
+        ));
+        assert!(name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            &borderline,
+            true,
+            Some("1.5 MB")
+        ));
+    }
+
+    /// A width that leaves no room at all must not divide its way to "it fits".
+    #[test]
+    fn a_row_with_no_room_clips_anything_but_an_empty_name() {
+        assert!(name_is_clipped(0., "a", false, None));
+        assert!(!name_is_clipped(0., "", false, None));
+        assert!(name_is_clipped(f32::NAN, "a", false, None));
     }
 
     /// The rule that keeps a delete inside the directory it was asked about.

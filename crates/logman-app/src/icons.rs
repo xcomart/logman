@@ -47,11 +47,72 @@ pub const UPLOAD_FOLDER: &str = "icons/upload-folder.svg";
 /// The file panel button that saves the selected remote file locally.
 pub const DOWNLOAD: &str = "icons/download.svg";
 
+/// The file panel button that creates a directory in the listed one.
+///
+/// The same folder outline [`UPLOAD_FOLDER`] draws, carrying a plus where that
+/// one carries an arrow: the two sit side by side in the toolbar, and reading
+/// them as a pair is what says one adds a folder while the other sends one.
+pub const NEW_FOLDER: &str = "icons/new-folder.svg";
+
+/// The file panel button that renames the one selected entry.
+pub const RENAME: &str = "icons/rename.svg";
+
+/// The file panel button that deletes the selection.
+pub const DELETE: &str = "icons/delete.svg";
+
 /// The toolbar button that shows and hides the remote file panel.
 pub const PANEL: &str = "icons/panel.svg";
 
+/// The button at the end of the tab strip that lists every open tab.
+///
+/// A plain chevron rather than a stack of lines: the strip's other end already
+/// carries the application menu's `☰`, and two list-shaped glyphs facing each
+/// other across one toolbar would read as the same control twice. A chevron
+/// says "this opens downwards", which is the one thing the button does.
+pub const TAB_LIST: &str = "icons/tab-list.svg";
+
+/// The custom title bar's minimise button.
+///
+/// The four window-control glyphs are drawn edge to edge of the 24×24 box
+/// rather than inset like the rest of the set: they are painted at half the
+/// size of a toolbar icon, and a glyph that kept the usual margin would come
+/// out thinner and smaller than the caption buttons of the platform they stand
+/// in for.
+pub const WINDOW_MINIMIZE: &str = "icons/window-minimize.svg";
+
+/// The custom title bar's maximise button, while the window is not maximised.
+pub const WINDOW_MAXIMIZE: &str = "icons/window-maximize.svg";
+
+/// The custom title bar's maximise button, while the window *is* maximised.
+///
+/// Two offset squares, the shape every desktop uses for "put it back": the
+/// button keeps its place and only the glyph says which way it will go.
+pub const WINDOW_RESTORE: &str = "icons/window-restore.svg";
+
+/// The custom title bar's close button.
+pub const WINDOW_CLOSE: &str = "icons/window-close.svg";
+
+/// The application icon, drawn at the left end of the custom title bar.
+///
+/// The one raster asset in the set, and the reason it is served beside
+/// [`ICONS`] rather than from it: the whole point of this image is its colour,
+/// so it is painted with [`img`](gpui::img) instead of [`svg`](gpui::svg) —
+/// which would keep only its alpha and hand back a monochrome blob — and the
+/// invariants the array is checked against (an SVG, on a 24×24 viewBox) are
+/// ones a PNG cannot hold. It sits outside the `icons/` prefix too, so listing
+/// the icon set still answers with icons alone.
+pub const APP_ICON: &str = "app-icon.png";
+
+/// The bytes [`Icons`] hands back for [`APP_ICON`].
+///
+/// The 128 px variant rather than the 16 px the title bar draws: the shipped
+/// icon files start there, and downscaling a larger source is what keeps the
+/// mark crisp on a HiDPI display, where those 16 logical pixels are 32 real
+/// ones or more.
+const APP_ICON_BYTES: &[u8] = include_bytes!("../../../assets/icon-128.png");
+
 /// Every icon, paired with the bytes [`Icons`] hands back for it.
-const ICONS: [(&str, &[u8]); 8] = [
+const ICONS: [(&str, &[u8]); 16] = [
     (FOLDER, include_bytes!("../assets/icons/folder.svg")),
     (FILE, include_bytes!("../assets/icons/file.svg")),
     (SYMLINK, include_bytes!("../assets/icons/symlink.svg")),
@@ -62,7 +123,27 @@ const ICONS: [(&str, &[u8]); 8] = [
         include_bytes!("../assets/icons/upload-folder.svg"),
     ),
     (DOWNLOAD, include_bytes!("../assets/icons/download.svg")),
+    (NEW_FOLDER, include_bytes!("../assets/icons/new-folder.svg")),
+    (RENAME, include_bytes!("../assets/icons/rename.svg")),
+    (DELETE, include_bytes!("../assets/icons/delete.svg")),
     (PANEL, include_bytes!("../assets/icons/panel.svg")),
+    (TAB_LIST, include_bytes!("../assets/icons/tab-list.svg")),
+    (
+        WINDOW_MINIMIZE,
+        include_bytes!("../assets/icons/window-minimize.svg"),
+    ),
+    (
+        WINDOW_MAXIMIZE,
+        include_bytes!("../assets/icons/window-maximize.svg"),
+    ),
+    (
+        WINDOW_RESTORE,
+        include_bytes!("../assets/icons/window-restore.svg"),
+    ),
+    (
+        WINDOW_CLOSE,
+        include_bytes!("../assets/icons/window-close.svg"),
+    ),
 ];
 
 /// The asset source backing every [`svg`](gpui::svg) element in the app.
@@ -74,6 +155,9 @@ pub struct Icons;
 
 impl AssetSource for Icons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == APP_ICON {
+            return Ok(Some(Cow::Borrowed(APP_ICON_BYTES)));
+        }
         Ok(ICONS
             .iter()
             .find(|(name, _)| *name == path)
@@ -83,8 +167,10 @@ impl AssetSource for Icons {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         Ok(ICONS
             .iter()
-            .filter(|(name, _)| name.starts_with(path))
-            .map(|(name, _)| SharedString::from(*name))
+            .map(|(name, _)| *name)
+            .chain(std::iter::once(APP_ICON))
+            .filter(|name| name.starts_with(path))
+            .map(SharedString::from)
             .collect())
     }
 }
@@ -115,6 +201,19 @@ mod tests {
                 "{name} is not 24x24"
             );
         }
+    }
+
+    #[test]
+    fn the_app_icon_loads_and_is_a_png() {
+        let bytes = Icons
+            .load(APP_ICON)
+            .expect("loading an embedded icon cannot fail")
+            .expect("the app icon is missing from the asset source");
+        assert_eq!(
+            &bytes[..8],
+            b"\x89PNG\r\n\x1a\n",
+            "the app icon is not a PNG"
+        );
     }
 
     #[test]

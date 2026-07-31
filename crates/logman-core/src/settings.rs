@@ -79,6 +79,21 @@ pub enum UiTheme {
     Light,
 }
 
+/// Who draws the window's title bar.
+///
+/// Read once, when the window is created: the platforms decide at that point
+/// whether the window has a caption at all, so a change only shows after a
+/// restart. The UI is expected to say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TitlebarStyle {
+    /// logman draws it: the toolbar doubles as the title bar. The default.
+    #[default]
+    Custom,
+    /// The operating system draws its own caption above the app's chrome.
+    System,
+}
+
 /// Window background treatment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -87,6 +102,8 @@ pub struct WindowSettings {
     pub background_opacity: f32,
     /// Acrylic/blur behind the window when the platform supports it.
     pub background_blur: bool,
+    /// Who draws the title bar. Only read when a window is created.
+    pub titlebar: TitlebarStyle,
 }
 
 impl Default for WindowSettings {
@@ -94,6 +111,7 @@ impl Default for WindowSettings {
         Self {
             background_opacity: MAX_BACKGROUND_OPACITY,
             background_blur: false,
+            titlebar: TitlebarStyle::default(),
         }
     }
 }
@@ -380,6 +398,7 @@ mod tests {
         assert_eq!(settings.ui_theme, UiTheme::Dark);
         assert_eq!(settings.window.background_opacity, 1.0);
         assert!(!settings.window.background_blur);
+        assert_eq!(settings.window.titlebar, TitlebarStyle::Custom);
         assert_eq!(settings.terminal.scheme, "one-dark");
         assert_eq!(settings.terminal.font_family, None);
         assert_eq!(settings.terminal.font_size, 14.0);
@@ -405,6 +424,31 @@ mod tests {
     }
 
     #[test]
+    fn titlebar_style_serializes_in_snake_case() {
+        assert_eq!(
+            serde_json::to_value(TitlebarStyle::System).unwrap(),
+            serde_json::json!("system")
+        );
+        assert_eq!(
+            serde_json::from_str::<TitlebarStyle>("\"custom\"").unwrap(),
+            TitlebarStyle::Custom
+        );
+    }
+
+    #[test]
+    fn a_window_section_without_a_titlebar_key_keeps_the_default() {
+        // Settings files written before the key existed have to keep opening,
+        // and the custom title bar is what they get.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        fs::write(&path, br#"{"window": {"background_blur": true}}"#).expect("write");
+
+        let settings = AppSettings::load_from(&path).expect("load");
+        assert!(settings.window.background_blur);
+        assert_eq!(settings.window.titlebar, TitlebarStyle::Custom);
+    }
+
+    #[test]
     fn save_to_load_from_round_trip() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("cfg").join("settings.json");
@@ -415,6 +459,7 @@ mod tests {
             window: WindowSettings {
                 background_opacity: 0.8,
                 background_blur: true,
+                titlebar: TitlebarStyle::System,
             },
             terminal: TerminalSettings {
                 scheme: "solarized".to_string(),

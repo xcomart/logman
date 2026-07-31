@@ -23,6 +23,14 @@ winresource = "0.1"
 windows = { version = "0.61", features = ["Win32_Graphics_Dwm"] }
 raw-window-handle = "0.6"
 
+# Used only by `src/caption.rs`, to pin the AppKit title bar to the app theme.
+# `objc` matches the 0.2 gpui already links on macOS, so the Objective-C runtime
+# shim is shared rather than duplicated; `raw-window-handle` is how gpui hands
+# out the `NSView`.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+raw-window-handle = "0.6"
+
 [dependencies]
 logman-core.workspace = true
 logman-ssh.workspace = true
@@ -41,6 +49,10 @@ serde_json.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true
 unicode-segmentation.workspace = true
+# Only for the file panel's "is this name too long to fit?" estimate. A CJK name
+# takes twice the width of a Latin one at the same character count, so counting
+# characters alone would miss exactly the names most likely to be cut off.
+unicode-width.workspace = true
 futures.workspace = true
 gpui.workspace = true
 rust-i18n.workspace = true
@@ -50,3 +62,8 @@ sys-locale.workspace = true
 # The file panel's upload planner walks a real tree, symlinks included, so the
 # test builds one rather than mocking the filesystem out.
 tempfile.workspace = true
+# gpui's headless test platform, for the widget behaviour that only exists once
+# an element tree is laid out and hit-tested -- hover-revealed controls, and
+# which of two stacked hitboxes answers a press. Test-only: the binary links
+# gpui without it.
+gpui = { workspace = true, features = ["test-support"] }

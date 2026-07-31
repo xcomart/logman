@@ -19,6 +19,7 @@ menu:
   about: О программе logman
   quit: Выход
   session: Сеанс
+  tip_menu: Меню
   mac:
     new_session: Новый сеанс
     close_session: Закрыть сеанс
@@ -33,10 +34,13 @@ tab:
   duplicate_right: Разделить справа с новым подключением
   duplicate_below: Разделить снизу с новым подключением
   close: Закрыть вкладку
+  tip_list: Все вкладки
+  tip_new: "Новый сеанс (%{shortcut})"
 
 files:
   title: Удалённые файлы
   toggle: Удалённые файлы
+  tip_toggle: "Удалённые файлы (%{shortcut})"
   mac:
     toggle: Удалённые файлы
   no_session: Нет открытых сеансов.
@@ -53,6 +57,13 @@ files:
   menu_upload: Загрузить файлы…
   menu_upload_folder: Загрузить папку…
   menu_refresh: Обновить
+  tip_refresh: Обновить
+  tip_new_folder: Новая папка
+  tip_upload: Загрузить файлы
+  tip_upload_folder: Загрузить папку
+  tip_download: Скачать
+  tip_rename: Переименовать
+  tip_delete: Удалить
   uploading: "Загрузка %{name}… %{percent} %"
   downloading: "Скачивание %{name}… %{percent} %"
   deleting: "Удаление %{name}… %{percent} %"
@@ -97,6 +108,9 @@ settings:
   ui_theme: Тема интерфейса
   theme_dark: Тёмная
   theme_light: Светлая
+  titlebar: Заголовок окна
+  titlebar_custom: Пользовательский
+  titlebar_system: Системный
   language: Язык
   opacity: Непрозрачность
   opacity_hint: "% (50–100)"

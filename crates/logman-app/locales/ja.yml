@@ -19,6 +19,7 @@ menu:
   about: logman について
   quit: 終了
   session: セッション
+  tip_menu: メニュー
   mac:
     new_session: 新規セッション
     close_session: セッションを閉じる
@@ -33,10 +34,13 @@ tab:
   duplicate_right: 新しい接続で右に分割
   duplicate_below: 新しい接続で下に分割
   close: タブを閉じる
+  tip_list: すべてのタブ
+  tip_new: "新規セッション (%{shortcut})"
 
 files:
   title: リモートファイル
   toggle: リモートファイルパネル
+  tip_toggle: "リモートファイル (%{shortcut})"
   mac:
     toggle: リモートファイルパネル
   no_session: 開いているセッションがありません。
@@ -53,6 +57,13 @@ files:
   menu_upload: ファイルをアップロード…
   menu_upload_folder: フォルダーをアップロード…
   menu_refresh: 再読み込み
+  tip_refresh: 再読み込み
+  tip_new_folder: 新規フォルダー
+  tip_upload: ファイルをアップロード
+  tip_upload_folder: フォルダーをアップロード
+  tip_download: ダウンロード
+  tip_rename: 名前を変更
+  tip_delete: 削除
   uploading: "%{name} をアップロード中… %{percent}%"
   downloading: "%{name} をダウンロード中… %{percent}%"
   deleting: "%{name} を削除中… %{percent}%"
@@ -97,6 +108,9 @@ settings:
   ui_theme: UI テーマ
   theme_dark: ダーク
   theme_light: ライト
+  titlebar: タイトルバー
+  titlebar_custom: カスタム
+  titlebar_system: システム
   language: 言語
   opacity: 不透明度
   opacity_hint: "% (50–100)"

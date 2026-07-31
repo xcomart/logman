@@ -18,7 +18,8 @@ A multi-platform GUI SSH terminal written in Rust, built on
 </details>
 
 - **Multiple sessions** in one window, as tabs, each with its own connection and
-  scrollback.
+  scrollback — and the tab strip doubles as the window's title bar, VS Code
+  style, with the system caption one setting away for those who prefer it.
 - **Split panes**: split a pane into a second connection to the same host with
   one shortcut, or pull an open tab in beside another, and work in both sessions
   at once, dragging the divider to give either as much room as it needs; a pane
@@ -54,18 +55,25 @@ tooling. Do not re-enable russh's default features.
 
 ### gpui is vendored and patched
 
-`vendor/gpui` is gpui 0.2.2 with a three-line fix, wired in through
-`[patch.crates-io]`. Upstream's Windows message pump calls
-`DispatchMessageW` without `TranslateMessage` and compensates by calling
-`TranslateMessage` re-entrantly from inside the window procedure. TSF correlates
-translated keys against the message queue, so ending a Korean composition with
-the Han/Yeong key leaves CTF regenerating `WM_IME_COMPOSITION` forever and the
-process pinned at 100% CPU.
+`vendor/gpui` is gpui 0.2.2 with a small set of local patches, wired in through
+`[patch.crates-io]`:
+
+- **Windows IME fix.** Upstream's message pump calls `DispatchMessageW` without
+  `TranslateMessage` and compensates by calling `TranslateMessage` re-entrantly
+  from inside the window procedure. TSF correlates translated keys against the
+  message queue, so ending a Korean composition with the Han/Yeong key leaves
+  CTF regenerating `WM_IME_COMPOSITION` forever and the process pinned at 100%
+  CPU.
+- **`Window::set_titlebar_transparent`.** Upstream only decides at window
+  creation whether the platform caption exists; this API flips it on a live
+  window, which is what lets the title bar setting apply without a restart.
+- Smaller fixes: window background blur on macOS Tahoe, and explicit `f32`
+  suffixes in `taffy.rs` float literals.
 
 The vendored source is otherwise identical to the published crate, so
-`diff -r` against the registry copy shows exactly the patched files. Drop
-`vendor/gpui`, the `[patch.crates-io]` entry and the `exclude` line once a
-released gpui carries the fix — nothing under `crates/` depends on the patch.
+`diff -r` against the registry copy shows exactly the patched files. Retiring
+the vendor needs a released gpui that carries the IME fix and a public way to
+retheme the caption at runtime; until then the patches ride along here.
 
 ### Release builds on Windows need `fxc.exe`
 
@@ -135,9 +143,12 @@ is shown by default.
   directories beside that one, and choosing a row goes there. A path too long
   for the panel's current width folds its front into a `…` piece which lists
   what it hid.
-- **⟳** lists the directory again, **↑** uploads local files into it, the folder
-  button beside it uploads a whole folder, and **↓** saves the selection —
-  a file, several files, or an entire directory — locally.
+- **The toolbar** runs from the commands that need no selection to the ones that
+  do: **⟳** lists the directory again, the folder-plus button creates one in it,
+  **↑** uploads local files and the folder button beside it a whole folder,
+  **↓** saves the selection — a file, several files, or an entire directory —
+  locally, and the pencil and bin at the end rename and delete it. A button
+  whose command does not apply to the current selection is dimmed.
 - **Several rows can be selected at once**: <kbd>Ctrl</kbd>-click
   (<kbd>Cmd</kbd>-click on macOS) adds or removes one, <kbd>Shift</kbd>-click
   takes everything between it and the last row clicked.
@@ -221,7 +232,9 @@ keychain the application still runs; it just asks for the secret every time.
 
 <kbd>Ctrl</kbd>+<kbd>,</kbd> (<kbd>Cmd</kbd>+<kbd>,</kbd> on macOS) opens the
 settings dialog: interface language (eight are built in; the default follows
-the system locale), UI theme, terminal color scheme (One Dark, One Light,
+the system locale), UI theme, title bar style — logman's own tab-strip title
+bar or the system caption, swapped on the open window as soon as the change is
+saved — terminal color scheme (One Dark, One Light,
 Solarized Dark/Light, Gruvbox Dark, Dracula — each shown with a live
 preview), font family — picked from the fonts installed on the machine — and
 size, scrollback depth, `TERM`, copy-on-select, window background opacity and

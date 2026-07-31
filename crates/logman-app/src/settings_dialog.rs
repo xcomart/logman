@@ -10,18 +10,43 @@
 use std::sync::Once;
 
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyBinding,
-    KeyDownEvent, Render, ScrollHandle, SharedString, Window, actions, div, prelude::*, px, rgb,
+    App, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
+    KeyBinding, KeyDownEvent, MouseButton, MouseUpEvent, Render, ScrollHandle, SharedString,
+    Window, actions, div, prelude::*, px, rgb,
 };
-use logman_core::{AppSettings, UiTheme};
+use logman_core::{AppSettings, TitlebarStyle, UiTheme};
 use logman_term::TerminalTheme;
 
 use crate::app_settings;
 use crate::i18n::{self, ts};
 use crate::ui::{
-    Button, ButtonVariant, Checkbox, SchemePicker, SchemePreview, SchemeSwatch, Segmented, Select,
-    TextInput, Theme, form_row, modal, theme,
+    Button, ButtonVariant, Checkbox, DraggedThumb, SchemePicker, SchemePreview, SchemeSwatch,
+    Scrollbar, ScrollbarAxis, ScrollbarState, Segmented, Select, TextInput, Theme, form_row,
+    hide_later, modal, scroll_to, scrolled, theme,
 };
+
+/// The dialog's three scrolling surfaces, and the element id of each one's
+/// overlay scroll indicator.
+///
+/// One drag listener answers all three, so it has to be able to say which bar a
+/// drag belongs to; these ids are how, and pairing each with the handle and the
+/// state it goes with keeps the three from being wired up crosswise.
+const SCROLLBARS: [(&str, Surface); 3] = [
+    ("settings-body-scrollbar", Surface::Body),
+    ("settings-font-scrollbar", Surface::Font),
+    ("settings-language-scrollbar", Surface::Language),
+];
+
+/// Which of the dialog's scrolling surfaces is meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    /// The dialog body, which scrolls behind the footer.
+    Body,
+    /// The open font list.
+    Font,
+    /// The open language list.
+    Language,
+}
 
 /// Width of the dialog panel.
 const DIALOG_WIDTH: f32 = 760.;
@@ -45,6 +70,16 @@ fn ui_theme_options() -> [(&'static str, SharedString); 2] {
     [
         ("dark", ts!("settings.theme_dark")),
         ("light", ts!("settings.theme_light")),
+    ]
+}
+
+/// Segments of the title bar style picker, in [`TitlebarStyle`] order.
+///
+/// Built per call for the same reason [`ui_theme_options`] is.
+fn titlebar_options() -> [(&'static str, SharedString); 2] {
+    [
+        ("custom", ts!("settings.titlebar_custom")),
+        ("system", ts!("settings.titlebar_system")),
     ]
 }
 
@@ -80,36 +115,38 @@ actions!(
 mod tab {
     /// UI theme picker.
     pub const UI_THEME: isize = 10;
+    /// Title bar style picker.
+    pub const TITLEBAR: isize = 15;
     /// Interface language picker.
-    pub const LANGUAGE: isize = 15;
+    pub const LANGUAGE: isize = 20;
     /// Background opacity, in percent.
-    pub const OPACITY: isize = 20;
+    pub const OPACITY: isize = 30;
     /// Background blur toggle.
-    pub const BLUR: isize = 30;
+    pub const BLUR: isize = 40;
     /// Terminal color scheme grid.
-    pub const SCHEME: isize = 40;
+    pub const SCHEME: isize = 50;
     /// Terminal font family.
-    pub const FONT_FAMILY: isize = 50;
+    pub const FONT_FAMILY: isize = 60;
     /// Terminal font size.
-    pub const FONT_SIZE: isize = 60;
+    pub const FONT_SIZE: isize = 70;
     /// Scrollback depth.
-    pub const SCROLLBACK: isize = 70;
+    pub const SCROLLBACK: isize = 80;
     /// `TERM` advertised to the remote host.
-    pub const TERM: isize = 80;
+    pub const TERM: isize = 90;
     /// Copy-on-select toggle.
-    pub const COPY_ON_SELECT: isize = 90;
+    pub const COPY_ON_SELECT: isize = 100;
     /// Default SSH port for new connections.
-    pub const DEFAULT_PORT: isize = 100;
+    pub const DEFAULT_PORT: isize = 110;
     /// Default login name for new connections.
-    pub const DEFAULT_USERNAME: isize = 110;
+    pub const DEFAULT_USERNAME: isize = 120;
     /// Keepalive interval.
-    pub const KEEPALIVE: isize = 120;
+    pub const KEEPALIVE: isize = 130;
     /// Connect timeout.
-    pub const TIMEOUT: isize = 130;
+    pub const TIMEOUT: isize = 140;
     /// Cancel.
-    pub const CANCEL: isize = 140;
+    pub const CANCEL: isize = 150;
     /// Save.
-    pub const SAVE: isize = 150;
+    pub const SAVE: isize = 160;
 }
 
 /// Emitted by [`SettingsDialog`] when the user acts on it.
@@ -198,6 +235,8 @@ pub struct SettingsDialog {
     base: AppSettings,
     /// UI chrome theme currently selected in the form.
     ui_theme: UiTheme,
+    /// Title bar style currently selected in the form.
+    titlebar: TitlebarStyle,
     /// BCP 47 tag of the interface language; `None` follows the system locale.
     /// Holds the tag rather than the label, because the label is what the
     /// dropdown shows and the tag is what gets persisted.
@@ -217,6 +256,12 @@ pub struct SettingsDialog {
     /// Scroll position of the form body, so `Tab` can reveal the section it
     /// just moved into.
     body_scroll: ScrollHandle,
+    /// Whether the body's overlay scroll indicator is on screen.
+    body_scrollbar: ScrollbarState,
+    /// Whether the font list's overlay scroll indicator is on screen.
+    font_scrollbar: ScrollbarState,
+    /// Whether the language list's overlay scroll indicator is on screen.
+    language_scrollbar: ScrollbarState,
     /// Index of the section currently scrolled into view. Kept so that tabbing
     /// between two controls of the same section does not re-scroll it.
     visible_section: usize,
@@ -313,6 +358,7 @@ impl SettingsDialog {
         Self {
             open: false,
             ui_theme: base.ui_theme,
+            titlebar: base.window.titlebar,
             language: base.language.clone(),
             background_blur: base.window.background_blur,
             scheme: base.terminal.scheme.clone().into(),
@@ -323,6 +369,9 @@ impl SettingsDialog {
             focus_handle: cx.focus_handle(),
             pending_focus: false,
             body_scroll: ScrollHandle::new(),
+            body_scrollbar: ScrollbarState::new(),
+            font_scrollbar: ScrollbarState::new(),
+            language_scrollbar: ScrollbarState::new(),
             visible_section: 0,
             open_list: None,
             fonts: Vec::new(),
@@ -336,6 +385,67 @@ impl SettingsDialog {
             username_input,
             keepalive_input,
             timeout_input,
+        }
+    }
+
+    /// The handle and bar state of one scrolling surface.
+    fn surface(&mut self, surface: Surface) -> (&ScrollHandle, &mut ScrollbarState) {
+        match surface {
+            Surface::Body => (&self.body_scroll, &mut self.body_scrollbar),
+            Surface::Font => (&self.font_scroll, &mut self.font_scrollbar),
+            Surface::Language => (&self.language_scroll, &mut self.language_scrollbar),
+        }
+    }
+
+    /// The same pair, for the renders that only read them.
+    fn surface_ref(&self, surface: Surface) -> (&ScrollHandle, &ScrollbarState) {
+        match surface {
+            Surface::Body => (&self.body_scroll, &self.body_scrollbar),
+            Surface::Font => (&self.font_scroll, &self.font_scrollbar),
+            Surface::Language => (&self.language_scroll, &self.language_scrollbar),
+        }
+    }
+
+    /// The overlay scroll indicator of one surface, as it stands.
+    fn scrollbar(&self, id: &'static str, surface: Surface) -> Scrollbar {
+        let (handle, state) = self.surface_ref(surface);
+        Scrollbar::for_handle(id, ScrollbarAxis::Vertical, handle).fade(state.fade())
+    }
+
+    /// Puts each surface's bar up whenever it has been scrolled, and starts the
+    /// clock that takes it down again.
+    fn watch_scroll(&mut self, cx: &mut Context<Self>) {
+        for (_, surface) in SCROLLBARS {
+            let (handle, state) = self.surface(surface);
+            let scrolled = scrolled(handle, ScrollbarAxis::Vertical);
+            if let Some(epoch) = state.moved(scrolled) {
+                hide_later(epoch, cx, move |dialog| Some(dialog.surface(surface).1));
+            }
+        }
+    }
+
+    /// Scrolls whichever surface's thumb has been dragged.
+    fn drag_scrollbar(&mut self, event: &DragMoveEvent<DraggedThumb>, cx: &mut Context<Self>) {
+        for (id, surface) in SCROLLBARS {
+            let Some(progress) = self.scrollbar(id, surface).dragged(event, cx) else {
+                continue;
+            };
+
+            let (handle, state) = self.surface(surface);
+            state.hold();
+            scroll_to(handle, ScrollbarAxis::Vertical, progress);
+            cx.notify();
+            return;
+        }
+    }
+
+    /// Lets go of whichever thumb was being held, and starts its clock again.
+    fn release_scrollbars(&mut self, cx: &mut Context<Self>) {
+        for (_, surface) in SCROLLBARS {
+            if let Some(epoch) = self.surface(surface).1.release() {
+                hide_later(epoch, cx, move |dialog| Some(dialog.surface(surface).1));
+                cx.notify();
+            }
         }
     }
 
@@ -384,6 +494,7 @@ impl SettingsDialog {
     /// Copy `settings` into every control.
     fn fill_form(&mut self, settings: &AppSettings, cx: &mut Context<Self>) {
         self.ui_theme = settings.ui_theme;
+        self.titlebar = settings.window.titlebar;
         self.language = settings.language.clone();
         self.background_blur = settings.window.background_blur;
         self.scheme = settings.terminal.scheme.clone().into();
@@ -444,6 +555,7 @@ impl SettingsDialog {
 
         settings.ui_theme = self.ui_theme;
         settings.language = self.language.clone();
+        settings.window.titlebar = self.titlebar;
         settings.window.background_blur = self.background_blur;
         if let Some(percent) = parse_number::<f32>(&self.opacity_input, cx) {
             settings.window.background_opacity = percent / 100.0;
@@ -642,6 +754,7 @@ impl SettingsDialog {
     /// The "Appearance" section.
     fn render_appearance(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let this = cx.entity();
+        let language_bar = self.scrollbar(SCROLLBARS[2].0, Surface::Language);
         let selected = match self.ui_theme {
             UiTheme::Dark => 0,
             UiTheme::Light => 1,
@@ -665,6 +778,27 @@ impl SettingsDialog {
                 }
             });
 
+        let titlebar_picker = Segmented::new("settings-titlebar")
+            .options(titlebar_options())
+            .selected(match self.titlebar {
+                TitlebarStyle::Custom => 0,
+                TitlebarStyle::System => 1,
+            })
+            .tab_index(tab::TITLEBAR)
+            .on_select({
+                let this = this.clone();
+                move |index, _window, cx| {
+                    this.update(cx, |dialog, cx| {
+                        dialog.titlebar = if index == 1 {
+                            TitlebarStyle::System
+                        } else {
+                            TitlebarStyle::Custom
+                        };
+                        cx.notify();
+                    });
+                }
+            });
+
         let language = Select::new("settings-language")
             .options(Self::language_options())
             .selected(self.language.as_deref().and_then(i18n::display_name))
@@ -672,6 +806,7 @@ impl SettingsDialog {
             .open(self.open_list == Some(OpenList::Language))
             .tab_index(tab::LANGUAGE)
             .scroll_handle(self.language_scroll.clone())
+            .scrollbar(language_bar)
             .on_select({
                 let this = this.clone();
                 // By index, not by label: row 0 is "follow the system" and the
@@ -718,6 +853,7 @@ impl SettingsDialog {
                 .flex_col()
                 .gap(px(10.))
                 .child(form_row(ts!("settings.ui_theme"), theme_picker))
+                .child(form_row(ts!("settings.titlebar"), titlebar_picker))
                 .child(form_row(ts!("settings.language"), language))
                 .child(form_row(
                     ts!("settings.opacity"),
@@ -729,6 +865,7 @@ impl SettingsDialog {
 
     /// The "Terminal" section.
     fn render_terminal(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let font_bar = self.scrollbar(SCROLLBARS[1].0, Surface::Font);
         let this = cx.entity();
 
         let picker = SchemePicker::new("settings-scheme")
@@ -754,6 +891,7 @@ impl SettingsDialog {
             .open(self.open_list == Some(OpenList::Font))
             .tab_index(tab::FONT_FAMILY)
             .scroll_handle(self.font_scroll.clone())
+            .scrollbar(font_bar)
             .on_select({
                 let this = this.clone();
                 // Row 0 is the "leave it to the OS" entry; comparing its label
@@ -914,6 +1052,9 @@ impl Render for SettingsDialog {
         }
 
         self.apply_pending_focus(window, cx);
+        self.watch_scroll(cx);
+        let theme = theme(cx);
+        let body_bar = self.scrollbar(SCROLLBARS[0].0, Surface::Body);
 
         // The `min_h_0` chain lets the scroll area shrink below its cap when
         // the modal hits the window height, keeping the footer on screen.
@@ -923,18 +1064,29 @@ impl Render for SettingsDialog {
             .min_h_0()
             .gap(px(12.))
             .child(
+                // The middle box exists only to hold the overlay bar: a
+                // scrolling box cannot, because its children are what scroll
+                // away underneath it.
                 div()
-                    .id("settings-body")
-                    .track_scroll(&self.body_scroll)
+                    .relative()
                     .flex()
                     .flex_col()
                     .min_h_0()
-                    .gap(px(14.))
-                    .max_h(px(BODY_MAX_HEIGHT))
-                    .overflow_y_scroll()
-                    .child(self.render_appearance(cx))
-                    .child(self.render_terminal(cx))
-                    .child(self.render_connection(cx)),
+                    .child(
+                        div()
+                            .id("settings-body")
+                            .track_scroll(&self.body_scroll)
+                            .flex()
+                            .flex_col()
+                            .min_h_0()
+                            .gap(px(14.))
+                            .max_h(px(BODY_MAX_HEIGHT))
+                            .overflow_y_scroll()
+                            .child(self.render_appearance(cx))
+                            .child(self.render_terminal(cx))
+                            .child(self.render_connection(cx)),
+                    )
+                    .children(body_bar.render(&theme)),
             )
             .child(self.render_footer(cx));
 
@@ -957,6 +1109,28 @@ impl Render for SettingsDialog {
             .on_action(cx.listener(Self::focus_next))
             .on_action(cx.listener(Self::focus_prev))
             .on_key_down(cx.listener(Self::on_key_down))
+            // All three overlay bars are answered from here: gpui hands a drag
+            // move to every listener of that type wherever it sits, and this is
+            // the one element mounted for the whole of any of them — the open
+            // list a thumb belongs to is torn down the moment the pointer picks
+            // an option, and the body scrolls away under its own.
+            .on_drag_move::<DraggedThumb>(cx.listener(
+                |dialog, event: &DragMoveEvent<DraggedThumb>, _window, cx| {
+                    dialog.drag_scrollbar(event, cx);
+                },
+            ))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|dialog, _: &MouseUpEvent, _window, cx| {
+                    dialog.release_scrollbars(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|dialog, _: &MouseUpEvent, _window, cx| {
+                    dialog.release_scrollbars(cx);
+                }),
+            )
             .child(modal(
                 "settings-modal",
                 ts!("settings.title"),

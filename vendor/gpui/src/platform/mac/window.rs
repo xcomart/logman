@@ -1321,6 +1321,74 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    fn set_titlebar_transparent(
+        &self,
+        transparent: bool,
+        traffic_light_position: Option<Point<Pixels>>,
+    ) {
+        let mut this = self.0.as_ref().lock();
+        if this.transparent_titlebar == transparent
+            && this.traffic_light_position == traffic_light_position
+        {
+            return;
+        }
+        this.transparent_titlebar = transparent;
+        this.traffic_light_position = traffic_light_position;
+
+        // While fullscreen there is no title bar to restyle, and touching the
+        // style mask would fight AppKit over `NSFullScreenWindowMask`. Recording
+        // the state is enough: `window_will_exit_fullscreen` reads
+        // `transparent_titlebar` back when the window returns to its frame.
+        if this.is_fullscreen() {
+            return;
+        }
+
+        let state = self.0.clone();
+        let executor = this.executor.clone();
+        // Not inline, and not while the state is locked: dropping or adding
+        // `NSFullSizeContentViewWindowMask` resizes the content view there and
+        // then, so `set_frame_size` runs before `setStyleMask:` returns — it
+        // would deadlock on this very lock, and its resize callback would
+        // re-enter an app that is still borrowed by whatever asked for the
+        // switch.
+        drop(this);
+        executor
+            .spawn(async move {
+                let this = state.as_ref().lock();
+                let native_window = this.native_window;
+                drop(this);
+
+                unsafe {
+                    let mut style_mask = native_window.styleMask();
+                    style_mask.set(
+                        NSWindowStyleMask::NSFullSizeContentViewWindowMask,
+                        transparent,
+                    );
+                    native_window.setStyleMask_(style_mask);
+                    native_window.setTitlebarAppearsTransparent_(transparent as BOOL);
+                    native_window.setTitleVisibility_(if transparent {
+                        NSWindowTitleVisibility::NSWindowTitleHidden
+                    } else {
+                        NSWindowTitleVisibility::NSWindowTitleVisible
+                    });
+                }
+
+                // Going transparent, the buttons have to be pushed to wherever
+                // the app draws its own title bar; going back, the style mask
+                // change is what hands their layout back to AppKit — the frames
+                // set here were absolute positions, so there is nothing sane to
+                // restore them to by hand.
+                // NEEDS VERIFICATION ON A REAL MAC: whether AppKit really
+                // re-lays the traffic lights out on its own once the full-size
+                // content view mask is dropped, or whether they stay where
+                // `move_traffic_light` put them.
+                if transparent {
+                    state.as_ref().lock().move_traffic_light();
+                }
+            })
+            .detach();
+    }
+
     fn set_edited(&mut self, edited: bool) {
         unsafe {
             let window = self.0.lock().native_window;

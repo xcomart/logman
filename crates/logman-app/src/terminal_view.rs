@@ -32,24 +32,28 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font,
-    FontStyle, FontWeight, Global, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    KeyBinding, KeyDownEvent, Keystroke, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Size,
-    StrikethroughStyle, Style, Subscription, TextRun, UTF16Selection, UnderlineStyle, Window,
-    actions, black, div, fill, font, outline, point, prelude::*, px, relative, rgb, size,
+    AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DragMoveEvent,
+    Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, Font, FontStyle, FontWeight, Global, GlobalElementId, Hsla, InspectorElementId,
+    IntoElement, KeyBinding, KeyDownEvent, Keystroke, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine,
+    SharedString, Size, StrikethroughStyle, Style, Subscription, TextRun, UTF16Selection,
+    UnderlineStyle, Window, actions, black, div, fill, font, outline, point, prelude::*, px,
+    relative, rgb, size,
 };
 use logman_core::EffectiveTerminal;
 use logman_term::{
-    KeyCode, KeyInput, Rgb, RunFlags, StyledRun, TerminalLine, TerminalTheme, encode_key,
-    encode_paste,
+    KeyCode, KeyInput, Rgb, RunFlags, ScrollPosition, StyledRun, TerminalLine, TerminalTheme,
+    encode_key, encode_paste,
 };
 
 use crate::app_settings;
 use crate::i18n::ts;
 use crate::session::{Session, SessionStatus};
-use crate::ui::{Button, ButtonVariant, theme};
+use crate::ui::{
+    Button, ButtonVariant, DraggedThumb, Scrollbar, ScrollbarAxis, ScrollbarState, hide_later,
+    theme,
+};
 
 actions!(
     logman_terminal,
@@ -76,6 +80,12 @@ const LINE_HEIGHT_RATIO: f32 = 1.3;
 
 /// Padding between the terminal surface and its container.
 const SURFACE_PADDING: Pixels = px(6.);
+
+/// Element id of the scrollback's overlay scroll indicator.
+///
+/// Every pane has one, and each is its own element in its own subtree, so one
+/// name serves them all — a drag of one is answered by the view it belongs to.
+const SCROLLBAR: &str = "terminal-scrollbar";
 
 /// Glyph measured to derive the width of one cell.
 const SAMPLE_GLYPH: &str = "M";
@@ -286,6 +296,8 @@ pub struct TerminalView {
     preedit: Preedit,
     /// Geometry recorded by the last paint.
     geometry: Option<Geometry>,
+    /// Whether the scrollback's overlay scroll indicator is on screen.
+    scrollbar: ScrollbarState,
     /// Keeps the view repainting whenever the session changes.
     _observer: Subscription,
     /// Cancels a half-finished composition when the grid loses focus.
@@ -317,6 +329,7 @@ impl TerminalView {
             scroll_residual: 0.,
             preedit: Preedit::default(),
             geometry: None,
+            scrollbar: ScrollbarState::new(),
             _observer: observer,
             _blur: blur,
         }
@@ -442,6 +455,77 @@ impl TerminalView {
         });
     }
 
+    /// The scrollback's overlay scroll indicator, as it stands.
+    ///
+    /// Measured in lines rather than pixels: the scrollback has no gpui scroll
+    /// container behind it, only a viewport that the model slides up and down a
+    /// buffer of rows. A bar cares about ratios alone, so lines do as well as
+    /// anything — but the track is still the grid's own box, which is only
+    /// known once a frame has been painted.
+    fn scrollbar(&self, position: ScrollPosition) -> Option<Scrollbar> {
+        let bounds = self.geometry?.bounds;
+        Some(
+            Scrollbar::new(
+                SCROLLBAR,
+                ScrollbarAxis::Vertical,
+                bounds,
+                position.rows as f32,
+                position.history as f32,
+                (position.history - position.display_offset) as f32,
+            )
+            .fade(self.scrollbar.fade()),
+        )
+    }
+
+    /// Puts the bar up whenever the viewport has moved through the scrollback,
+    /// and starts the clock that takes it down again.
+    ///
+    /// Watched by the display offset rather than by the position the thumb is
+    /// drawn at, so that output arriving while the viewport sits at the bottom
+    /// — which grows the scrollback under a motionless viewport — does not
+    /// flash a bar on every line the remote host prints.
+    fn watch_scroll(&mut self, position: ScrollPosition, cx: &mut Context<Self>) {
+        if let Some(epoch) = self.scrollbar.moved(position.display_offset as f32) {
+            hide_later(epoch, cx, |view| Some(&mut view.scrollbar));
+        }
+    }
+
+    /// Scrolls the viewport to wherever the thumb has been dragged.
+    ///
+    /// Converted back to a line count and handed to the same
+    /// `scroll_lines` the wheel uses, so a drag lands on the same
+    /// whole lines a wheel does and is clamped by the same model.
+    fn drag_scrollbar(&mut self, event: &DragMoveEvent<DraggedThumb>, cx: &mut Context<Self>) {
+        let position = self.session.read(cx).terminal().scroll_position();
+        let Some(progress) = self
+            .scrollbar(position)
+            .and_then(|bar| bar.dragged(event, cx))
+        else {
+            return;
+        };
+
+        self.scrollbar.hold();
+        // The bar runs top to bottom and the offset counts up from the bottom,
+        // so the two run opposite ways.
+        let target = ((1. - progress) * position.history as f32).round() as isize;
+        let delta = target - position.display_offset as isize;
+        if delta != 0 {
+            self.session.update(cx, |session, cx| {
+                session.terminal_mut().scroll_lines(delta as i32);
+                cx.notify();
+            });
+        }
+        cx.notify();
+    }
+
+    /// Lets go of the thumb, and starts the clock on the bar again.
+    fn release_scrollbar(&mut self, cx: &mut Context<Self>) {
+        if let Some(epoch) = self.scrollbar.release() {
+            hide_later(epoch, cx, |view| Some(&mut view.scrollbar));
+            cx.notify();
+        }
+    }
+
     /// Focuses the grid and starts a selection drag.
     fn on_mouse_down(
         &mut self,
@@ -484,6 +568,7 @@ impl TerminalView {
     /// clipboard, it does not consume it.
     fn on_mouse_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.selecting = false;
+        self.release_scrollbar(cx);
         if self.session.read(cx).effective(cx).copy_on_select {
             self.write_selection_to_clipboard(cx);
         }
@@ -795,6 +880,11 @@ impl Render for TerminalView {
         // text and the cursor stay opaque; only this base fill carries the alpha.
         let background = app_settings::window_tint(background, cx);
         let overlay = self.render_overlay(&status, cx);
+        let position = self.session.read(cx).terminal().scroll_position();
+        self.watch_scroll(position, cx);
+        let scrollbar = self
+            .scrollbar(position)
+            .and_then(|bar| bar.render(&theme(cx)));
         let element = TerminalElement {
             view: cx.entity(),
             session: self.session.clone(),
@@ -817,7 +907,26 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .child(div().size_full().p(SURFACE_PADDING).child(element))
+            // Answered from the root because gpui hands a drag move to every
+            // listener of that type wherever it sits, and the root is what stays
+            // mounted while the thumb slides out from under the pointer.
+            .on_drag_move::<DraggedThumb>(cx.listener(
+                |view, event: &DragMoveEvent<DraggedThumb>, _window, cx| {
+                    view.drag_scrollbar(event, cx);
+                },
+            ))
+            .child(
+                div().size_full().p(SURFACE_PADDING).child(
+                    // A box of exactly the grid's own size, with no padding of
+                    // its own, so the bar drawn against it lines up with the
+                    // rows rather than with the surface around them.
+                    div()
+                        .relative()
+                        .size_full()
+                        .child(element)
+                        .children(scrollbar),
+                ),
+            )
             .children(overlay)
     }
 }

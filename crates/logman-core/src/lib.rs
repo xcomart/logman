@@ -38,5 +38,6 @@ pub use paths::{config_dir, config_file, known_hosts_file, settings_file};
 pub use profile::{AuthMethod, ProfileStore, SessionOverrides, SessionProfile};
 pub use secrets::{SecretStore, init as init_secrets};
 pub use settings::{
-    AppSettings, ConnectionSettings, EffectiveTerminal, TerminalSettings, UiTheme, WindowSettings,
+    AppSettings, ConnectionSettings, EffectiveTerminal, TerminalSettings, TitlebarStyle, UiTheme,
+    WindowSettings,
 };
