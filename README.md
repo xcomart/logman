@@ -24,8 +24,8 @@ A multi-platform GUI SSH terminal written in Rust, built on
   at once, dragging the divider to give either as much room as it needs; a pane
   closes itself when its connection ends.
 - **A remote files panel**: an SFTP browser beside the terminal that follows the
-  shell's working directory, with drag-and-drop upload and download and a
-  draggable edge.
+  shell's working directory, with drag-and-drop upload and download — whole
+  folders included, with a progress bar while they move — and a draggable edge.
 - **Password and private key authentication**, with secrets kept in the OS
   keychain rather than on disk.
 - **A real terminal**, not a log view: `alacritty_terminal` drives the emulation,
@@ -130,10 +130,22 @@ is shown by default.
 
 - Double-click a directory to enter it, or `..` to go up. Directories sort
   before files, ignoring case.
-- **⟳** lists the directory again, **↑** uploads local files into it, and **↓**
-  saves the selected file locally.
-- **Dropping files onto the panel uploads them** into the directory on screen.
-  Folders are skipped rather than copied recursively.
+- **⟳** lists the directory again, **↑** uploads local files into it, the folder
+  button beside it uploads a whole folder, and **↓** saves the selection —
+  a file, several files, or an entire directory — locally.
+- **Several rows can be selected at once**: <kbd>Ctrl</kbd>-click
+  (<kbd>Cmd</kbd>-click on macOS) adds or removes one, <kbd>Shift</kbd>-click
+  takes everything between it and the last row clicked.
+- **Right-click a row** to download, rename or delete the selection; right-click
+  empty space to upload into the directory. Deleting asks first, and a symbolic
+  link is removed as a link rather than followed to whatever it points at.
+- **Dropping files or folders onto the panel uploads them** into the directory
+  on screen. Folders are copied recursively; a symlinked *directory* is left
+  out, because a tree that links back into itself would otherwise be walked
+  forever. A symlinked file is sent as its target.
+- **A progress bar along the bottom** names the file in flight and shows how far
+  the whole batch has got. One transfer runs per session at a time; a second
+  request while one is running is refused rather than queued.
 - Each session keeps its own directory, selection and scroll position, so
   switching tabs or panes picks up where you left off.
 
@@ -248,7 +260,7 @@ cannot stall a repaint.
 **The terminal model knows nothing about gpui, and the GUI knows nothing about
 russh.** `logman-term` turns bytes into a `TerminalSnapshot` of styled runs, and
 that is all the renderer sees. Both lower crates are testable without a window:
-of the 231 tests in the workspace, 189 need neither a GUI nor a network, and the
+of the 247 tests in the workspace, 210 need neither a GUI nor a network, and the
 rest need only loopback.
 
 ### Third-party libraries
@@ -320,10 +332,11 @@ and no external server is needed.
 - <kbd>Ctrl</kbd>+<kbd>T</kbd>, <kbd>Ctrl</kbd>+<kbd>W</kbd> and the
   <kbd>Alt</kbd> pane shortcuts are taken by the application, so the remote
   shell never sees them.
-- **The remote files panel browses and transfers, nothing more.** No rename,
-  delete or new directory, no recursive folder upload, and no percentage while a
-  transfer runs. Its edge can be dragged, but the width is session state and
-  reverts to the default on the next start.
+- **The remote files panel has no way to create a directory** except by
+  uploading one, and no way to change permissions or ownership. Transfers and
+  deletes run one at a time per session and cannot be cancelled once started.
+  The panel's edge can be dragged, but the width is session state and reverts to
+  the default on the next start.
 - **Panes cannot be rearranged by dragging.** A divider drag changes the
   proportions of an existing split and nothing else — there is no way to move a
   pane to another position, and a split layout is not remembered across
