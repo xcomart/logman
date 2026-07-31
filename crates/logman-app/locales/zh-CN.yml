@@ -12,6 +12,7 @@ common:
 
 menu:
   new_session: 新建会话
+  break_out_pane: 将窗格移到新标签页
   settings: 设置…
   about: 关于 logman
   quit: 退出
@@ -19,7 +20,13 @@ menu:
   mac:
     new_session: 新建会话
     close_session: 关闭会话
+    break_out_pane: 将窗格移到新标签页
     quit: 退出 logman
+
+tab:
+  split_right: 拆分到当前标签页右侧
+  split_below: 拆分到当前标签页下方
+  close: 关闭标签页
 
 empty:
   hint: "按 %{shortcut} 连接到主机。"

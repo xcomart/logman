@@ -12,6 +12,7 @@ common:
 
 menu:
   new_session: 새 세션
+  break_out_pane: 창을 새 탭으로 분리
   settings: 설정…
   about: logman 정보
   quit: 종료
@@ -19,7 +20,13 @@ menu:
   mac:
     new_session: 새 세션
     close_session: 세션 닫기
+    break_out_pane: 창을 새 탭으로 분리
     quit: logman 종료
+
+tab:
+  split_right: 현재 탭 오른쪽에 분할로 추가
+  split_below: 현재 탭 아래쪽에 분할로 추가
+  close: 탭 닫기
 
 empty:
   hint: "%{shortcut} 키를 눌러 호스트에 접속하세요."

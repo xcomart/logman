@@ -12,6 +12,7 @@ common:
 
 menu:
   new_session: Nueva sesión
+  break_out_pane: Separar en nueva pestaña
   settings: Configuración…
   about: Acerca de logman
   quit: Salir
@@ -19,7 +20,13 @@ menu:
   mac:
     new_session: Nueva sesión
     close_session: Cerrar sesión
+    break_out_pane: Separar en nueva pestaña
     quit: Salir de logman
+
+tab:
+  split_right: Dividir a la derecha de la actual
+  split_below: Dividir debajo de la actual
+  close: Cerrar pestaña
 
 empty:
   hint: Pulsa %{shortcut} para conectarte a un host.

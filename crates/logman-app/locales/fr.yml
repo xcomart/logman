@@ -12,6 +12,7 @@ common:
 
 menu:
   new_session: Nouvelle session
+  break_out_pane: Détacher dans un onglet
   settings: Préférences…
   about: À propos de logman
   quit: Quitter
@@ -19,7 +20,13 @@ menu:
   mac:
     new_session: Nouvelle session
     close_session: Fermer la session
+    break_out_pane: Détacher dans un onglet
     quit: Quitter logman
+
+tab:
+  split_right: Diviser à droite de l'onglet actuel
+  split_below: Diviser sous l'onglet actuel
+  close: Fermer l'onglet
 
 empty:
   hint: Appuyez sur %{shortcut} pour vous connecter à un hôte.

@@ -33,12 +33,12 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, Font, FontStyle,
-    FontWeight, Global, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding,
-    KeyDownEvent, Keystroke, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Size, StrikethroughStyle,
-    Style, Subscription, TextRun, UTF16Selection, UnderlineStyle, Window, actions, black, div,
-    fill, font, outline, point, prelude::*, px, relative, rgb, size,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font,
+    FontStyle, FontWeight, Global, GlobalElementId, Hsla, InspectorElementId, IntoElement,
+    KeyBinding, KeyDownEvent, Keystroke, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Size,
+    StrikethroughStyle, Style, Subscription, TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, black, div, fill, font, outline, point, prelude::*, px, relative, rgb, size,
 };
 use logman_core::EffectiveTerminal;
 use logman_term::{
@@ -450,6 +450,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
+        cx.emit(PaneFocused);
         self.anchor = self.cell_at(event.position);
         self.selecting = self.anchor.is_some();
         self.selection = None;
@@ -565,8 +566,19 @@ impl TerminalView {
         };
 
         let session = self.session.clone();
+        // `occlude` keeps drags on the card from selecting text underneath,
+        // but it also hides the card's area from the grid's own mouse-down
+        // hitbox — without a handler of its own, clicking the card of a split
+        // pane would not focus the pane.
         let card = div()
             .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, window, cx| {
+                    window.focus(&this.focus_handle);
+                    cx.emit(PaneFocused);
+                }),
+            )
             .flex()
             .flex_col()
             .items_center()
@@ -611,6 +623,19 @@ impl TerminalView {
         )
     }
 }
+
+/// Emitted the moment a click gives this view keyboard focus.
+///
+/// The workspace could learn the same thing from `cx.on_focus`, but gpui runs
+/// focus listeners at the tail of a draw — after the frame was already built
+/// from the old state — so anything repainted from there lags one input event
+/// behind: the active-pane frame would only catch up when the mouse next
+/// moved. An event emitted from the mouse handler itself is processed before
+/// the click's frame is drawn, which keeps the frame, the tab label and the
+/// status bar in step with the click.
+pub struct PaneFocused;
+
+impl EventEmitter<PaneFocused> for TerminalView {}
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {

@@ -12,6 +12,7 @@ common:
 
 menu:
   new_session: 新規セッション
+  break_out_pane: ペインを新しいタブに分離
   settings: 設定…
   about: logman について
   quit: 終了
@@ -19,7 +20,13 @@ menu:
   mac:
     new_session: 新規セッション
     close_session: セッションを閉じる
+    break_out_pane: ペインを新しいタブに分離
     quit: logman を終了
+
+tab:
+  split_right: 現在のタブの右に分割して追加
+  split_below: 現在のタブの下に分割して追加
+  close: タブを閉じる
 
 empty:
   hint: "%{shortcut} を押してホストに接続します。"

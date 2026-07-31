@@ -12,6 +12,7 @@ common:
 
 menu:
   new_session: Neue Sitzung
+  break_out_pane: Bereich abtrennen
   settings: Einstellungen…
   about: Über logman
   quit: Beenden
@@ -19,7 +20,13 @@ menu:
   mac:
     new_session: Neue Sitzung
     close_session: Sitzung schließen
+    break_out_pane: Bereich abtrennen
     quit: logman beenden
+
+tab:
+  split_right: Rechts vom aktuellen Tab teilen
+  split_below: Unter aktuellem Tab teilen
+  close: Tab schließen
 
 empty:
   hint: Drücken Sie %{shortcut}, um sich mit einem Host zu verbinden.

@@ -3,8 +3,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ElementId, Hsla, MouseButton, ScrollHandle, SharedString, Window, div, prelude::*, px,
-    transparent_black,
+    App, ElementId, Hsla, MouseButton, Pixels, Point, ScrollHandle, SharedString, Window, div,
+    prelude::*, px, transparent_black,
 };
 
 use super::menu::{MenuButton, MenuEntry};
@@ -72,6 +72,10 @@ impl TabItem {
 /// Callback receiving the index of the tab that was acted upon.
 type IndexHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
+/// Callback receiving the index of the tab that was right-clicked, along with
+/// the window-space position of the pointer.
+type ContextHandler = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
+
 /// Callback for the "new tab" button.
 type PlainHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -82,7 +86,9 @@ type OpenChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 ///
 /// The bar owns no selection state: the parent view passes the current tabs and
 /// the active index on every render, and reacts to [`TabBar::on_select`],
-/// [`TabBar::on_close`] and [`TabBar::on_new`].
+/// [`TabBar::on_close`], [`TabBar::on_context_menu`] and [`TabBar::on_new`].
+/// The context menu itself is the parent's too — the bar only reports where the
+/// right-click landed.
 ///
 /// The tab list scrolls horizontally once it overflows; the dropdown listing
 /// every tab and the "+" button stay pinned to the right edge. Scrolling the
@@ -97,6 +103,7 @@ pub struct TabBar {
     menu_open: bool,
     on_select: Option<IndexHandler>,
     on_close: Option<IndexHandler>,
+    on_context_menu: Option<ContextHandler>,
     on_new: Option<PlainHandler>,
     on_menu_open_change: Option<OpenChangeHandler>,
 }
@@ -112,6 +119,7 @@ impl TabBar {
             menu_open: false,
             on_select: None,
             on_close: None,
+            on_context_menu: None,
             on_new: None,
             on_menu_open_change: None,
         }
@@ -158,6 +166,20 @@ impl TabBar {
         self
     }
 
+    /// Called with the index of the right-clicked tab and the window-space
+    /// position of the pointer, for the parent to open a context menu at.
+    ///
+    /// A right-click deliberately does *not* also select the tab: the commands a
+    /// tab menu offers differ for the active tab and for any other one, so the
+    /// selection has to survive the click that opens the menu.
+    pub fn on_context_menu(
+        mut self,
+        handler: impl Fn(usize, Point<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_context_menu = Some(Rc::new(handler));
+        self
+    }
+
     /// Called when the "+" button is clicked.
     ///
     /// Setting this handler is what makes the "+" button appear.
@@ -186,6 +208,7 @@ impl RenderOnce for TabBar {
         let active = self.active;
         let on_select = self.on_select;
         let on_close = self.on_close;
+        let on_context_menu = self.on_context_menu;
 
         // An empty bar has nothing to list, so its dropdown stays away.
         let on_menu_open_change = self.on_menu_open_change.filter(|_| !self.tabs.is_empty());
@@ -257,6 +280,14 @@ impl RenderOnce for TabBar {
                 })
                 .when_some(on_select.clone(), |this, handler| {
                     this.on_click(move |_, window, cx| handler(index, window, cx))
+                })
+                .when_some(on_context_menu.clone(), |this, handler| {
+                    this.on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                        // The press belongs to the menu, not to whatever is
+                        // underneath the strip.
+                        cx.stop_propagation();
+                        handler(index, event.position, window, cx);
+                    })
                 })
                 .when_some(tab.status, |this, status| {
                     this.child(

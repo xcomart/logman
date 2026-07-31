@@ -12,6 +12,7 @@ common:
 
 menu:
   new_session: Новый сеанс
+  break_out_pane: Вынести в новую вкладку
   settings: Настройки…
   about: О программе logman
   quit: Выход
@@ -19,7 +20,13 @@ menu:
   mac:
     new_session: Новый сеанс
     close_session: Закрыть сеанс
+    break_out_pane: Вынести в новую вкладку
     quit: Завершить logman
+
+tab:
+  split_right: Разделить справа от вкладки
+  split_below: Разделить под вкладкой
+  close: Закрыть вкладку
 
 empty:
   hint: "Нажмите %{shortcut}, чтобы подключиться к узлу."
