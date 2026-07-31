@@ -163,7 +163,22 @@ mod platform {
             if appearance.is_null() {
                 return;
             }
-            let _: () = msg_send![ns_window, setAppearance: appearance];
+            // Scheduled on the run loop rather than sent directly:
+            // `-setAppearance:` synchronously delivers
+            // `viewDidChangeEffectiveAppearance`, which gpui's view hooks to
+            // re-enter the app — and this function is always called from
+            // inside a gpui update, where that re-entry finds the App borrow
+            // already taken and the appearance observers are dropped with a
+            // "RefCell already borrowed" error in the log. A zero delay runs
+            // it on the next run-loop turn, after the update has released the
+            // borrow. The receiver and argument are retained by the
+            // scheduling, so a window closed in between stays sound.
+            let _: () = msg_send![
+                ns_window,
+                performSelector: sel!(setAppearance:)
+                withObject: appearance
+                afterDelay: 0.0f64
+            ];
         }
     }
 
