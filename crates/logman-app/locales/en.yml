@@ -42,6 +42,9 @@ menu:
   about: About logman
   quit: Quit
   session: Session
+  # Hover label of the button that opens this menu. Named after the menu it
+  # opens rather than described, the way the tab strip's own buttons are.
+  tip_menu: Menu
   mac:
     new_session: New Session
     close_session: Close Session
@@ -60,6 +63,10 @@ tab:
   duplicate_right: Split right with a new connection
   duplicate_below: Split below with a new connection
   close: Close tab
+  # Hover labels for the two buttons at the end of the tab strip. The close
+  # button on each tab reuses `close` above: same command, same wording.
+  tip_list: All tabs
+  tip_new: "New session (%{shortcut})"
 
 # The remote file panel: the SFTP browser to the left of the terminal.
 #
@@ -74,6 +81,11 @@ files:
   # macOS menu bar counterpart. They differ only in capitalisation in English,
   # like the `menu` pair above.
   toggle: Remote files
+  # Hover label of the toolbar button that shows and hides the panel. It
+  # carries the shortcut because the dropdown row for the same command does,
+  # and on macOS — where there is no in-app menu — the tooltip is the only
+  # place the binding can be read at all.
+  tip_toggle: "Remote files (%{shortcut})"
   mac:
     toggle: Remote Files
   no_session: No session is open.

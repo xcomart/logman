@@ -19,6 +19,7 @@ menu:
   about: 关于 logman
   quit: 退出
   session: 会话
+  tip_menu: 菜单
   mac:
     new_session: 新建会话
     close_session: 关闭会话
@@ -33,10 +34,13 @@ tab:
   duplicate_right: 以新连接拆分到右侧
   duplicate_below: 以新连接拆分到下方
   close: 关闭标签页
+  tip_list: 所有标签页
+  tip_new: "新建会话 (%{shortcut})"
 
 files:
   title: 远程文件
   toggle: 远程文件面板
+  tip_toggle: "远程文件 (%{shortcut})"
   mac:
     toggle: 远程文件面板
   no_session: 没有打开的会话。

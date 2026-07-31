@@ -19,6 +19,7 @@ menu:
   about: Über logman
   quit: Beenden
   session: Sitzung
+  tip_menu: Menü
   mac:
     new_session: Neue Sitzung
     close_session: Sitzung schließen
@@ -33,10 +34,13 @@ tab:
   duplicate_right: Rechts mit neuer Verbindung teilen
   duplicate_below: Unten mit neuer Verbindung teilen
   close: Tab schließen
+  tip_list: Alle Tabs
+  tip_new: "Neue Sitzung (%{shortcut})"
 
 files:
   title: Entfernte Dateien
   toggle: Entfernte Dateien
+  tip_toggle: "Entfernte Dateien (%{shortcut})"
   mac:
     toggle: Entfernte Dateien
   no_session: Keine Sitzung geöffnet.

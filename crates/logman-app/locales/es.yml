@@ -19,6 +19,7 @@ menu:
   about: Acerca de logman
   quit: Salir
   session: Sesión
+  tip_menu: Menú
   mac:
     new_session: Nueva sesión
     close_session: Cerrar sesión
@@ -33,10 +34,13 @@ tab:
   duplicate_right: Dividir a la derecha con una conexión nueva
   duplicate_below: Dividir debajo con una conexión nueva
   close: Cerrar pestaña
+  tip_list: Todas las pestañas
+  tip_new: "Nueva sesión (%{shortcut})"
 
 files:
   title: Archivos remotos
   toggle: Archivos remotos
+  tip_toggle: "Archivos remotos (%{shortcut})"
   mac:
     toggle: Archivos Remotos
   no_session: No hay ninguna sesión abierta.

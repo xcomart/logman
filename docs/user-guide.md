@@ -120,8 +120,12 @@ session: its `user@host` label (with `:port` when the port is not 22), the
 status summary, and the terminal grid as `columns`×`rows`.
 
 Switching tabs: click one, press <kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd> for
-the first nine, or use the dropdown at the right of the strip when there are
-more tabs than fit. The strip scrolls the active tab into view on its own.
+the first nine, or use the **⌄** dropdown at the right of the strip when there
+are more tabs than fit — it lists every tab and ticks the active one. The strip
+scrolls the active tab into view on its own.
+
+Every icon button along the top of the window names itself when the pointer
+rests on it, shortcut included where the command has one.
 
 Closing: the **×** on a tab closes the whole tab, panes and all.
 <kbd>Ctrl</kbd>+<kbd>W</kbd> closes the *active pane*, which on an unsplit tab

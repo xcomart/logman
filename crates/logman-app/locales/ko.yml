@@ -19,6 +19,7 @@ menu:
   about: logman 정보
   quit: 종료
   session: 세션
+  tip_menu: 메뉴
   mac:
     new_session: 새 세션
     close_session: 세션 닫기
@@ -33,10 +34,13 @@ tab:
   duplicate_right: 새 연결로 오른쪽에 분할
   duplicate_below: 새 연결로 아래쪽에 분할
   close: 탭 닫기
+  tip_list: 모든 탭
+  tip_new: "새 세션 (%{shortcut})"
 
 files:
   title: 원격 파일
   toggle: 원격 파일 패널
+  tip_toggle: "원격 파일 (%{shortcut})"
   mac:
     toggle: 원격 파일 패널
   no_session: 열린 세션이 없습니다.

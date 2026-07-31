@@ -16,13 +16,29 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Corner, ElementId, Pixels, Point, SharedString, Size, Window, anchored,
-    deferred, div, point, prelude::*, px,
+    deferred, div, point, prelude::*, px, svg,
 };
 
 use super::theme::{Theme, theme};
+use super::tooltip::tooltip_label;
 
 /// Edge length of the trigger button.
 const TRIGGER_SIZE: f32 = 28.;
+
+/// Edge length of the icon inside the trigger, when it carries one.
+///
+/// Matches the toolbar's other icon buttons rather than the glyph it may stand
+/// in for: a vector drawn at its own size sits in the row at the same weight as
+/// the panel toggle beside it, which a font glyph scaled to the same box would
+/// not.
+const TRIGGER_ICON: f32 = 16.;
+
+/// Style group of a trigger, so hovering the button recolours the icon in it.
+///
+/// Shared by every [`MenuButton`] rather than made unique per button: a
+/// `group_hover` resolves against the nearest ancestor carrying the name, so
+/// two triggers side by side each answer to their own.
+const TRIGGER_GROUP: &str = "menu-trigger";
 
 /// Vertical distance from the top of the trigger to the top of the dropdown, so
 /// that the panel clears the button it hangs from.
@@ -326,6 +342,8 @@ impl RenderOnce for ContextMenu {
 pub struct MenuButton {
     id: ElementId,
     glyph: SharedString,
+    icon: Option<SharedString>,
+    tooltip: Option<SharedString>,
     open: bool,
     entries: Vec<MenuEntry>,
     on_open_change: Option<OpenChangeHandler>,
@@ -339,6 +357,8 @@ impl MenuButton {
         Self {
             id: id.into(),
             glyph: SharedString::new_static("\u{2630}"),
+            icon: None,
+            tooltip: None,
             open: false,
             entries: Vec::new(),
             on_open_change: None,
@@ -348,6 +368,29 @@ impl MenuButton {
     /// Replaces the glyph drawn on the trigger button.
     pub fn glyph(mut self, glyph: impl Into<SharedString>) -> Self {
         self.glyph = glyph.into();
+        self
+    }
+
+    /// Draws the asset at `path` on the trigger instead of the glyph.
+    ///
+    /// A second way to dress the same button rather than a replacement for
+    /// [`MenuButton::glyph`], because the two triggers in the application want
+    /// different things: the application menu's `☰` is a character every font
+    /// has and needs no asset, while a chevron drawn as text lands at whatever
+    /// size and baseline the font feels like. Callers hand over the path rather
+    /// than an element, so this module keeps knowing nothing about the icon set.
+    pub fn icon(mut self, path: impl Into<SharedString>) -> Self {
+        self.icon = Some(path.into());
+        self
+    }
+
+    /// Sets the label shown when the pointer rests on the trigger.
+    ///
+    /// Taken as text rather than looked up here: this layer holds no strings of
+    /// its own, so the localised sentence comes from the view that builds the
+    /// button.
+    pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(tooltip.into());
         self
     }
 
@@ -389,8 +432,25 @@ impl RenderOnce for MenuButton {
                 as DismissHandler
         });
 
+        let tint = if open { theme.text } else { theme.text_muted };
+        let hover_tint = theme.text;
+        // An SVG takes its colour from its own `text_color`, which — unlike a
+        // glyph's — does not inherit from the button, so the open and hover
+        // shades have to be handed to it directly.
+        let face = match self.icon.clone() {
+            Some(path) => svg()
+                .size(px(TRIGGER_ICON))
+                .flex_none()
+                .path(path)
+                .text_color(tint)
+                .group_hover(TRIGGER_GROUP, move |style| style.text_color(hover_tint))
+                .into_any_element(),
+            None => self.glyph.clone().into_any_element(),
+        };
+
         let trigger = div()
             .id(ElementId::from((self.id.clone(), "trigger")))
+            .group(TRIGGER_GROUP)
             .flex()
             .flex_none()
             .items_center()
@@ -398,7 +458,7 @@ impl RenderOnce for MenuButton {
             .size(px(TRIGGER_SIZE))
             .rounded_md()
             .text_size(px(14.))
-            .text_color(if open { theme.text } else { theme.text_muted })
+            .text_color(tint)
             .bg(if open {
                 theme.surface_active
             } else {
@@ -406,10 +466,13 @@ impl RenderOnce for MenuButton {
             })
             .cursor_pointer()
             .hover(|style| style.bg(theme.surface_hover).text_color(theme.text))
+            .when_some(self.tooltip.clone(), |this, tooltip| {
+                this.tooltip(tooltip_label(tooltip))
+            })
             .when_some(on_open_change.clone(), |this, handler| {
                 this.on_click(move |_, window, cx| handler(!open, window, cx))
             })
-            .child(self.glyph);
+            .child(face);
 
         // A full-window sheet under the panel, deferred so that it covers the
         // whole window rather than just the toolbar row this button sits in.
