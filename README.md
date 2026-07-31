@@ -135,9 +135,12 @@ is shown by default.
   directories beside that one, and choosing a row goes there. A path too long
   for the panel's current width folds its front into a `…` piece which lists
   what it hid.
-- **⟳** lists the directory again, **↑** uploads local files into it, the folder
-  button beside it uploads a whole folder, and **↓** saves the selection —
-  a file, several files, or an entire directory — locally.
+- **The toolbar** runs from the commands that need no selection to the ones that
+  do: **⟳** lists the directory again, the folder-plus button creates one in it,
+  **↑** uploads local files and the folder button beside it a whole folder,
+  **↓** saves the selection — a file, several files, or an entire directory —
+  locally, and the pencil and bin at the end rename and delete it. A button
+  whose command does not apply to the current selection is dimmed.
 - **Several rows can be selected at once**: <kbd>Ctrl</kbd>-click
   (<kbd>Cmd</kbd>-click on macOS) adds or removes one, <kbd>Shift</kbd>-click
   takes everything between it and the last row clicked.
