@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, ElementId, Hsla, IsZero, MouseButton, Pixels, Point, ScrollHandle, SharedString, Window,
-    div, prelude::*, px, transparent_black,
+    div, prelude::*, px, svg, transparent_black,
 };
 
 use super::menu::{MenuButton, MenuEntry};
@@ -17,6 +17,9 @@ const TAB_MENU_GLYPH: &str = "\u{25be}";
 
 /// Marker put in the shortcut slot of the active tab's dropdown row.
 const ACTIVE_MARK: &str = "\u{2713}";
+
+/// Hover group tying the "+" button to the icon it may carry.
+const NEW_GROUP: &str = "tab-bar-new";
 
 /// Connection state rendered as a colored dot in front of a tab title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +113,7 @@ pub struct TabBar {
     on_menu_open_change: Option<OpenChangeHandler>,
     scrollbar: Option<Scrollbar>,
     menu_icon: Option<SharedString>,
+    new_icon: Option<SharedString>,
     menu_tooltip: Option<SharedString>,
     new_tooltip: Option<SharedString>,
     close_tooltip: Option<SharedString>,
@@ -131,6 +135,7 @@ impl TabBar {
             on_new: None,
             on_menu_open_change: None,
             menu_icon: None,
+            new_icon: None,
             menu_tooltip: None,
             new_tooltip: None,
             close_tooltip: None,
@@ -153,6 +158,12 @@ impl TabBar {
     /// Draws the asset at `path` on the tab dropdown instead of its glyph.
     pub fn menu_icon(mut self, path: impl Into<SharedString>) -> Self {
         self.menu_icon = Some(path.into());
+        self
+    }
+
+    /// Draws the asset at `path` on the "+" button instead of its glyph.
+    pub fn new_icon(mut self, path: impl Into<SharedString>) -> Self {
+        self.new_icon = Some(path.into());
         self
     }
 
@@ -469,12 +480,28 @@ impl RenderOnce for TabBar {
             )
             .children(menu)
             .when_some(self.on_new, |this, handler| {
+                // An SVG face keeps its own `text_color`, which does not
+                // inherit from the button the way the glyph's does, so the
+                // hover shade has to reach it through the group — the same
+                // arrangement as the dropdown's icon.
+                let hover_text = theme.text;
+                let face = match self.new_icon.clone() {
+                    Some(path) => svg()
+                        .size(px(16.))
+                        .flex_none()
+                        .path(path)
+                        .text_color(theme.text_muted)
+                        .group_hover(NEW_GROUP, move |style| style.text_color(hover_text))
+                        .into_any_element(),
+                    None => "+".into_any_element(),
+                };
                 this.child(
                     div()
                         .id(ElementId::from((id.clone(), "new")))
                         // Same reason as the tab itself: a drag area may lie
                         // behind the strip.
                         .occlude()
+                        .group(NEW_GROUP)
                         .flex()
                         .flex_none()
                         .items_center()
@@ -490,7 +517,7 @@ impl RenderOnce for TabBar {
                         .when_some(self.new_tooltip.clone(), |this, tooltip| {
                             this.tooltip(tooltip_label(tooltip))
                         })
-                        .child("+"),
+                        .child(face),
                 )
             })
     }
