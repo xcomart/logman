@@ -277,9 +277,10 @@ impl TransferProgress {
 /// A question the panel is waiting on an answer to, drawn where the status line
 /// would otherwise be.
 ///
-/// Both of these are modal in intent but not on screen: a dialog over the
-/// window would hide the very listing that says what is about to be renamed or
-/// deleted, so the question is asked in the panel, under the rows it is about.
+/// All of these are modal in intent but not on screen: a dialog over the window
+/// would hide the very listing that says what is about to be renamed, deleted
+/// or created next to, so the question is asked in the panel, under the rows it
+/// is about.
 enum Prompt {
     /// Names selected for deletion, in display order, awaiting confirmation.
     ///
@@ -294,6 +295,26 @@ enum Prompt {
         /// The field, prefilled with `from` so a small edit stays small.
         input: Entity<TextInput>,
     },
+    /// A directory to create in the listed directory.
+    NewFolder {
+        /// The field, empty to start with — there is no name to edit yet, so it
+        /// leans on its placeholder instead of on a prefill.
+        input: Entity<TextInput>,
+    },
+}
+
+impl Prompt {
+    /// The text field this question is answered in, if it has one.
+    ///
+    /// Both of the naming questions need the keyboard the moment they appear
+    /// and nothing else does, so the focus logic asks for the field rather than
+    /// matching on the variant and having to grow a third arm each time.
+    fn field(&self) -> Option<&Entity<TextInput>> {
+        match self {
+            Self::Delete(_) => None,
+            Self::Rename { input, .. } | Self::NewFolder { input } => Some(input),
+        }
+    }
 }
 
 /// An open menu over the panel: where it hangs, and what it lists.
@@ -1737,6 +1758,124 @@ impl FilePanel {
         .detach();
     }
 
+    /// Opens the field that names a directory to create here.
+    fn begin_new_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().map(Entity::entity_id) else {
+            return;
+        };
+        // Nothing to create *in* until the first listing has landed, and the
+        // path is what the name would be joined onto.
+        if !self
+            .states
+            .get(&session)
+            .is_some_and(|state| state.path.is_some())
+        {
+            return;
+        }
+
+        let panel = cx.entity().downgrade();
+        let input = cx.new(|cx| {
+            // As with rename: the typed text arrives as an argument because
+            // this runs inside the field's own update, and reading an entity
+            // that is currently leased panics.
+            TextInput::new(cx)
+                .placeholder(ts!("files.new_folder_placeholder"))
+                .on_submit(move |typed, _window, cx| {
+                    let typed = typed.to_owned();
+                    panel
+                        .update(cx, |panel, cx| panel.commit_new_folder(&typed, cx))
+                        .ok();
+                })
+        });
+
+        let Some(state) = self.states.get_mut(&session) else {
+            return;
+        };
+        state.prompt = Some(Prompt::NewFolder { input });
+        self.focus_prompt = true;
+        cx.notify();
+    }
+
+    /// Creates the directory `typed` names, inside the one on screen.
+    ///
+    /// The mirror of [`FilePanel::commit_rename`], down to why the name comes in
+    /// as an argument and why it is checked here rather than left to the server:
+    /// `../backup` would create a directory the user cannot see, in a directory
+    /// they were not looking at.
+    ///
+    /// **An existing directory of that name is not an error.** [`SftpClient::mkdir`]
+    /// is idempotent — the recursive upload depends on that — so asking for a
+    /// name already taken by a directory simply selects the one already there.
+    /// Nothing is overwritten and nothing inside it is touched, so there is no
+    /// harm to report; a name taken by a *file* is a real collision and does
+    /// surface as the server's own refusal.
+    fn commit_new_folder(&mut self, typed: &str, cx: &mut Context<Self>) {
+        let Some((session, sftp, directory)) = self.acting_on(cx) else {
+            return;
+        };
+        if !self
+            .states
+            .get(&session)
+            .is_some_and(|state| matches!(state.prompt, Some(Prompt::NewFolder { .. })))
+        {
+            return;
+        }
+        // Trimmed for the reason the rename field trims: a name with a trailing
+        // space is legal, indistinguishable on screen from one without, and
+        // essentially never what was meant.
+        let name = typed.trim().to_owned();
+
+        // Covers the empty field too — `is_plain_name` rejects it — so an
+        // `Enter` on an untouched field says why instead of doing nothing.
+        if !is_plain_name(&name) {
+            self.show_notice(session, Notice::Error(ts!("files.invalid_name")), cx);
+            return;
+        }
+        // Exclusive with a transfer exactly as a rename is: both end in a
+        // listing, and the one that lands second would describe a directory the
+        // other has already changed.
+        if self
+            .states
+            .get(&session)
+            .is_some_and(|state| state.transfer.is_some())
+        {
+            self.show_notice(session, Notice::Error(ts!("files.transfer_busy")), cx);
+            return;
+        }
+
+        let path = join(&directory, &name);
+        if let Some(state) = self.states.get_mut(&session) {
+            state.prompt = None;
+        }
+        self.focus_prompt = false;
+        cx.notify();
+
+        cx.spawn(async move |panel, cx| {
+            let outcome = sftp.mkdir(&path).await;
+            panel
+                .update(cx, |panel, cx| match outcome {
+                    Ok(()) => {
+                        if let Some(state) = panel.states.get_mut(&session) {
+                            state.keep_notice = true;
+                            // Selected before the listing that will contain it:
+                            // the selection is held as names and filtered
+                            // through the entries, so the new row arrives
+                            // already highlighted.
+                            state.select_only(&name);
+                        }
+                        let said = ts!("files.created", name = name.clone());
+                        panel.show_notice(session, Notice::Info(said), cx);
+                        panel.go(session, sftp, Target::Exact(directory), cx);
+                    }
+                    Err(error) => {
+                        panel.show_notice(session, Notice::from_error(&error), cx);
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
     /// Renders the header: the current path and the action buttons.
     fn render_header(&self, state: Option<&SessionState>, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
@@ -2064,7 +2203,8 @@ impl FilePanel {
             .into_any_element()
     }
 
-    /// Moves the keyboard into the rename field the frame after it appears.
+    /// Moves the keyboard into a question's text field the frame after it
+    /// appears.
     ///
     /// The field is created inside a menu callback, where it has not been laid
     /// out yet; focusing it there would put the caret in a box that does not
@@ -2082,7 +2222,7 @@ impl FilePanel {
         else {
             return;
         };
-        if let Some(Prompt::Rename { input, .. }) = state.prompt.as_ref() {
+        if let Some(input) = state.prompt.as_ref().and_then(Prompt::field) {
             let handle = input.read(cx).focus_handle(cx);
             window.focus(&handle);
         }
@@ -2155,6 +2295,15 @@ impl FilePanel {
                 }
             }));
         } else {
+            // First, the way every file manager orders this menu: creating is
+            // the one command here that acts on the directory itself rather
+            // than moving something into it.
+            entries.push(MenuEntry::new(ts!("files.menu_new_folder")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |panel, cx| panel.begin_new_folder(cx));
+                }
+            }));
             for (label, folders) in [
                 (ts!("files.menu_upload"), false),
                 (ts!("files.menu_upload_folder"), true),
@@ -2183,10 +2332,11 @@ impl FilePanel {
         )
     }
 
-    /// Renders the delete confirmation or the rename field, if one is open.
+    /// Renders the open question — a delete confirmation, or a field naming
+    /// something — if there is one.
     ///
-    /// Both sit under the listing rather than over the window, so the rows they
-    /// are about stay readable while the question is being answered.
+    /// All of them sit under the listing rather than over the window, so the
+    /// rows they are about stay readable while the question is being answered.
     fn render_prompt(
         &self,
         state: Option<&SessionState>,
@@ -2220,6 +2370,19 @@ impl FilePanel {
                             // update, so the field itself is not leased.
                             let typed = field.read(cx).content().to_owned();
                             panel.commit_rename(&typed, cx);
+                        },
+                    )),
+                    Some(input.clone()),
+                )
+            }
+            Prompt::NewFolder { input } => {
+                let field = input.clone();
+                (
+                    ts!("files.new_folder_prompt"),
+                    Button::new("file-panel-create", ts!("files.create")).on_click(cx.listener(
+                        move |panel, _: &ClickEvent, _window, cx| {
+                            let typed = field.read(cx).content().to_owned();
+                            panel.commit_new_folder(&typed, cx);
                         },
                     )),
                     Some(input.clone()),

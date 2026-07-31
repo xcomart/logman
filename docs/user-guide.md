@@ -306,11 +306,23 @@ several entries at once.
 - **Refresh** — the same thing **⟳** does.
 
 **Right-clicking empty space** — or the `..` row — opens the other menu, which
-is about the directory rather than its contents: **Upload files…**, **Upload
-folder…** and **Refresh**. An empty directory still has a background to
-right-click, so this is the way to upload into one.
+is about the directory rather than its contents: **New folder…**, **Upload
+files…**, **Upload folder…** and **Refresh**. An empty directory still has a
+background to right-click, so this is the way to upload into one.
 
 Both menus close on <kbd>Esc</kbd> or on a click outside them.
+
+### Creating a folder
+
+Choosing **New folder…** opens an empty, focused field along the bottom of the
+panel. <kbd>Enter</kbd> or **Create** makes the directory in the one on screen,
+**Cancel** drops the question. The same names are refused as for a rename, and
+for the same reason.
+
+A name already taken by a **directory** is not an error: the panel selects the
+folder that is already there and says so. Nothing is overwritten and nothing
+inside it is touched. A name taken by a **file** is a real collision, and the
+server's refusal appears along the bottom.
 
 ### Renaming
 
@@ -722,9 +734,8 @@ The full list is in the README's [Limitations](../README.md#limitations)
 section. The ones that come up most:
 
 - no SSH agent support, and no keyboard-interactive authentication;
-- the files panel cannot create a directory except by uploading one, cannot
-  change permissions or ownership, and cannot cancel a transfer or a delete once
-  it has started;
+- the files panel cannot change permissions or ownership, and cannot cancel a
+  transfer or a delete once it has started;
 - panes can be resized by dragging but not rearranged, and neither a split
   layout nor the panel's width survives a restart;
 - a selection is anchored to the viewport and is not re-anchored when the
