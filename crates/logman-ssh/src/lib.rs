@@ -20,6 +20,10 @@
 //! }
 //! ```
 //!
+//! The same transport also carries file transfers: [`SshSession::sftp`] hands
+//! out an [`SftpClient`] that opens its own SFTP channel on first use, so
+//! listing a directory or moving a file never interferes with the shell.
+//!
 //! Host key policy is deliberately left to the caller through the
 //! [`HostKeyVerifier`] trait: this crate ships only [`AcceptAllVerifier`] and
 //! [`RejectAllVerifier`], so that `known_hosts` storage lives in the
@@ -34,6 +38,7 @@
 mod config;
 mod event;
 mod session;
+mod sftp;
 mod verify;
 
 pub use config::{
@@ -42,6 +47,7 @@ pub use config::{
 };
 pub use event::{SshErrorKind, SshEvent};
 pub use session::SshSession;
+pub use sftp::{RemoteEntry, SftpClient, SftpError};
 pub use verify::{
     AcceptAllVerifier, HostKeyVerifier, RejectAllVerifier, algorithm_name, fingerprint,
 };

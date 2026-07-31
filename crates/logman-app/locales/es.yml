@@ -28,6 +28,24 @@ tab:
   split_below: Dividir debajo de la actual
   close: Cerrar pestaña
 
+files:
+  title: Archivos remotos
+  toggle: Archivos remotos
+  mac:
+    toggle: Archivos Remotos
+  no_session: No hay ninguna sesión abierta.
+  not_connected: Los archivos remotos aparecerán cuando la sesión esté conectada.
+  loading: Cargando…
+  empty: Este directorio está vacío.
+  select_upload: Subir
+  uploading: "Subiendo %{name}…"
+  uploaded: "Se subió %{name}."
+  uploaded_many: "Se subieron %{count} archivos."
+  downloading: "Descargando %{name}…"
+  downloaded: "Guardado en %{path}."
+  skipped_directory: "Se omitió %{name}: solo se pueden subir archivos."
+  failed: "Archivos remotos: %{error}"
+
 empty:
   hint: Pulsa %{shortcut} para conectarte a un host.
   saved_profiles: Perfiles guardados

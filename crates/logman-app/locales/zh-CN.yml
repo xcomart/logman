@@ -28,6 +28,24 @@ tab:
   split_below: 拆分到当前标签页下方
   close: 关闭标签页
 
+files:
+  title: 远程文件
+  toggle: 远程文件面板
+  mac:
+    toggle: 远程文件面板
+  no_session: 没有打开的会话。
+  not_connected: 会话连接后将显示远程文件。
+  loading: 正在加载…
+  empty: 此目录为空。
+  select_upload: 上传
+  uploading: "正在上传 %{name}…"
+  uploaded: "已上传 %{name}。"
+  uploaded_many: "已上传 %{count} 个文件。"
+  downloading: "正在下载 %{name}…"
+  downloaded: "已保存到 %{path}。"
+  skipped_directory: "已跳过 %{name}：只能上传文件。"
+  failed: "远程文件：%{error}"
+
 empty:
   hint: "按 %{shortcut} 连接到主机。"
   saved_profiles: 已保存的配置
