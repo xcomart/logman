@@ -32,9 +32,9 @@ use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{
     AnyElement, App, AsyncApp, ClickEvent, Context, Div, DragMoveEvent, ElementId, Entity,
-    EntityId, ExternalPaths, Focusable, Modifiers, MouseButton, MouseDownEvent, PathPromptOptions,
-    Pixels, Point, ScrollHandle, SharedString, Subscription, WeakEntity, Window, div, prelude::*,
-    px, relative,
+    EntityId, ExternalPaths, Focusable, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+    PathPromptOptions, Pixels, Point, ScrollHandle, SharedString, Subscription, WeakEntity, Window,
+    div, prelude::*, px, relative,
 };
 use logman_ssh::{RemoteEntry, SftpClient, SftpError};
 use unicode_width::UnicodeWidthStr;
@@ -43,8 +43,10 @@ use crate::app_settings;
 use crate::i18n::ts;
 use crate::icons;
 use crate::session::Session;
+use crate::ui::scrollbar::INSET;
 use crate::ui::{
-    Button, ButtonVariant, ContextMenu, MenuEntry, TextInput, Theme, theme, tooltip_label,
+    Button, ButtonVariant, ContextMenu, DraggedThumb, MenuEntry, Scrollbar, ScrollbarAxis,
+    ScrollbarState, TextInput, Theme, hide_later, scroll_to, scrolled, theme, tooltip_label,
 };
 
 /// Width the panel opens at, in pixels.
@@ -73,6 +75,13 @@ const MAX_PANEL_WIDTH: f32 = 560.;
 /// handle is laid over it absolutely so that widening the grab area costs the
 /// listing no room.
 const PANEL_HANDLE: f32 = 6.;
+
+/// Element id of the listing's overlay scroll indicator.
+///
+/// One panel shows one session's listing at a time, so one id covers them all —
+/// and it is what tells a drag of this bar from a drag of any other in the
+/// window.
+const LIST_SCROLLBAR: &str = "file-panel-scrollbar";
 
 /// Horizontal padding of the header, per side, in pixels.
 ///
@@ -473,6 +482,8 @@ struct SessionState {
     /// Outranks [`SessionState::notice`] on screen and doubles as the lock that
     /// keeps a second transfer from starting.
     transfer: Option<TransferProgress>,
+    /// Whether this session's overlay scroll indicator is on screen.
+    scrollbar: ScrollbarState,
     /// Vertical scroll of the list, kept per session so returning to a tab
     /// returns to the same place in its directory.
     scroll: ScrollHandle,
@@ -496,6 +507,7 @@ impl SessionState {
             notice_epoch: 0,
             transfer: None,
             scroll: ScrollHandle::new(),
+            scrollbar: ScrollbarState::new(),
         }
     }
 
@@ -813,6 +825,70 @@ impl FilePanel {
             return;
         }
         state.notice = None;
+        cx.notify();
+    }
+
+    /// The listing's overlay scroll indicator, as it stands.
+    ///
+    /// Set in from the edge far enough to clear the panel's resize grip, which
+    /// is pinned to that same edge and drawn after the listing — so a thumb any
+    /// closer would be a thumb the grip took every press away from.
+    fn scrollbar(state: &SessionState) -> Scrollbar {
+        Scrollbar::for_handle(LIST_SCROLLBAR, ScrollbarAxis::Vertical, &state.scroll)
+            .inset(PANEL_HANDLE + INSET)
+    }
+
+    /// The state of the session the panel is showing, if it is showing one.
+    fn active_state(&mut self) -> Option<&mut SessionState> {
+        let session = self.session.as_ref()?.entity_id();
+        self.states.get_mut(&session)
+    }
+
+    /// Puts the listing's bar up whenever it has been scrolled, and starts the
+    /// clock that takes it down again.
+    fn watch_list_scroll(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.active_state() else {
+            return;
+        };
+        let scrolled = scrolled(&state.scroll, ScrollbarAxis::Vertical);
+        let Some(epoch) = state.scrollbar.moved(scrolled) else {
+            return;
+        };
+
+        // Looked up again when the timer fires rather than captured: the
+        // session may be closed by then, and with it the listing this bar
+        // belongs to.
+        hide_later(epoch, cx, |panel| {
+            panel.active_state().map(|s| &mut s.scrollbar)
+        });
+    }
+
+    /// Scrolls the listing to wherever its thumb has been dragged.
+    fn drag_scrollbar(&mut self, event: &DragMoveEvent<DraggedThumb>, cx: &mut Context<Self>) {
+        let Some(state) = self.active_state() else {
+            return;
+        };
+        let Some(progress) = Self::scrollbar(state).dragged(event, cx) else {
+            return;
+        };
+
+        state.scrollbar.hold();
+        scroll_to(&state.scroll, ScrollbarAxis::Vertical, progress);
+        cx.notify();
+    }
+
+    /// Lets go of the listing's thumb, and starts the clock on the bar again.
+    fn release_scrollbar(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.active_state() else {
+            return;
+        };
+        let Some(epoch) = state.scrollbar.release() else {
+            return;
+        };
+
+        hide_later(epoch, cx, |panel| {
+            panel.active_state().map(|s| &mut s.scrollbar)
+        });
         cx.notify();
     }
 
@@ -2158,24 +2234,42 @@ impl FilePanel {
             rows.push(placeholder(ts!("files.empty"), &theme));
         }
 
+        // The wrapper is what the overlay bar is placed against, and exists only
+        // for that: the scrolling box cannot hold its own bar, because its
+        // children are what scroll away.
         div()
-            .id("file-panel-list")
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
-            .py(px(2.))
-            .overflow_y_scroll()
-            .track_scroll(&state.scroll)
-            // Reached by the `..` row and by empty space alike: neither has an
-            // entry behind it, and both mean "do something to this directory".
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|panel, event: &MouseDownEvent, _window, cx| {
-                    panel.open_context(None, event.position, cx);
-                }),
+            .child(
+                div()
+                    .id("file-panel-list")
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .py(px(2.))
+                    .overflow_y_scroll()
+                    .track_scroll(&state.scroll)
+                    // Reached by the `..` row and by empty space alike: neither
+                    // has an entry behind it, and both mean "do something to
+                    // this directory".
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|panel, event: &MouseDownEvent, _window, cx| {
+                            panel.open_context(None, event.position, cx);
+                        }),
+                    )
+                    .children(rows),
             )
-            .children(rows)
+            .children(
+                state
+                    .scrollbar
+                    .showing()
+                    .then(|| Self::scrollbar(state).render(&theme))
+                    .flatten(),
+            )
             .into_any_element()
     }
 
@@ -2596,6 +2690,7 @@ impl Render for FilePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
         self.apply_pending_focus(window, cx);
+        self.watch_list_scroll(cx);
         let state = self
             .session
             .as_ref()
@@ -2657,6 +2752,22 @@ impl Render for FilePanel {
             // edge — the one the new width is measured from — stays put.
             .on_drag_move::<DraggedPanelEdge>(
                 cx.listener(|panel, event, _window, cx| panel.drag_edge(event, cx)),
+            )
+            // Same reasoning one step over: the listing's thumb slides out from
+            // under the pointer, and the panel is what stays mounted for the
+            // whole gesture.
+            .on_drag_move::<DraggedThumb>(cx.listener(
+                |panel, event: &DragMoveEvent<DraggedThumb>, _window, cx| {
+                    panel.drag_scrollbar(event, cx);
+                },
+            ))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|panel, _: &MouseUpEvent, _window, cx| panel.release_scrollbar(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|panel, _: &MouseUpEvent, _window, cx| panel.release_scrollbar(cx)),
             )
             .child(header)
             .child(list)

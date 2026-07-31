@@ -3,8 +3,9 @@
 //! The module is deliberately free of SSH or terminal concepts: it only knows
 //! about colors ([`theme`]), text entry ([`text_input`]), buttons ([`button`]),
 //! session tabs ([`tab_bar`]), dropdown menus ([`menu`]), hover tooltips
-//! ([`tooltip`]), dialogs ([`modal`]) and the caption buttons of a self-drawn
-//! title bar ([`window_controls`]).
+//! ([`tooltip`]), dialogs ([`modal`]), overlay scroll indicators
+//! ([`scrollbar`]) and the caption buttons of a self-drawn title bar
+//! ([`window_controls`]).
 //!
 //! Call [`init`] once during application start-up so the widgets that need key
 //! bindings get them.
@@ -14,6 +15,7 @@ pub mod checkbox;
 pub mod menu;
 pub mod modal;
 pub mod scheme_picker;
+pub mod scrollbar;
 pub mod segmented;
 pub mod select;
 pub mod tab_bar;
@@ -27,6 +29,9 @@ pub use checkbox::Checkbox;
 pub use menu::{ContextMenu, MenuButton, MenuEntry};
 pub use modal::{form_row, modal};
 pub use scheme_picker::{SchemePicker, SchemePreview, SchemeSwatch};
+pub use scrollbar::{
+    DraggedThumb, Scrollbar, ScrollbarAxis, ScrollbarState, hide_later, scroll_to, scrolled,
+};
 pub use segmented::Segmented;
 pub use select::Select;
 pub use tab_bar::{TabBar, TabItem, TabStatus};

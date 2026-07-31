@@ -16,6 +16,7 @@ use gpui::{
     Window, anchored, deferred, div, point, prelude::*, px, transparent_black,
 };
 
+use super::scrollbar::Scrollbar;
 use super::theme::theme;
 
 /// Height of the trigger, matching [`TextInput`](super::TextInput) so the two
@@ -89,6 +90,7 @@ pub struct Select {
     width: Option<Pixels>,
     tab_index: Option<isize>,
     scroll_handle: Option<ScrollHandle>,
+    scrollbar: Option<Scrollbar>,
     on_select: Option<SelectHandler>,
     on_open_change: Option<OpenChangeHandler>,
 }
@@ -107,6 +109,7 @@ impl Select {
             width: None,
             tab_index: None,
             scroll_handle: None,
+            scrollbar: None,
             on_select: None,
             on_open_change: None,
         }
@@ -164,6 +167,18 @@ impl Select {
     /// Keyboard navigation scrolls through the same handle.
     pub fn scroll_handle(mut self, handle: ScrollHandle) -> Self {
         self.scroll_handle = Some(handle);
+        self
+    }
+
+    /// Draws `bar` down the open list as its overlay scroll indicator.
+    ///
+    /// Passed in rather than built here, and only while it should be on screen,
+    /// for the same reason the handle above is: a bar comes and goes with the
+    /// scrolling, and this control keeps no state between renders. The owner
+    /// answers drags of it too, since the id it built the bar with is what tells
+    /// that drag from any other.
+    pub fn scrollbar(mut self, bar: Scrollbar) -> Self {
+        self.scrollbar = Some(bar);
         self
     }
 
@@ -371,6 +386,17 @@ impl RenderOnce for Select {
                 this.track_scroll(handle)
             })
             .children(rows);
+
+        // The bar cannot go inside the list, whose children are what scroll
+        // away underneath it; this box is the list's own size, so it is what the
+        // thumb is placed against.
+        let list = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .child(list)
+            .children(self.scrollbar.as_ref().and_then(|bar| bar.render(&theme)));
 
         // The list hangs off a zero-sized box laid out *before* the trigger,
         // not off the trigger itself: an `anchored` element is positioned

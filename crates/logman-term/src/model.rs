@@ -18,7 +18,9 @@ use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 
 use crate::cwd::CwdTracker;
 use crate::keys::TermModes;
-use crate::snapshot::{CursorPos, RunFlags, StyledRun, TerminalLine, TerminalSnapshot};
+use crate::snapshot::{
+    CursorPos, RunFlags, ScrollPosition, StyledRun, TerminalLine, TerminalSnapshot,
+};
 use crate::theme::{Rgb, TerminalTheme};
 
 /// Grid geometry handed to [`Term::new`] and [`Term::resize`].
@@ -187,6 +189,19 @@ impl TerminalModel {
     pub fn size(&self) -> (u16, u16) {
         let grid = self.term.grid();
         (grid.columns() as u16, grid.screen_lines() as u16)
+    }
+
+    /// Where the viewport currently sits in the scrollback.
+    ///
+    /// The cheap half of [`TerminalModel::snapshot`], for callers that want the
+    /// scroll position every frame and the screen contents not at all.
+    pub fn scroll_position(&self) -> ScrollPosition {
+        let grid = self.term.grid();
+        ScrollPosition {
+            display_offset: grid.display_offset(),
+            history: grid.history_size(),
+            rows: grid.screen_lines(),
+        }
     }
 
     /// Build an immutable view of the visible screen for the renderer.

@@ -86,6 +86,22 @@ pub struct CursorPos {
     pub col: u16,
 }
 
+/// Where the viewport sits in the scrollback.
+///
+/// The three numbers a scrollbar needs, and no more. [`TerminalSnapshot`]
+/// carries the same ones, but building a snapshot means rebuilding every
+/// visible row; a bar wants the position on every frame and the rows never.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScrollPosition {
+    /// How far the viewport is scrolled up into the scrollback, `0` at the
+    /// bottom.
+    pub display_offset: usize,
+    /// Number of lines currently stored in the scrollback buffer.
+    pub history: usize,
+    /// Height of the viewport in rows.
+    pub rows: usize,
+}
+
 /// Everything a renderer needs to paint one frame of a terminal.
 #[derive(Debug, Clone)]
 pub struct TerminalSnapshot {

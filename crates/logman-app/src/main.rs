@@ -47,9 +47,10 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 use gpui::{
     AnyElement, App, Application, Bounds, Context, Div, DragMoveEvent, ElementId, Entity, EntityId,
-    FocusHandle, Focusable, KeyBinding, Menu, MenuItem, Pixels, Point, ScrollHandle, SharedString,
-    Stateful, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowOptions, actions, div, img, prelude::*, px, relative, size,
+    FocusHandle, Focusable, KeyBinding, Menu, MenuItem, MouseButton, MouseUpEvent, Pixels, Point,
+    ScrollHandle, SharedString, Stateful, Subscription, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, div, img,
+    prelude::*, px, relative, size,
 };
 use logman_core::{SessionProfile, TitlebarStyle, UiTheme, WindowSettings};
 use logman_ssh::SshAuth;
@@ -65,8 +66,9 @@ use session::{Session, SessionStatus};
 use settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use terminal_view::{PaneFocused, TerminalView};
 use ui::{
-    Button, ButtonVariant, ContextMenu, MenuButton, MenuEntry, TabBar, TabItem, Theme,
-    WindowControlIcons, WindowControls, set_theme, theme, tooltip_label,
+    Button, ButtonVariant, ContextMenu, DraggedThumb, MenuButton, MenuEntry, Scrollbar,
+    ScrollbarAxis, ScrollbarState, TabBar, TabItem, Theme, WindowControlIcons, WindowControls,
+    hide_later, scroll_to, scrolled, set_theme, theme, tooltip_label,
 };
 
 actions!(
@@ -212,6 +214,13 @@ const MIN_SPLIT_RATIO: f32 = 0.1;
 /// pushing the panes apart.
 const SPLIT_HANDLE: f32 = 6.;
 
+/// Element id of the tab strip's overlay scroll indicator.
+///
+/// Held here rather than inside [`TabBar`] because a drag of the thumb is
+/// answered by the workspace, and the id is what tells this bar's drag from any
+/// other bar's in the window.
+const TAB_SCROLLBAR: &str = "tab-scrollbar";
+
 /// The divider a drag is currently holding.
 ///
 /// gpui delivers drag moves to every ancestor of the element the drag started
@@ -314,6 +323,8 @@ struct Workspace {
     active: usize,
     /// Horizontal scroll of the tab strip, used to reveal the active tab.
     tab_scroll: ScrollHandle,
+    /// Whether the tab strip's overlay scroll indicator is on screen.
+    tab_scrollbar: ScrollbarState,
     /// The connection dialog, rendered only while it reports itself open.
     dialog: Entity<ConnectionDialog>,
     /// The settings dialog, rendered only while it reports itself open.
@@ -466,6 +477,7 @@ impl Workspace {
             tabs: Vec::new(),
             active: 0,
             tab_scroll: ScrollHandle::new(),
+            tab_scrollbar: ScrollbarState::new(),
             dialog,
             settings,
             about,
@@ -1451,6 +1463,9 @@ impl Workspace {
             .tabs(tabs)
             .active(self.active)
             .scroll_handle(&self.tab_scroll)
+            .when(self.tab_scrollbar.showing(), |bar| {
+                bar.scrollbar(self.tab_scrollbar())
+            })
             .menu_icon(icons::TAB_LIST)
             // The close button reuses the tab menu's own row: it is the same
             // command, worded the same way, and neither takes an ellipsis.
@@ -1660,6 +1675,56 @@ impl Workspace {
             .panes
             .set_ratio(split, share.clamp(MIN_SPLIT_RATIO, 1. - MIN_SPLIT_RATIO))
         {
+            cx.notify();
+        }
+    }
+
+    /// The tab strip's overlay scroll indicator, as it stands.
+    ///
+    /// Rebuilt on demand rather than kept, because everything it is made of —
+    /// the strip's box, how far it overflows, where it sits — is measured
+    /// afresh by gpui on every layout pass.
+    fn tab_scrollbar(&self) -> Scrollbar {
+        Scrollbar::for_handle(TAB_SCROLLBAR, ScrollbarAxis::Horizontal, &self.tab_scroll)
+    }
+
+    /// Puts the strip's bar up whenever the strip has moved, and starts the
+    /// clock that takes it down again.
+    ///
+    /// Called from `render` because that is where every way of scrolling the
+    /// strip meets: a wheel over the tabs, and the jump that brings a newly
+    /// activated tab back into view.
+    fn watch_tab_scroll(&mut self, cx: &mut Context<Self>) {
+        let scrolled = scrolled(&self.tab_scroll, ScrollbarAxis::Horizontal);
+        if let Some(epoch) = self.tab_scrollbar.moved(scrolled) {
+            hide_later(epoch, cx, |workspace| Some(&mut workspace.tab_scrollbar));
+        }
+    }
+
+    /// Scrolls the tab strip to wherever its thumb has been dragged.
+    ///
+    /// Every element listening for this drag type hears every such drag, so the
+    /// bar checks that the one being dragged is its own before answering.
+    fn drag_tab_scrollbar(&mut self, event: &DragMoveEvent<DraggedThumb>, cx: &mut Context<Self>) {
+        let Some(progress) = self.tab_scrollbar().dragged(event, cx) else {
+            return;
+        };
+
+        // Held even when the pointer moved along the other axis and the strip
+        // has not budged: the bar has to stay up for as long as it is being
+        // held, and a still pointer moves nothing to notice.
+        self.tab_scrollbar.hold();
+        scroll_to(&self.tab_scroll, ScrollbarAxis::Horizontal, progress);
+        cx.notify();
+    }
+
+    /// Lets go of the strip's thumb, and starts the clock on the bar again.
+    ///
+    /// Every mouse release in the window arrives here; all but the one ending a
+    /// drag of this bar find nothing to let go of.
+    fn release_tab_scrollbar(&mut self, cx: &mut Context<Self>) {
+        if let Some(epoch) = self.tab_scrollbar.release() {
+            hide_later(epoch, cx, |workspace| Some(&mut workspace.tab_scrollbar));
             cx.notify();
         }
     }
@@ -1919,6 +1984,7 @@ impl Render for Workspace {
         // Before anything is built, so the panel is already pointed at the
         // active pane's session by the time it renders itself as a child.
         self.sync_file_panel(cx);
+        self.watch_tab_scroll(cx);
         let toolbar = self.render_toolbar(window, cx);
         let body = self.render_body(cx);
         let status_bar = self.render_status_bar(cx);
@@ -1954,6 +2020,27 @@ impl Render for Workspace {
             .flex_col()
             .text_color(theme.text)
             .text_size(px(13.))
+            // The tab strip's overlay bar is answered from here rather than
+            // from the strip: gpui hands a drag move to every listener of that
+            // type wherever it sits, and the root is the one element that is
+            // always mounted while a drag of it is in flight.
+            .on_drag_move::<DraggedThumb>(cx.listener(
+                move |workspace, event: &DragMoveEvent<DraggedThumb>, _window, cx| {
+                    workspace.drag_tab_scrollbar(event, cx);
+                },
+            ))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|workspace, _: &MouseUpEvent, _window, cx| {
+                    workspace.release_tab_scrollbar(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|workspace, _: &MouseUpEvent, _window, cx| {
+                    workspace.release_tab_scrollbar(cx);
+                }),
+            )
             .on_action(cx.listener(Self::new_session_action))
             .on_action(cx.listener(Self::close_session_action))
             .on_action(cx.listener(Self::focus_next_pane_action))
