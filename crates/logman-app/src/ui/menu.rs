@@ -450,6 +450,10 @@ impl RenderOnce for MenuButton {
 
         let trigger = div()
             .id(ElementId::from((self.id.clone(), "trigger")))
+            // The trigger may sit inside a window drag area — the toolbar
+            // doubles as the title bar in the custom style — and occluding is
+            // what keeps a click on it from being read as "move the window".
+            .occlude()
             .group(TRIGGER_GROUP)
             .flex()
             .flex_none()

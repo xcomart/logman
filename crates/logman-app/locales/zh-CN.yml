@@ -108,6 +108,9 @@ settings:
   ui_theme: 界面主题
   theme_dark: 深色
   theme_light: 浅色
+  titlebar: 标题栏
+  titlebar_custom: 自定义
+  titlebar_system: 系统
   language: 语言
   opacity: 不透明度
   opacity_hint: "% (50–100)"

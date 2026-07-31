@@ -108,6 +108,9 @@ settings:
   ui_theme: UI 테마
   theme_dark: 어둡게
   theme_light: 밝게
+  titlebar: 타이틀 바
+  titlebar_custom: 커스텀
+  titlebar_system: 시스템
   language: 언어
   opacity: 불투명도
   opacity_hint: "% (50–100)"

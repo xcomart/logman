@@ -108,6 +108,9 @@ settings:
   ui_theme: Thème de l'interface
   theme_dark: Sombre
   theme_light: Clair
+  titlebar: Barre de titre
+  titlebar_custom: Personnalisée
+  titlebar_system: Système
   language: Langue
   opacity: Opacité
   opacity_hint: "% (50–100)"

@@ -46,12 +46,12 @@ mod verifier;
 rust_i18n::i18n!("locales", fallback = "en");
 
 use gpui::{
-    AnyElement, App, Application, Bounds, Context, DragMoveEvent, ElementId, Entity, EntityId,
+    AnyElement, App, Application, Bounds, Context, Div, DragMoveEvent, ElementId, Entity, EntityId,
     FocusHandle, Focusable, KeyBinding, Menu, MenuItem, Pixels, Point, ScrollHandle, SharedString,
-    Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
-    actions, div, prelude::*, px, relative, size,
+    Stateful, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowOptions, actions, div, img, prelude::*, px, relative, size,
 };
-use logman_core::{SessionProfile, UiTheme, WindowSettings};
+use logman_core::{SessionProfile, TitlebarStyle, UiTheme, WindowSettings};
 use logman_ssh::SshAuth;
 
 use about_dialog::{AboutDialog, AboutDialogEvent};
@@ -65,8 +65,8 @@ use session::{Session, SessionStatus};
 use settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use terminal_view::{PaneFocused, TerminalView};
 use ui::{
-    Button, ButtonVariant, ContextMenu, MenuButton, MenuEntry, TabBar, TabItem, Theme, set_theme,
-    theme, tooltip_label,
+    Button, ButtonVariant, ContextMenu, MenuButton, MenuEntry, TabBar, TabItem, Theme,
+    WindowControlIcons, WindowControls, set_theme, theme, tooltip_label,
 };
 
 actions!(
@@ -120,6 +120,22 @@ const QUICK_SELECT_TABS: usize = 9;
 /// Must match the height [`TabBar`] gives itself, otherwise the menu button cell
 /// and the tab strip would not line up.
 const TOOLBAR_HEIGHT: f32 = 36.;
+
+/// Distance from the top left of the window to the top left of the macOS
+/// traffic lights, in the custom title bar style.
+///
+/// The buttons are 14 pt tall, so half the difference to [`TOOLBAR_HEIGHT`]
+/// centres them in the toolbar band.
+const TRAFFIC_LIGHT_ORIGIN: Point<Pixels> = Point {
+    x: px(12.),
+    y: px(11.),
+};
+
+/// Width kept clear at the left of the toolbar for the macOS traffic lights.
+///
+/// Three 14 pt buttons, 20 pt apart, starting at [`TRAFFIC_LIGHT_ORIGIN`], plus
+/// the same margin again after the last one.
+const TRAFFIC_LIGHT_GAP: f32 = 78.;
 
 /// Modifier key named in the shortcut hints of the dropdown menu and the empty
 /// state.
@@ -323,6 +339,14 @@ struct Workspace {
     /// The tab a right-click opened a context menu for, and where the pointer
     /// was when it did. `None` while no tab menu is showing.
     tab_context: Option<(usize, Point<Pixels>)>,
+    /// Title bar style currently *on the window*.
+    ///
+    /// Starts as the style the window was created with and is re-set whenever
+    /// the setting is applied, in the same breath as the window is told to
+    /// switch. Not read from the settings directly: the toolbar has to branch on
+    /// what the window actually carries, and only this field follows the
+    /// platform call rather than the stored preference.
+    titlebar: TitlebarStyle,
     /// Keeps the connection dialog subscription alive.
     _dialog_events: Subscription,
     /// Keeps the settings dialog subscription alive.
@@ -335,7 +359,10 @@ struct Workspace {
 
 impl Workspace {
     /// Builds an empty workspace and wires up the connection dialog.
-    fn new(window: &Window, cx: &mut Context<Self>) -> Self {
+    ///
+    /// `titlebar` is the style the window was opened with; from then on the
+    /// field tracks whatever the applied settings switched the window to.
+    fn new(titlebar: TitlebarStyle, window: &Window, cx: &mut Context<Self>) -> Self {
         let dialog = cx.new(ConnectionDialog::new);
         let dialog_events =
             cx.subscribe_in(
@@ -371,6 +398,23 @@ impl Workspace {
                     // repaint; it has to be handed over again.
                     cx.set_menus(app_menus());
                     apply_ui_theme(settings.ui_theme, cx);
+                    // Ahead of the repaint, so the toolbar's next frame already
+                    // knows whether it has to stand in for a title bar; and
+                    // ahead of the two calls below, which leave the accent
+                    // policy and the caption colors on the window, so a caption
+                    // that comes back here comes back already themed.
+                    //
+                    // The field follows the call rather than the stored
+                    // setting: everything that branches on it is asking what
+                    // the window carries, not what was last saved.
+                    if settings.window.titlebar != this.titlebar {
+                        this.titlebar = settings.window.titlebar;
+                        let custom = this.titlebar == TitlebarStyle::Custom;
+                        window.set_titlebar_transparent(
+                            custom,
+                            custom.then_some(TRAFFIC_LIGHT_ORIGIN),
+                        );
+                    }
                     cx.refresh_windows();
                     window.set_background_appearance(window_appearance(&settings.window));
                     // After the background appearance, never before: on Windows
@@ -430,6 +474,7 @@ impl Workspace {
             menu_open: false,
             tab_menu_open: false,
             tab_context: None,
+            titlebar,
             _dialog_events: dialog_events,
             _settings_events: settings_events,
             _about_events: about_events,
@@ -1155,8 +1200,17 @@ impl Workspace {
     ///
     /// The button is left out on macOS, where [`app_menus`] puts the same
     /// commands in the system menu bar.
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+    ///
+    /// In the custom title bar style this row *is* the title bar. It then marks
+    /// itself as the window's drag area, takes over writing the application's
+    /// name at its left end, and — off macOS, which keeps its native traffic
+    /// lights — grows a set of caption buttons at its right end. Every
+    /// *control* inside it occludes, so the drag area only ever answers for the
+    /// gaps between them; see [`ui::window_controls`]. The name is not a
+    /// control and deliberately does not.
+    fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
+        let custom = draws_own_titlebar(self.titlebar, window);
         let menu = (!cfg!(target_os = "macos")).then(|| self.render_app_menu(cx));
         // Nothing to browse without a session, so the toggle goes with the
         // panel it would open.
@@ -1170,6 +1224,9 @@ impl Workspace {
             let hover_text = if open { theme.accent } else { theme.text };
             div()
                 .id("toggle-file-panel")
+                // The row behind it may be a window drag area; see
+                // [`ui::window_controls`].
+                .occlude()
                 .group(PANEL_TOGGLE_GROUP)
                 .flex()
                 .flex_none()
@@ -1220,14 +1277,103 @@ impl Workspace {
                 .children(toggle)
         });
 
+        // Room for the traffic lights AppKit still draws over the transparent
+        // title bar. Painted like the leading cell rather than left empty, so
+        // the band reads as one strip. Fullscreen hides the buttons, and the
+        // gap goes with them.
+        let traffic_lights =
+            (custom && cfg!(target_os = "macos") && !window.is_fullscreen()).then(|| {
+                div()
+                    .flex_none()
+                    .w(px(TRAFFIC_LIGHT_GAP))
+                    .h(px(TOOLBAR_HEIGHT))
+                    .bg(theme.surface)
+                    .border_b_1()
+                    .border_color(theme.border)
+            });
+
+        // The application's own name, which only the custom style has to write:
+        // a system title bar already carries it, and drawing it twice would put
+        // it in two places at once.
+        //
+        // Windows and the GTK/KDE captions set an application icon beside the
+        // title and macOS does not, so the icon follows that split. It is a
+        // colour image, so `img` rather than `svg`: the latter keeps only an
+        // icon's coverage and would paint the mark as one flat tint.
+        //
+        // Nothing here is interactive, and — unlike every control in this row —
+        // nothing here occludes either. The name and the mark are part of the
+        // *empty* title bar as far as the window is concerned, so a press on
+        // them has to reach the drag area underneath and move the window.
+        let title = custom.then(|| {
+            // `Resource::Embedded` spelled out rather than left to `img`'s
+            // `From<&str>`: that conversion asks the http `Uri` parser first,
+            // and a bare file name parses as a valid relative URI — the icon
+            // would be "fetched" instead of read from the asset source, and
+            // the fetch can only fail.
+            let icon = (!cfg!(target_os = "macos")).then(|| {
+                img(gpui::ImageSource::Resource(gpui::Resource::Embedded(
+                    icons::APP_ICON.into(),
+                )))
+                .size(px(16.))
+                .flex_none()
+            });
+            div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap(px(6.))
+                .h(px(TOOLBAR_HEIGHT))
+                .px(px(10.))
+                .bg(theme.surface)
+                .border_b_1()
+                .border_color(theme.border)
+                // A shade quieter than a tab title, which is the one label in
+                // this row that has to be read.
+                .text_size(px(12.))
+                .text_color(theme.text_muted)
+                .children(icon)
+                .child("logman")
+        });
+
+        // The caption buttons the other two platforms have to draw themselves.
+        let controls = (custom && !cfg!(target_os = "macos")).then(|| {
+            WindowControls::new(
+                "window-controls",
+                WindowControlIcons {
+                    minimize: icons::WINDOW_MINIMIZE.into(),
+                    maximize: icons::WINDOW_MAXIMIZE.into(),
+                    restore: icons::WINDOW_RESTORE.into(),
+                    close: icons::WINDOW_CLOSE.into(),
+                },
+            )
+        });
+
         div()
+            .id("toolbar")
             .flex()
             .flex_row()
             .flex_none()
             .items_center()
             .w_full()
+            .h(px(TOOLBAR_HEIGHT))
+            .when(custom, |this| {
+                // Occluding is load-bearing, not just hygiene: the workspace
+                // root tracks focus, and gpui's focus transfer marks every
+                // mouse down over it `default_prevented` — which the Windows
+                // backend reads as "the app took this press", swallowing the
+                // `HTCAPTION` down that would have started the system drag.
+                // Cutting the root's hitbox out from under the strip keeps the
+                // press unclaimed, and spares the terminal a focus loss for a
+                // click that was aimed at the window, not the app.
+                titlebar_gestures(this.occlude().window_control_area(WindowControlArea::Drag))
+            })
+            .children(traffic_lights)
+            .children(title)
             .children(leading)
             .child(div().flex_1().min_w_0().child(self.render_tab_bar(cx)))
+            .children(controls)
             .into_any_element()
     }
 
@@ -1768,12 +1914,12 @@ fn render_pane(
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
         // Before anything is built, so the panel is already pointed at the
         // active pane's session by the time it renders itself as a child.
         self.sync_file_panel(cx);
-        let toolbar = self.render_toolbar(cx);
+        let toolbar = self.render_toolbar(window, cx);
         let body = self.render_body(cx);
         let status_bar = self.render_status_bar(cx);
         let tab_context = self.render_tab_context(cx);
@@ -1839,6 +1985,87 @@ fn apply_ui_theme(ui_theme: UiTheme, cx: &mut App) {
         UiTheme::Dark => Theme::dark(),
     };
     set_theme(theme, cx);
+}
+
+/// Whether the toolbar has to stand in for the window's title bar.
+///
+/// On Windows and macOS the style applied to the window settles it: a
+/// transparent title bar leaves no platform caption, so the toolbar is all
+/// there is.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn draws_own_titlebar(style: TitlebarStyle, _window: &Window) -> bool {
+    style == TitlebarStyle::Custom
+}
+
+/// Whether the toolbar has to stand in for the window's title bar.
+///
+/// Linux is not the configured style alone. `appears_transparent` means nothing
+/// to the X11 and Wayland backends: the caption stays the compositor's until
+/// the window asks for client-side decorations, and asking for those also makes
+/// the resize borders and the drop shadow the app's to draw. logman does not
+/// ask yet, so what the window actually ended up with is what decides here —
+/// and the custom style is, for now, a no-op on Linux rather than a second row
+/// of buttons under the compositor's own.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn draws_own_titlebar(style: TitlebarStyle, window: &Window) -> bool {
+    style == TitlebarStyle::Custom
+        && matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        )
+}
+
+/// Wires the gestures a system title bar answers to onto the custom one.
+///
+/// Windows needs none of them. The row reports itself as
+/// [`WindowControlArea::Drag`], the hit test turns that into `HTCAPTION`, and
+/// the window procedure then does the dragging, the aero-snap gestures and the
+/// double-click to maximise on its own — before the app is ever told a button
+/// went down.
+#[cfg(target_os = "windows")]
+fn titlebar_gestures(row: Stateful<Div>) -> Stateful<Div> {
+    row
+}
+
+/// Wires the gestures a system title bar answers to onto the custom one.
+///
+/// AppKit still drags the window for the strip its own title bar would have
+/// covered, so only the double-click is left to answer — and it has to go
+/// through [`Window::titlebar_double_click`], which follows whatever the user
+/// picked in System Settings (zoom, minimise, or nothing at all).
+#[cfg(target_os = "macos")]
+fn titlebar_gestures(row: Stateful<Div>) -> Stateful<Div> {
+    row.on_click(|event, window, _cx| {
+        if event.standard_click() && event.click_count() == 2 {
+            window.titlebar_double_click();
+        }
+    })
+}
+
+/// Wires the gestures a system title bar answers to onto the custom one.
+///
+/// Everything is the app's here: the compositor is told to take over the move,
+/// and the window menu and the zoom have to be asked for explicitly. Only
+/// meaningful once the window carries client-side decorations, which is why
+/// the caller gates them on [`Window::window_decorations`].
+///
+/// The move starts on the press rather than the click because the compositor
+/// takes the pointer with it, so a release would never arrive.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn titlebar_gestures(row: Stateful<Div>) -> Stateful<Div> {
+    use gpui::MouseButton;
+
+    row.on_click(|event, window, _cx| {
+        if event.standard_click() && event.click_count() == 2 {
+            window.zoom_window();
+        }
+    })
+    .on_mouse_down(MouseButton::Left, |_, window, _cx| {
+        window.start_window_move();
+    })
+    .on_mouse_down(MouseButton::Right, |event, window, _cx| {
+        window.show_window_menu(event.position);
+    })
 }
 
 /// Maps the window settings onto a gpui background appearance.
@@ -2012,12 +2239,22 @@ fn main() {
         .detach();
 
         let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);
+        // Read once, here: `appears_transparent` is what strips the platform
+        // caption, and both Windows and macOS decide that when the window is
+        // created. Changing the setting later cannot reach an open window,
+        // which is why the settings dialog says a restart is needed.
+        let titlebar = settings.window.titlebar;
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("logman".into()),
-                    ..Default::default()
+                    appears_transparent: titlebar == TitlebarStyle::Custom,
+                    // Ignored unless the caption is transparent; it moves the
+                    // traffic lights AppKit keeps drawing into the toolbar
+                    // band the app puts in the caption's place.
+                    traffic_light_position: (titlebar == TitlebarStyle::Custom)
+                        .then_some(TRAFFIC_LIGHT_ORIGIN),
                 }),
                 // Wayland compositors and X11 docks match this against
                 // logman.desktop to pick up the application icon.
@@ -2028,7 +2265,7 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
-                let workspace = cx.new(|cx| Workspace::new(window, cx));
+                let workspace = cx.new(|cx| Workspace::new(titlebar, window, cx));
                 window.focus(&workspace.read(cx).focus_handle);
                 apply_caption_theme(window, settings.ui_theme, &theme(cx));
                 workspace

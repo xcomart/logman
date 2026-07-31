@@ -281,6 +281,10 @@ impl RenderOnce for TabBar {
 
             div()
                 .id(tab.id)
+                // The strip may sit inside a drag area when the toolbar
+                // doubles as the title bar; occluding is what keeps a click on
+                // a tab from being read as "move the window" instead.
+                .occlude()
                 .group(group.clone())
                 .flex()
                 .flex_row()
@@ -339,6 +343,9 @@ impl RenderOnce for TabBar {
                     this.child(
                         div()
                             .id(close_id)
+                            // Same reason as the tab itself: a drag area may
+                            // lie behind the strip.
+                            .occlude()
                             .flex()
                             .flex_none()
                             .items_center()
@@ -391,6 +398,9 @@ impl RenderOnce for TabBar {
                 this.child(
                     div()
                         .id(ElementId::from((id.clone(), "new")))
+                        // Same reason as the tab itself: a drag area may lie
+                        // behind the strip.
+                        .occlude()
                         .flex()
                         .flex_none()
                         .items_center()

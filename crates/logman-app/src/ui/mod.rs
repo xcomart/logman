@@ -3,7 +3,8 @@
 //! The module is deliberately free of SSH or terminal concepts: it only knows
 //! about colors ([`theme`]), text entry ([`text_input`]), buttons ([`button`]),
 //! session tabs ([`tab_bar`]), dropdown menus ([`menu`]), hover tooltips
-//! ([`tooltip`]) and dialogs ([`modal`]).
+//! ([`tooltip`]), dialogs ([`modal`]) and the caption buttons of a self-drawn
+//! title bar ([`window_controls`]).
 //!
 //! Call [`init`] once during application start-up so the widgets that need key
 //! bindings get them.
@@ -19,6 +20,7 @@ pub mod tab_bar;
 pub mod text_input;
 pub mod theme;
 pub mod tooltip;
+pub mod window_controls;
 
 pub use button::{Button, ButtonVariant};
 pub use checkbox::Checkbox;
@@ -31,6 +33,7 @@ pub use tab_bar::{TabBar, TabItem, TabStatus};
 pub use text_input::TextInput;
 pub use theme::{Theme, set_theme, theme};
 pub use tooltip::tooltip_label;
+pub use window_controls::{WindowControlIcons, WindowControls};
 
 use gpui::App;
 

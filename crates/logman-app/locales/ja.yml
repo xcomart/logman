@@ -108,6 +108,9 @@ settings:
   ui_theme: UI テーマ
   theme_dark: ダーク
   theme_light: ライト
+  titlebar: タイトルバー
+  titlebar_custom: カスタム
+  titlebar_system: システム
   language: 言語
   opacity: 不透明度
   opacity_hint: "% (50–100)"
