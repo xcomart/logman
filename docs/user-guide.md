@@ -179,7 +179,9 @@ half the grid. The shortcuts are refused on the same threshold.
 Every pane is framed with a hairline once a tab holds more than one, and the
 active pane's frame takes the accent colour. Clicking inside a pane focuses it,
 which also moves the tab label, the status bar and the files panel onto that
-pane's session.
+pane's session. The files panel counts as somewhere focus can go: with it open a
+lone terminal is framed too, and the accent moves to whichever of the two you
+last clicked, so only ever one frame is lit.
 
 <kbd>Alt</kbd>+<kbd>]</kbd> and <kbd>Alt</kbd>+<kbd>[</kbd>
 (<kbd>Cmd</kbd> on macOS) cycle focus through the panes of the tab, wrapping
@@ -297,7 +299,8 @@ button that will not take a click can still say what it would have done.
   names they have on the server, and a local file of the same name is
   overwritten.
 - **Dropping files or folders onto the panel uploads them** into the directory
-  on screen. The panel's frame takes the accent colour while a drag is over it.
+  on screen. The panel's frame takes the accent colour while a drag is over it,
+  the same way it does while the panel holds focus.
   The drop is the one place a mixture of files and folders can be handed over at
   once.
 - The listing refreshes itself after an upload, so whatever landed before a
