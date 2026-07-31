@@ -32,9 +32,9 @@ use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{
     AnyElement, App, AsyncApp, ClickEvent, Context, Div, DragMoveEvent, ElementId, Entity,
-    EntityId, ExternalPaths, Focusable, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-    PathPromptOptions, Pixels, Point, ScrollHandle, SharedString, Subscription, WeakEntity, Window,
-    div, prelude::*, px, relative,
+    EntityId, ExternalPaths, FocusHandle, Focusable, Modifiers, MouseButton, MouseDownEvent,
+    MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, SharedString, Subscription,
+    WeakEntity, Window, div, prelude::*, px, relative,
 };
 use logman_ssh::{RemoteEntry, SftpClient, SftpError};
 use unicode_width::UnicodeWidthStr;
@@ -594,13 +594,22 @@ pub struct FilePanel {
     /// field does not exist yet at that point; this defers it by exactly one
     /// frame, the way the connection dialog focuses its first field.
     focus_prompt: bool,
+    /// Keyboard focus for the panel as a whole.
+    ///
+    /// The panel has no key bindings of its own yet; the handle exists so that
+    /// clicking the panel takes focus *away* from the terminal, which is what
+    /// lets the accent frame say which side of the window a keystroke would go
+    /// to. Nested handles — the rename field's, say — keep working because gpui
+    /// runs the innermost auto-focus listener first and then prevents the
+    /// default, so the root never steals focus back from its own children.
+    focus_handle: FocusHandle,
     /// Watches the active session for directory and status changes.
     _observer: Option<Subscription>,
 }
 
 impl FilePanel {
     /// An empty panel, attached to no session.
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             session: None,
             states: HashMap::new(),
@@ -608,6 +617,7 @@ impl FilePanel {
             context: None,
             crumb_pending: false,
             focus_prompt: false,
+            focus_handle: cx.focus_handle(),
             _observer: None,
         }
     }
@@ -2681,6 +2691,12 @@ impl FilePanel {
     }
 }
 
+impl Focusable for FilePanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for FilePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
@@ -2696,6 +2712,14 @@ impl Render for FilePanel {
         let notice = self.render_notice(state, cx);
         let context = self.render_context(state, cx);
         let accent = theme.accent;
+        // Asked of the focus tree here rather than remembered from a focus
+        // listener: listeners run at the tail of a draw, so a remembered flag
+        // would light the frame one input event late, while `window.focus`
+        // itself schedules the repaint this read then sees. `contains_focused`
+        // rather than `is_focused` so that typing in the rename field — a
+        // handle nested under this one — still counts as the panel having the
+        // keyboard.
+        let focused = self.focus_handle.contains_focused(window, cx);
 
         // Kept wholly inside the panel and added last, so it wins the hit test
         // against the rows it covers. Straddling the border would put half the
@@ -2719,6 +2743,10 @@ impl Render for FilePanel {
 
         div()
             .id("file-panel")
+            // Makes the panel a focus target, so a click anywhere in it moves
+            // the keyboard off the terminal instead of leaving focus behind
+            // where it was.
+            .track_focus(&self.focus_handle)
             .relative()
             .flex()
             .flex_col()
@@ -2732,9 +2760,14 @@ impl Render for FilePanel {
             .bg(app_settings::window_tint(theme.background, cx))
             // A full hairline rather than just the divider on the right, so the
             // drop highlight below can recolour a frame the user can see
-            // without adding a second tinted fill over the panel.
+            // without adding a second tinted fill over the panel. It doubles as
+            // the focus indication, the same accent frame the panes carry — the
+            // workspace drops the active pane's accent while this one is lit,
+            // so only ever one frame claims the keyboard.
             .border_1()
-            .border_color(theme.border)
+            .border_color(if focused { accent } else { theme.border })
+            // Refined over the base style, so a drag hovering the panel keeps
+            // the accent whether or not the panel also holds focus.
             .drag_over::<ExternalPaths>(move |style, _, _, _| style.border_color(accent))
             .can_drop(|dragged, _window, _cx| {
                 <dyn Any>::downcast_ref::<ExternalPaths>(dragged).is_some()

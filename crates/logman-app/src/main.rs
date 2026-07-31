@@ -1612,15 +1612,24 @@ impl Workspace {
     }
 
     /// Renders the panes of the active tab, or the empty state.
-    fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_body(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(tab) = self.tabs.get(self.active) else {
             return self.render_empty_state(cx);
         };
 
         let theme = theme(cx);
-        // An unsplit tab is drawn exactly as it was before panes existed: no
-        // frame, no divider, the terminal filling the body.
-        let split = tab.panes.leaf_count() > 1;
+        // A lone terminal with nothing beside it is drawn exactly as it was
+        // before panes existed: no frame, no divider, the terminal filling the
+        // body. Once it is split, or once the file panel is open next to it,
+        // there is a second thing that can hold the keyboard and the frame has
+        // to be there to say which one does.
+        let frame = tab.panes.leaf_count() > 1 || self.panel_open;
+        // Asked of the focus tree at render time for the same reason the panel
+        // asks it — see `FilePanel::render`. Only one of the two frames wears
+        // the accent, so the active pane gives its own up while the panel has
+        // the keyboard.
+        let panel_focused =
+            self.panel_open && self.panel.focus_handle(cx).contains_focused(window, cx);
         let active = tab.active_pane();
         let root = tab.panes.root();
         let panel = self.panel_open.then(|| self.panel.clone());
@@ -1632,14 +1641,14 @@ impl Workspace {
             .min_w_0()
             .min_h_0()
             .children(panel)
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .child(render_pane(root, active, split, &theme, cx)),
-            )
+            .child(div().flex().flex_1().min_w_0().min_h_0().child(render_pane(
+                root,
+                active,
+                frame,
+                panel_focused,
+                &theme,
+                cx,
+            )))
             .into_any_element()
     }
 
@@ -1871,14 +1880,19 @@ impl Workspace {
 /// own: [`TerminalView`]'s element recomputes the grid from whatever bounds it
 /// is given and only pushes a resize when the cell count changed.
 ///
-/// A leaf renders the terminal view itself. Once a tab holds more than one pane
-/// every leaf is framed with a hairline, accent coloured on the active one. The
-/// frames double as the divider between neighbours, which is why there is no
-/// separate divider element — a third hairline squeezed between two of them
-/// would only thicken the seam. Every pane is framed, not just the active one,
-/// so that moving focus recolours the frame without shifting the layout by a
-/// pixel. It is a border rather than a fill because a translucent window allows
-/// only one tinted fill per pixel and the terminal surface already owns it.
+/// A leaf renders the terminal view itself. When `frame` is set — a split tab,
+/// or a single pane with the file panel beside it — every leaf is framed with a
+/// hairline, accent coloured on the active one. The frames double as the
+/// divider between neighbours, which is why there is no separate divider
+/// element — a third hairline squeezed between two of them would only thicken
+/// the seam. Every pane is framed, not just the active one, so that moving
+/// focus recolours the frame without shifting the layout by a pixel. It is a
+/// border rather than a fill because a translucent window allows only one
+/// tinted fill per pixel and the terminal surface already owns it.
+///
+/// `panel_focused` demotes the active leaf back to the plain border colour: the
+/// file panel wears the accent frame while it holds the keyboard, and two
+/// accent frames at once would say the keystroke is going to both places.
 ///
 /// A split also lays an invisible handle over its divider, last so that it wins
 /// the hit test against the panes it straddles, and positioned absolutely so
@@ -1887,13 +1901,14 @@ impl Workspace {
 fn render_pane(
     node: &PaneNode<PaneLeaf>,
     active: PaneId,
-    split: bool,
+    frame: bool,
+    panel_focused: bool,
     theme: &Theme,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     match node {
         PaneNode::Leaf { id, payload } => {
-            let border = if *id == active {
+            let border = if *id == active && !panel_focused {
                 theme.accent
             } else {
                 theme.border
@@ -1904,7 +1919,7 @@ fn render_pane(
                 .size_full()
                 .min_w_0()
                 .min_h_0()
-                .when(split, |pane| pane.border_1().border_color(border))
+                .when(frame, |pane| pane.border_1().border_color(border))
                 .child(payload.view.clone())
                 .into_any_element()
         }
@@ -1921,8 +1936,8 @@ fn render_pane(
             // Both children are rendered up front because each one needs `cx`
             // for the handles further down the tree, and a closure holding it
             // could not then be called twice.
-            let first = render_pane(first, active, split, theme, cx);
-            let second = render_pane(second, active, split, theme, cx);
+            let first = render_pane(first, active, frame, panel_focused, theme, cx);
+            let second = render_pane(second, active, frame, panel_focused, theme, cx);
             let half = |share: f32, child: AnyElement| {
                 div()
                     .flex()
@@ -1997,7 +2012,7 @@ impl Render for Workspace {
         self.sync_file_panel(cx);
         self.watch_tab_scroll(cx);
         let toolbar = self.render_toolbar(window, cx);
-        let body = self.render_body(cx);
+        let body = self.render_body(window, cx);
         let status_bar = self.render_status_bar(cx);
         let tab_context = self.render_tab_context(cx);
         let dialog = self
