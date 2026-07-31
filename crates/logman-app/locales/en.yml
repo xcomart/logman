@@ -202,6 +202,12 @@ settings:
   ui_theme: UI theme
   theme_dark: Dark
   theme_light: Light
+  # Who draws the window's title bar. "Custom" is logman's own, merged into the
+  # toolbar; "System" is the caption the operating system draws. Applied to the
+  # open window as soon as the settings are saved.
+  titlebar: Title bar
+  titlebar_custom: Custom
+  titlebar_system: System
   language: Language
   opacity: Opacity
   opacity_hint: "% (50–100)"

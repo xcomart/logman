@@ -108,6 +108,9 @@ settings:
   ui_theme: Design der Oberfläche
   theme_dark: Dunkel
   theme_light: Hell
+  titlebar: Titelleiste
+  titlebar_custom: Benutzerdefiniert
+  titlebar_system: System
   language: Sprache
   opacity: Deckkraft
   opacity_hint: "% (50–100)"

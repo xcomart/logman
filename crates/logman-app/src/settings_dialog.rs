@@ -13,7 +13,7 @@ use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyBinding,
     KeyDownEvent, Render, ScrollHandle, SharedString, Window, actions, div, prelude::*, px, rgb,
 };
-use logman_core::{AppSettings, UiTheme};
+use logman_core::{AppSettings, TitlebarStyle, UiTheme};
 use logman_term::TerminalTheme;
 
 use crate::app_settings;
@@ -45,6 +45,16 @@ fn ui_theme_options() -> [(&'static str, SharedString); 2] {
     [
         ("dark", ts!("settings.theme_dark")),
         ("light", ts!("settings.theme_light")),
+    ]
+}
+
+/// Segments of the title bar style picker, in [`TitlebarStyle`] order.
+///
+/// Built per call for the same reason [`ui_theme_options`] is.
+fn titlebar_options() -> [(&'static str, SharedString); 2] {
+    [
+        ("custom", ts!("settings.titlebar_custom")),
+        ("system", ts!("settings.titlebar_system")),
     ]
 }
 
@@ -80,36 +90,38 @@ actions!(
 mod tab {
     /// UI theme picker.
     pub const UI_THEME: isize = 10;
+    /// Title bar style picker.
+    pub const TITLEBAR: isize = 15;
     /// Interface language picker.
-    pub const LANGUAGE: isize = 15;
+    pub const LANGUAGE: isize = 20;
     /// Background opacity, in percent.
-    pub const OPACITY: isize = 20;
+    pub const OPACITY: isize = 30;
     /// Background blur toggle.
-    pub const BLUR: isize = 30;
+    pub const BLUR: isize = 40;
     /// Terminal color scheme grid.
-    pub const SCHEME: isize = 40;
+    pub const SCHEME: isize = 50;
     /// Terminal font family.
-    pub const FONT_FAMILY: isize = 50;
+    pub const FONT_FAMILY: isize = 60;
     /// Terminal font size.
-    pub const FONT_SIZE: isize = 60;
+    pub const FONT_SIZE: isize = 70;
     /// Scrollback depth.
-    pub const SCROLLBACK: isize = 70;
+    pub const SCROLLBACK: isize = 80;
     /// `TERM` advertised to the remote host.
-    pub const TERM: isize = 80;
+    pub const TERM: isize = 90;
     /// Copy-on-select toggle.
-    pub const COPY_ON_SELECT: isize = 90;
+    pub const COPY_ON_SELECT: isize = 100;
     /// Default SSH port for new connections.
-    pub const DEFAULT_PORT: isize = 100;
+    pub const DEFAULT_PORT: isize = 110;
     /// Default login name for new connections.
-    pub const DEFAULT_USERNAME: isize = 110;
+    pub const DEFAULT_USERNAME: isize = 120;
     /// Keepalive interval.
-    pub const KEEPALIVE: isize = 120;
+    pub const KEEPALIVE: isize = 130;
     /// Connect timeout.
-    pub const TIMEOUT: isize = 130;
+    pub const TIMEOUT: isize = 140;
     /// Cancel.
-    pub const CANCEL: isize = 140;
+    pub const CANCEL: isize = 150;
     /// Save.
-    pub const SAVE: isize = 150;
+    pub const SAVE: isize = 160;
 }
 
 /// Emitted by [`SettingsDialog`] when the user acts on it.
@@ -198,6 +210,8 @@ pub struct SettingsDialog {
     base: AppSettings,
     /// UI chrome theme currently selected in the form.
     ui_theme: UiTheme,
+    /// Title bar style currently selected in the form.
+    titlebar: TitlebarStyle,
     /// BCP 47 tag of the interface language; `None` follows the system locale.
     /// Holds the tag rather than the label, because the label is what the
     /// dropdown shows and the tag is what gets persisted.
@@ -313,6 +327,7 @@ impl SettingsDialog {
         Self {
             open: false,
             ui_theme: base.ui_theme,
+            titlebar: base.window.titlebar,
             language: base.language.clone(),
             background_blur: base.window.background_blur,
             scheme: base.terminal.scheme.clone().into(),
@@ -384,6 +399,7 @@ impl SettingsDialog {
     /// Copy `settings` into every control.
     fn fill_form(&mut self, settings: &AppSettings, cx: &mut Context<Self>) {
         self.ui_theme = settings.ui_theme;
+        self.titlebar = settings.window.titlebar;
         self.language = settings.language.clone();
         self.background_blur = settings.window.background_blur;
         self.scheme = settings.terminal.scheme.clone().into();
@@ -444,6 +460,7 @@ impl SettingsDialog {
 
         settings.ui_theme = self.ui_theme;
         settings.language = self.language.clone();
+        settings.window.titlebar = self.titlebar;
         settings.window.background_blur = self.background_blur;
         if let Some(percent) = parse_number::<f32>(&self.opacity_input, cx) {
             settings.window.background_opacity = percent / 100.0;
@@ -665,6 +682,27 @@ impl SettingsDialog {
                 }
             });
 
+        let titlebar_picker = Segmented::new("settings-titlebar")
+            .options(titlebar_options())
+            .selected(match self.titlebar {
+                TitlebarStyle::Custom => 0,
+                TitlebarStyle::System => 1,
+            })
+            .tab_index(tab::TITLEBAR)
+            .on_select({
+                let this = this.clone();
+                move |index, _window, cx| {
+                    this.update(cx, |dialog, cx| {
+                        dialog.titlebar = if index == 1 {
+                            TitlebarStyle::System
+                        } else {
+                            TitlebarStyle::Custom
+                        };
+                        cx.notify();
+                    });
+                }
+            });
+
         let language = Select::new("settings-language")
             .options(Self::language_options())
             .selected(self.language.as_deref().and_then(i18n::display_name))
@@ -718,6 +756,7 @@ impl SettingsDialog {
                 .flex_col()
                 .gap(px(10.))
                 .child(form_row(ts!("settings.ui_theme"), theme_picker))
+                .child(form_row(ts!("settings.titlebar"), titlebar_picker))
                 .child(form_row(ts!("settings.language"), language))
                 .child(form_row(
                     ts!("settings.opacity"),

@@ -108,6 +108,9 @@ settings:
   ui_theme: Тема интерфейса
   theme_dark: Тёмная
   theme_light: Светлая
+  titlebar: Заголовок окна
+  titlebar_custom: Пользовательский
+  titlebar_system: Системный
   language: Язык
   opacity: Непрозрачность
   opacity_hint: "% (50–100)"
