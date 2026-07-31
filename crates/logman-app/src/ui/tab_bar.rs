@@ -343,9 +343,18 @@ impl RenderOnce for TabBar {
                     this.child(
                         div()
                             .id(close_id)
-                            // Same reason as the tab itself: a drag area may
-                            // lie behind the strip.
-                            .occlude()
+                            // Deliberately *not* occluding, unlike the tab and
+                            // the "+": this button only ever sits inside a tab,
+                            // whose own occlusion already keeps the drag area
+                            // behind the strip from answering for it. Occluding
+                            // here would be worse than redundant — gpui's hit
+                            // test stops at the first occluding hitbox, so the
+                            // tab's hitbox would drop out of the hit list the
+                            // moment the pointer reached the button, the
+                            // `group_hover` below would read as false, and the
+                            // button would hide itself out from under the
+                            // pointer. A hidden element paints no listeners, so
+                            // the click that followed would land on nothing.
                             .flex()
                             .flex_none()
                             .items_center()
@@ -419,5 +428,168 @@ impl RenderOnce for TabBar {
                         .child("+"),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::ops::Deref;
+
+    use gpui::{
+        Context, Modifiers, Render, TestAppContext, VisualTestContext, WindowControlArea, point,
+    };
+
+    use super::*;
+
+    /// Vertical middle of the strip; every row of it is one tab tall.
+    const ROW_MIDDLE: f32 = 18.;
+
+    /// How far right of the strip's left edge the sweep looks for the button.
+    ///
+    /// Wide enough to clear one short tab title at any font the test platform
+    /// picks, and still short of the "+" that follows the strip.
+    const SWEEP_WIDTH: i32 = 200;
+
+    /// What a sweep of the tab row answered with, counted per handler.
+    #[derive(Clone, Default)]
+    struct Tally {
+        selected: Rc<Cell<usize>>,
+        closed: Rc<Cell<usize>>,
+        dragged: Rc<Cell<usize>>,
+    }
+
+    /// A tab strip in the arrangement that made the close button unclickable:
+    /// inside an occluding drag area, the way the toolbar renders it when it
+    /// doubles as the title bar.
+    ///
+    /// The drag area counts the presses that reach it. That stands in for what
+    /// the real title bar does with them — start a window move on Linux, answer
+    /// `HTCAPTION` on Windows — and both read the same hit test this does.
+    struct Harness {
+        tally: Tally,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let Tally {
+                selected,
+                closed,
+                dragged,
+            } = self.tally.clone();
+
+            div()
+                .id("toolbar")
+                .occlude()
+                .window_control_area(WindowControlArea::Drag)
+                .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                    dragged.set(dragged.get() + 1)
+                })
+                .w_full()
+                .h(px(36.))
+                .child(
+                    TabBar::new("tabs")
+                        .tabs(vec![TabItem::new("tab-0", "one")])
+                        .active(0)
+                        .on_select(move |_, _, _| selected.set(selected.get() + 1))
+                        .on_close(move |_, _, _| closed.set(closed.get() + 1)),
+                )
+        }
+    }
+
+    /// What a single clicked column answered with.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Answer {
+        /// The tab took the click and asked to be selected.
+        Select,
+        /// The close button took the click.
+        Close,
+        /// The press reached the drag area behind the strip.
+        Drag,
+        /// Nothing at all answered.
+        Nothing,
+    }
+
+    /// Clicks every column of the strip in turn, reporting what each answered.
+    ///
+    /// Sweeping rather than aiming: the close button's x depends on how wide the
+    /// test platform draws the title, which is not something a test should
+    /// pretend to know. Each column is hovered before it is clicked, because the
+    /// button only exists once the pointer is on the tab.
+    fn sweep_the_strip(cx: &mut TestAppContext) -> Vec<Answer> {
+        let tally = Tally::default();
+
+        let window = cx.add_window({
+            let tally = tally.clone();
+            move |_, _| Harness { tally }
+        });
+        let mut cx = VisualTestContext::from_window(*window.deref(), cx);
+        cx.run_until_parked();
+
+        let mut answers = Vec::new();
+        let mut seen = (0, 0, 0);
+        for x in 0..SWEEP_WIDTH {
+            let position = point(px(x as f32), px(ROW_MIDDLE));
+            cx.simulate_mouse_move(position, None, Modifiers::none());
+            cx.simulate_click(position, Modifiers::none());
+
+            let now = (
+                tally.selected.get(),
+                tally.closed.get(),
+                tally.dragged.get(),
+            );
+            answers.push(match (now.0 - seen.0, now.1 - seen.1, now.2 - seen.2) {
+                (0, 0, 0) => Answer::Nothing,
+                (1, 0, 0) => Answer::Select,
+                (0, 1, 0) => Answer::Close,
+                (0, 0, 1) => Answer::Drag,
+                other => panic!("column {x} answered more than once: {other:?}"),
+            });
+            seen = now;
+        }
+
+        answers
+    }
+
+    /// The regression this file exists to hold on to: the close button used to
+    /// occlude, which cut its own tab out of the hit test and so out of the
+    /// `group_hover` that reveals it — leaving a button that hid itself from
+    /// under the pointer and answered no click at all.
+    #[gpui::test]
+    fn the_close_button_takes_a_click_inside_a_drag_area(cx: &mut TestAppContext) {
+        let answers = sweep_the_strip(cx);
+
+        assert!(
+            answers.contains(&Answer::Close),
+            "no column of the tab closed it: {answers:?}"
+        );
+        assert!(
+            answers.contains(&Answer::Select),
+            "no column of the tab selected it: {answers:?}"
+        );
+    }
+
+    /// The other half of the same balance, and what the tab's own occlusion is
+    /// for: no column of a tab may let the press through to the drag area, or
+    /// the title bar takes it and moves the window instead of switching tabs.
+    /// Past the last tab the strip is bare, and there the drag area should
+    /// answer.
+    #[gpui::test]
+    fn the_drag_area_answers_only_past_the_last_tab(cx: &mut TestAppContext) {
+        let answers = sweep_the_strip(cx);
+
+        let last_tab_column = answers
+            .iter()
+            .rposition(|answer| matches!(answer, Answer::Select | Answer::Close))
+            .expect("the sweep never landed on the tab");
+        let first_drag_column = answers
+            .iter()
+            .position(|answer| *answer == Answer::Drag)
+            .expect("the sweep never landed on the bare strip");
+
+        assert!(
+            first_drag_column > last_tab_column,
+            "the drag area answered a press aimed at a tab: {answers:?}"
+        );
     }
 }

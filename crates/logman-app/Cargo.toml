@@ -62,3 +62,8 @@ sys-locale.workspace = true
 # The file panel's upload planner walks a real tree, symlinks included, so the
 # test builds one rather than mocking the filesystem out.
 tempfile.workspace = true
+# gpui's headless test platform, for the widget behaviour that only exists once
+# an element tree is laid out and hit-tested -- hover-revealed controls, and
+# which of two stacked hitboxes answers a press. Test-only: the binary links
+# gpui without it.
+gpui = { workspace = true, features = ["test-support"] }
