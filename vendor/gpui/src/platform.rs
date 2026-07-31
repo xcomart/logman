@@ -483,6 +483,18 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn is_hovered(&self) -> bool;
     fn set_title(&mut self, title: &str);
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);
+    /// Switches an existing window between a transparent (app-drawn) title bar
+    /// and the one the platform draws, without recreating the window.
+    ///
+    /// `traffic_light_position` is the macOS window button origin to use while
+    /// transparent, and is ignored on every other platform. Backends that
+    /// cannot change this after creation leave it a no-op.
+    fn set_titlebar_transparent(
+        &self,
+        _transparent: bool,
+        _traffic_light_position: Option<Point<Pixels>>,
+    ) {
+    }
     fn minimize(&self);
     fn zoom(&self);
     fn toggle_fullscreen(&self);

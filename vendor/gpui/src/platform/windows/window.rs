@@ -1,7 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     num::NonZeroIsize,
     path::PathBuf,
     rc::{Rc, Weak},
@@ -67,7 +67,12 @@ pub(crate) struct WindowsWindowInner {
     pub(crate) state: RefCell<WindowsWindowState>,
     pub(crate) system_settings: RefCell<WindowsSystemSettings>,
     pub(crate) handle: AnyWindowHandle,
-    pub(crate) hide_title_bar: bool,
+    /// Whether the platform caption is suppressed so the app can draw its own.
+    ///
+    /// A cell rather than a plain bool because
+    /// [`PlatformWindow::set_titlebar_transparent`] flips it on a live window,
+    /// from the same thread the window procedure runs on.
+    pub(crate) hide_title_bar: Cell<bool>,
     pub(crate) is_movable: bool,
     pub(crate) executor: ForegroundExecutor,
     pub(crate) windows_version: WindowsVersion,
@@ -224,7 +229,7 @@ impl WindowsWindowInner {
             drop_target_helper: context.drop_target_helper.clone(),
             state,
             handle: context.handle,
-            hide_title_bar: context.hide_title_bar,
+            hide_title_bar: Cell::new(context.hide_title_bar),
             is_movable: context.is_movable,
             executor: context.executor.clone(),
             windows_version: context.windows_version,
@@ -773,6 +778,32 @@ impl PlatformWindow for WindowsWindow {
                 set_window_composition_attribute(hwnd, Some((0, 0, 0, 0)), 4);
             }
         }
+    }
+
+    fn set_titlebar_transparent(
+        &self,
+        transparent: bool,
+        _traffic_light_position: Option<Point<Pixels>>,
+    ) {
+        if self.0.hide_title_bar.get() == transparent {
+            return;
+        }
+        self.0.hide_title_bar.set(transparent);
+        // The caption is not a window style here, it is whatever WM_NCCALCSIZE
+        // leaves of the non-client area, so the frame only has to be recomputed
+        // for the flag above to take effect. Traffic lights are macOS-only.
+        //
+        // Off the executor rather than inline: the client area changes size, so
+        // `SetWindowPos` reaches `WM_SIZE` before it returns, and the resize
+        // callback would re-enter an app that is still borrowed by whatever
+        // asked for the switch.
+        let hwnd = self.0.hwnd;
+        self.0
+            .executor
+            .spawn(async move {
+                notify_frame_changed(hwnd);
+            })
+            .detach();
     }
 
     fn minimize(&self) {
