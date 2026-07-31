@@ -236,6 +236,9 @@ authentication.
 - Directories sort before files, then by name, ignoring case.
 - Folders take the accent colour, symlinks carry a small badge, and files show
   their size in the right-hand column.
+- A name too long for the panel is cut off at the right. Resting the pointer on
+  such a row shows the whole name; names that already fit stay quiet. Dragging
+  the panel wider is the other way to read one.
 - A single click selects a row; the selection is what the download button and
   the context menu act on, and it is dropped whenever the directory changes.
 - **<kbd>Ctrl</kbd>-click** (<kbd>Cmd</kbd>-click on macOS) adds a row to the

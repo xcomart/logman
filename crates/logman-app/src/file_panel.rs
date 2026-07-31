@@ -37,6 +37,7 @@ use gpui::{
     px, relative,
 };
 use logman_ssh::{RemoteEntry, SftpClient, SftpError};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app_settings;
 use crate::i18n::ts;
@@ -104,6 +105,28 @@ const FOLD_CRUMB: &str = "\u{2026}";
 
 /// What goes between two breadcrumb pieces.
 const CRUMB_SEPARATOR: &str = "/";
+
+/// Width of one column of a listing row's name, in pixels — an average, like
+/// [`CRUMB_CHAR`] and for the same reason.
+///
+/// The same figure scaled from the header's 11px to the row's 12px
+/// (`6.4 × 12 ÷ 11 ≈ 6.98`) and rounded *up*. The rounding direction is the
+/// point: a wider estimate yields a smaller budget and so a tooltip slightly
+/// before the name actually needs one, which is the harmless way to be wrong.
+const ROW_CHAR: f32 = 7.;
+
+/// Horizontal padding of a listing row, in pixels.
+const ROW_PADDING: f32 = 8.;
+
+/// Gap between a listing row's icon, name, badge and size, in pixels.
+const ROW_GAP: f32 = 6.;
+
+/// Width of one character of the size column, in pixels.
+///
+/// The column is drawn at 11px, so this is [`CRUMB_CHAR`] itself — but the
+/// strings are `"1023 B"` and `"1.5 MB"`, all digits, spaces and capitals,
+/// which run wider than an average of ordinary prose. Rounded up accordingly.
+const SIZE_CHAR: f32 = 7.;
 
 /// Size of the icon leading a listing row, in pixels.
 const ROW_ICON: f32 = 14.;
@@ -2173,6 +2196,15 @@ impl FilePanel {
         let parent = name == PARENT_NAME;
         let owned = label.clone();
         let clicked = label.clone();
+        // Recomputed every frame rather than cached, exactly as the breadcrumb's
+        // budget is: the answer depends on the panel's width, and the width
+        // changes continuously while the edge is being dragged.
+        let clipped = name_is_clipped(
+            self.width,
+            name,
+            is_symlink,
+            size.as_ref().map(SharedString::as_ref),
+        );
 
         div()
             .id(id)
@@ -2191,6 +2223,12 @@ impl FilePanel {
             .when(!selected, |row| {
                 row.hover(|style| style.bg(theme.surface_hover))
             })
+            // On the row rather than on the label: the label is a bare `div`
+            // with no id, and giving it one to carry a tooltip would add a
+            // second hitbox over every row for no gain — gpui places the
+            // tooltip at the pointer either way, and the pointer is over the
+            // name whenever the name is what the user is reading.
+            .when(clipped, |row| row.tooltip(tooltip_label(label.clone())))
             .on_click(cx.listener(move |panel, event: &ClickEvent, _window, cx| {
                 // A double click arrives as two events, so the first one has
                 // already selected the row by the time this opens it.
@@ -3069,6 +3107,60 @@ fn join(directory: &str, name: &str) -> String {
     }
 }
 
+/// Whether a listing row's name is too long to be shown whole, and so wants a
+/// tooltip carrying it in full.
+///
+/// An estimate, like [`fold_budget`], and chosen over measuring for a reason
+/// specific to this list: **the listing is not virtualised**. Every entry of the
+/// directory is built on every repaint, so a directory with ten thousand files
+/// builds ten thousand rows a frame. Shaping each name through
+/// [`Window::text_system`](gpui::Window::text_system) to learn its exact width
+/// would put a text layout — the expensive half of drawing text — on that path,
+/// multiplied by the size of the directory, to decide something no one sees
+/// until they hover. The arithmetic below costs a few multiplications.
+///
+/// Being wrong is not symmetric here, so the estimate leans one way: a name cut
+/// off with no way to read it is a real loss, while a tooltip on a name that
+/// happened to fit is a moment of redundancy. Every constant therefore rounds
+/// *up* — [`ROW_CHAR`], [`SIZE_CHAR`] — and every subtraction below is taken at
+/// its most pessimistic, so the budget errs small and the tooltip errs present.
+///
+/// Widths count columns rather than characters: a Hangul or Han name occupies
+/// two columns per character at the same font size, and counting `chars` would
+/// let such a name run to twice the width before anyone thought it was long.
+fn name_is_clipped(width: f32, name: &str, badge: bool, size: Option<&str>) -> bool {
+    // Everything the row spends before the name gets what is left: the panel's
+    // own hairline border on both sides, the row's padding, the leading icon
+    // and the gap after it, then the symlink badge and the size column when
+    // they are there — each with the gap that precedes it.
+    let mut spent = 2. + 2. * ROW_PADDING + ROW_ICON + ROW_GAP;
+    if badge {
+        spent += ROW_GAP + BADGE_ICON;
+    }
+    if let Some(size) = size {
+        spent += ROW_GAP + columns(size) as f32 * SIZE_CHAR;
+    }
+
+    let usable = width - spent;
+    if !usable.is_finite() || usable <= 0. {
+        // No room to draw a name at all, so anything at all is clipped.
+        return !name.is_empty();
+    }
+    let budget = (usable / ROW_CHAR).floor();
+    let budget = if budget >= 0. { budget as usize } else { 0 };
+    columns(name) > budget
+}
+
+/// How many columns `text` occupies, counting East Asian wide characters twice.
+///
+/// [`UnicodeWidthStr`] answers the question the estimate actually asks — how
+/// much room this will take — for the one distinction that matters at this
+/// resolution. It is not a substitute for measuring a proportional font; it is
+/// what keeps a CJK name from being treated as half its real width.
+fn columns(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
 /// How much path the header can hold at a panel `width` pixels wide, in
 /// characters.
 ///
@@ -3556,6 +3648,115 @@ mod tests {
         // The failure is what is on screen, so an expiry belonging to the
         // message before it has to be refused rather than clear the line.
         assert!(matches!(state.notice, Some(Notice::Error(_))));
+    }
+
+    /// A name the row has room for must not be explained, or every listing
+    /// would sprout tooltips nobody asked for.
+    #[test]
+    fn a_short_name_needs_no_tooltip() {
+        assert!(!name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            "notes.txt",
+            false,
+            None
+        ));
+        assert!(!name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            "notes.txt",
+            true,
+            Some("1.5 MB")
+        ));
+        // The narrowest the panel goes still holds an ordinary name.
+        assert!(!name_is_clipped(MIN_PANEL_WIDTH, "app.log", false, None));
+    }
+
+    /// The case the tooltip exists for: a name the row has to cut.
+    #[test]
+    fn a_name_too_long_for_the_row_is_explained() {
+        let long = "2026-07-30T12-00-00-application-server.log";
+        assert!(name_is_clipped(DEFAULT_PANEL_WIDTH, long, false, None));
+        assert!(name_is_clipped(MIN_PANEL_WIDTH, long, false, None));
+        // Even at its widest the panel is a sidebar, not a window.
+        assert!(name_is_clipped(
+            MAX_PANEL_WIDTH,
+            &"x".repeat(200),
+            false,
+            None
+        ));
+    }
+
+    /// The budget either side of the cut. Named columns rather than characters
+    /// because that is what the estimate counts.
+    #[test]
+    fn the_tooltip_appears_one_column_past_the_budget() {
+        // 260 − 2 border − 16 padding − 14 icon − 6 gap = 222px ÷ 7 = 31.
+        let budget = 31;
+        assert!(!name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            &"a".repeat(budget),
+            false,
+            None
+        ));
+        assert!(name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            &"a".repeat(budget + 1),
+            false,
+            None
+        ));
+    }
+
+    /// A Hangul name takes two columns per character, so counting `chars` would
+    /// let it run to twice the width before anyone called it long — which is
+    /// exactly the name most likely to be cut off.
+    #[test]
+    fn a_wide_name_is_measured_in_columns_not_characters() {
+        let hangul = "가".repeat(16);
+        let latin = "a".repeat(16);
+        assert_eq!(hangul.chars().count(), latin.chars().count());
+
+        assert!(name_is_clipped(DEFAULT_PANEL_WIDTH, &hangul, false, None));
+        assert!(!name_is_clipped(DEFAULT_PANEL_WIDTH, &latin, false, None));
+    }
+
+    /// Everything drawn beside the name takes room from it, so the same name
+    /// can fit on a directory row and not on a symlinked file's.
+    #[test]
+    fn the_badge_and_the_size_column_shrink_the_budget() {
+        let name = "a".repeat(26);
+
+        // A directory: no size column, no badge, so the name has the row.
+        assert!(!name_is_clipped(DEFAULT_PANEL_WIDTH, &name, false, None));
+        // The same name on a file, once the size column is beside it.
+        assert!(name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            &name,
+            false,
+            Some("1.5 MB")
+        ));
+
+        // And the badge takes a little more still: a name that survives the
+        // size column alone can lose to the two together.
+        let borderline = "a".repeat(23);
+        assert!(!name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            &borderline,
+            false,
+            Some("1.5 MB")
+        ));
+        assert!(name_is_clipped(
+            DEFAULT_PANEL_WIDTH,
+            &borderline,
+            true,
+            Some("1.5 MB")
+        ));
+    }
+
+    /// A width that leaves no room at all must not divide its way to "it fits".
+    #[test]
+    fn a_row_with_no_room_clips_anything_but_an_empty_name() {
+        assert!(name_is_clipped(0., "a", false, None));
+        assert!(!name_is_clipped(0., "", false, None));
+        assert!(name_is_clipped(f32::NAN, "a", false, None));
     }
 
     /// The rule that keeps a delete inside the directory it was asked about.
