@@ -3824,6 +3824,7 @@ dependencies = [
  "sys-locale",
  "tempfile",
  "unicode-segmentation",
+ "unicode-width",
  "uuid",
  "windows 0.61.3",
  "winresource",
