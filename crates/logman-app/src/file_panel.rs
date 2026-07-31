@@ -42,7 +42,9 @@ use crate::app_settings;
 use crate::i18n::ts;
 use crate::icons;
 use crate::session::Session;
-use crate::ui::{Button, ButtonVariant, ContextMenu, MenuEntry, TextInput, Theme, theme};
+use crate::ui::{
+    Button, ButtonVariant, ContextMenu, MenuEntry, TextInput, Theme, theme, tooltip_label,
+};
 
 /// Width the panel opens at, in pixels.
 ///
@@ -1933,6 +1935,7 @@ impl FilePanel {
                     .child(icon_button(
                         "file-panel-refresh",
                         icons::REFRESH,
+                        ts!("files.tip_refresh"),
                         self.session.is_some(),
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| panel.refresh(cx)),
@@ -1940,6 +1943,7 @@ impl FilePanel {
                     .child(icon_button(
                         "file-panel-new-folder",
                         icons::NEW_FOLDER,
+                        ts!("files.tip_new_folder"),
                         ready,
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| {
@@ -1949,6 +1953,7 @@ impl FilePanel {
                     .child(icon_button(
                         "file-panel-upload",
                         icons::UPLOAD,
+                        ts!("files.tip_upload"),
                         ready,
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| {
@@ -1958,6 +1963,7 @@ impl FilePanel {
                     .child(icon_button(
                         "file-panel-upload-folder",
                         icons::UPLOAD_FOLDER,
+                        ts!("files.tip_upload_folder"),
                         ready,
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| {
@@ -1967,6 +1973,7 @@ impl FilePanel {
                     .child(icon_button(
                         "file-panel-download",
                         icons::DOWNLOAD,
+                        ts!("files.tip_download"),
                         ready && downloadable,
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| panel.download(cx)),
@@ -1974,6 +1981,7 @@ impl FilePanel {
                     .child(icon_button(
                         "file-panel-rename",
                         icons::RENAME,
+                        ts!("files.tip_rename"),
                         ready && renameable,
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| panel.begin_rename(cx)),
@@ -1985,6 +1993,7 @@ impl FilePanel {
                     .child(icon_button(
                         "file-panel-delete",
                         icons::DELETE,
+                        ts!("files.tip_delete"),
                         ready && deletable,
                         &theme,
                         cx.listener(|panel, _: &ClickEvent, _window, cx| panel.confirm_delete(cx)),
@@ -3284,6 +3293,7 @@ fn placeholder(message: SharedString, theme: &Theme) -> AnyElement {
 fn icon_button(
     id: impl Into<ElementId>,
     path: &'static str,
+    tip: SharedString,
     enabled: bool,
     theme: &Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -3305,6 +3315,12 @@ fn icon_button(
         .justify_center()
         .size(px(22.))
         .rounded_sm()
+        // Outside the `enabled` gate on purpose. These buttons carry no text, so
+        // a dimmed one is a glyph with no explanation at all — and "what would
+        // this have done?" is exactly the question a user has when a button will
+        // not take a click. gpui builds the tooltip's hitbox from the tooltip
+        // alone, so this keeps working with every listener below removed.
+        .tooltip(tooltip_label(tip))
         .when(enabled, |button| {
             button
                 .cursor_pointer()

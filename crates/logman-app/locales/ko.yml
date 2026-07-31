@@ -53,6 +53,13 @@ files:
   menu_upload: 파일 업로드…
   menu_upload_folder: 폴더 업로드…
   menu_refresh: 새로 고침
+  tip_refresh: 새로 고침
+  tip_new_folder: 새 폴더
+  tip_upload: 파일 업로드
+  tip_upload_folder: 폴더 업로드
+  tip_download: 다운로드
+  tip_rename: 이름 변경
+  tip_delete: 삭제
   uploading: "%{name} 업로드 중… %{percent}%"
   downloading: "%{name} 다운로드 중… %{percent}%"
   deleting: "%{name} 삭제 중… %{percent}%"

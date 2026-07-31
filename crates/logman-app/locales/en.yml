@@ -100,6 +100,20 @@ files:
   menu_upload: Upload files…
   menu_upload_folder: Upload folder…
   menu_refresh: Refresh
+  # Hover labels for the panel's toolbar buttons, which carry an icon and no
+  # text. Deliberately a separate set from the `menu_` rows above rather than a
+  # reuse of them: a tooltip names a button and takes no ellipsis, while a menu
+  # row promises the dialog that follows and does. They are also the only thing
+  # a *disabled* button says, since the tooltip outlives the click handler, so
+  # each one has to read as the name of the command rather than as an
+  # instruction to press anything.
+  tip_refresh: Refresh
+  tip_new_folder: New folder
+  tip_upload: Upload files
+  tip_upload_folder: Upload folder
+  tip_download: Download
+  tip_rename: Rename
+  tip_delete: Delete
   # The line under the listing while bytes are moving, one file at a time.
   # `%{percent}` counts the whole batch, not this one file, so it keeps rising
   # across a folder instead of restarting at every name.

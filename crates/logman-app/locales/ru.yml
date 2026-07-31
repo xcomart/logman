@@ -53,6 +53,13 @@ files:
   menu_upload: Загрузить файлы…
   menu_upload_folder: Загрузить папку…
   menu_refresh: Обновить
+  tip_refresh: Обновить
+  tip_new_folder: Новая папка
+  tip_upload: Загрузить файлы
+  tip_upload_folder: Загрузить папку
+  tip_download: Скачать
+  tip_rename: Переименовать
+  tip_delete: Удалить
   uploading: "Загрузка %{name}… %{percent} %"
   downloading: "Скачивание %{name}… %{percent} %"
   deleting: "Удаление %{name}… %{percent} %"

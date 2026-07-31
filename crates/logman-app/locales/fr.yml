@@ -53,6 +53,13 @@ files:
   menu_upload: Envoyer des fichiers…
   menu_upload_folder: Envoyer un dossier…
   menu_refresh: Actualiser
+  tip_refresh: Actualiser
+  tip_new_folder: Nouveau dossier
+  tip_upload: Envoyer des fichiers
+  tip_upload_folder: Envoyer un dossier
+  tip_download: Télécharger
+  tip_rename: Renommer
+  tip_delete: Supprimer
   uploading: "Envoi de %{name}… %{percent} %"
   downloading: "Téléchargement de %{name}… %{percent} %"
   deleting: "Suppression de %{name}… %{percent} %"

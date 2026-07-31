@@ -53,6 +53,13 @@ files:
   menu_upload: Dateien hochladen…
   menu_upload_folder: Ordner hochladen…
   menu_refresh: Aktualisieren
+  tip_refresh: Aktualisieren
+  tip_new_folder: Neuer Ordner
+  tip_upload: Dateien hochladen
+  tip_upload_folder: Ordner hochladen
+  tip_download: Herunterladen
+  tip_rename: Umbenennen
+  tip_delete: Löschen
   uploading: "%{name} wird hochgeladen… %{percent} %"
   downloading: "%{name} wird heruntergeladen… %{percent} %"
   deleting: "%{name} wird gelöscht… %{percent} %"
