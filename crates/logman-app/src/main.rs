@@ -31,6 +31,8 @@ mod pane_tree;
 mod session;
 mod settings_dialog;
 mod terminal_view;
+mod theme_editor;
+mod theme_store;
 // The widget layer is written as a self-contained toolkit rather than for one
 // call site, so it deliberately offers variants no current call site uses (the
 // light theme, disabled inputs, the danger button). Inside a binary crate those
@@ -52,7 +54,7 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, div, img,
     prelude::*, px, relative, size,
 };
-use logman_core::{SessionProfile, TitlebarStyle, UiTheme, WindowSettings};
+use logman_core::{SessionProfile, TitlebarStyle, WindowSettings};
 use logman_ssh::SshAuth;
 
 use about_dialog::{AboutDialog, AboutDialogEvent};
@@ -67,8 +69,8 @@ use settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use terminal_view::{PaneFocused, TerminalView};
 use ui::{
     Button, ButtonVariant, ContextMenu, DraggedThumb, MenuButton, MenuEntry, Scrollbar,
-    ScrollbarAxis, ScrollbarState, TabBar, TabItem, Theme, WindowControlIcons, WindowControls,
-    hide_later, scroll_to, scrolled, set_theme, theme, tooltip_label,
+    ScrollbarAxis, ScrollbarState, TabBar, TabItem, Theme, ThemeRegistry, WindowControlIcons,
+    WindowControls, hide_later, scroll_to, scrolled, set_theme, theme, tooltip_label,
 };
 
 actions!(
@@ -400,49 +402,16 @@ impl Workspace {
                 // global by the time it emits this; the shell re-applies the
                 // parts that touch live windows and sessions.
                 SettingsDialogEvent::Applied => {
-                    let settings = app_settings::current(cx);
-                    // Before the repaint below, so the next frame is already
-                    // drawn in the newly chosen language.
-                    i18n::apply(settings.language.as_deref());
-                    // The native macOS menu bar is built once and owned by the
-                    // platform, so unlike the in-app menu it does not follow a
-                    // repaint; it has to be handed over again.
-                    cx.set_menus(app_menus());
-                    apply_ui_theme(settings.ui_theme, cx);
-                    // Ahead of the repaint, so the toolbar's next frame already
-                    // knows whether it has to stand in for a title bar; and
-                    // ahead of the two calls below, which leave the accent
-                    // policy and the caption colors on the window, so a caption
-                    // that comes back here comes back already themed.
-                    //
-                    // The field follows the call rather than the stored
-                    // setting: everything that branches on it is asking what
-                    // the window carries, not what was last saved.
-                    if settings.window.titlebar != this.titlebar {
-                        this.titlebar = settings.window.titlebar;
-                        let custom = this.titlebar == TitlebarStyle::Custom;
-                        window.set_titlebar_transparent(
-                            custom,
-                            custom.then_some(TRAFFIC_LIGHT_ORIGIN),
-                        );
-                    }
-                    cx.refresh_windows();
-                    window.set_background_appearance(window_appearance(&settings.window));
-                    // After the background appearance, never before: on Windows
-                    // that call re-arms the accent policy that would otherwise
-                    // repaint the caption out from under us.
-                    apply_caption_theme(window, settings.ui_theme, &theme(cx));
-                    // Every pane of every tab, not just the visible one: a
-                    // background tab's terminal has to come back in the newly
-                    // chosen scheme too.
-                    for session in this.sessions(cx) {
-                        session.update(cx, |session, cx| session.apply_settings(cx));
-                    }
+                    this.apply_settings(window, cx);
                     // The dialog closes itself after applying; without a refocus
                     // the window focus dangles on its unrendered controls and
                     // macOS disables every menu item validated through it.
                     this.focus_active(window, cx);
                 }
+                // The same work, minus the refocus: the dialog is still open and
+                // the user is still typing in it, so taking the focus back to
+                // the terminal here would pull it out from under them.
+                SettingsDialogEvent::ThemesChanged => this.apply_settings(window, cx),
                 SettingsDialogEvent::Dismissed => {
                     dialog.update(cx, |dialog, cx| dialog.close(cx));
                     this.focus_active(window, cx);
@@ -497,6 +466,49 @@ impl Workspace {
     /// Every session the workspace holds, across all tabs and panes.
     fn sessions(&self, cx: &App) -> Vec<Entity<Session>> {
         self.tabs.iter().flat_map(|tab| tab.sessions(cx)).collect()
+    }
+
+    /// Re-applies the current settings to the window and every open session.
+    ///
+    /// Shared by the two things that can make the settings mean something new:
+    /// saving them, and changing a theme or scheme file the settings point at.
+    /// Deliberately does *not* move the focus — where the focus belongs after
+    /// this depends on whether the dialog closed, which only the caller knows.
+    fn apply_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = app_settings::current(cx);
+        // Before the repaint below, so the next frame is already drawn in the
+        // newly chosen language.
+        i18n::apply(settings.language.as_deref());
+        // The native macOS menu bar is built once and owned by the platform, so
+        // unlike the in-app menu it does not follow a repaint; it has to be
+        // handed over again.
+        cx.set_menus(app_menus());
+        apply_ui_theme(&settings.ui_theme, cx);
+        // Ahead of the repaint, so the toolbar's next frame already knows
+        // whether it has to stand in for a title bar; and ahead of the two
+        // calls below, which leave the accent policy and the caption colors on
+        // the window, so a caption that comes back here comes back already
+        // themed.
+        //
+        // The field follows the call rather than the stored setting: everything
+        // that branches on it is asking what the window carries, not what was
+        // last saved.
+        if settings.window.titlebar != self.titlebar {
+            self.titlebar = settings.window.titlebar;
+            let custom = self.titlebar == TitlebarStyle::Custom;
+            window.set_titlebar_transparent(custom, custom.then_some(TRAFFIC_LIGHT_ORIGIN));
+        }
+        cx.refresh_windows();
+        window.set_background_appearance(window_appearance(&settings.window));
+        // After the background appearance, never before: on Windows that call
+        // re-arms the accent policy that would otherwise repaint the caption
+        // out from under us.
+        apply_caption_theme(window, &theme(cx));
+        // Every pane of every tab, not just the visible one: a background tab's
+        // terminal has to come back in the newly chosen scheme too.
+        for session in self.sessions(cx) {
+            session.update(cx, |session, cx| session.apply_settings(cx));
+        }
     }
 
     /// Opens a session for `profile` and makes its tab active.
@@ -2064,12 +2076,13 @@ impl Render for Workspace {
     }
 }
 
-/// Installs the widget theme matching the configured UI theme.
-fn apply_ui_theme(ui_theme: UiTheme, cx: &mut App) {
-    let theme = match ui_theme {
-        UiTheme::Light => Theme::light(),
-        UiTheme::Dark => Theme::dark(),
-    };
+/// Installs the widget theme the configured id names.
+///
+/// An id nothing answers to — a theme file the user has since deleted — falls
+/// back to the default theme rather than failing; see
+/// [`ThemeRegistry::resolve`].
+fn apply_ui_theme(id: &str, cx: &mut App) {
+    let theme = ThemeRegistry::resolve(id, cx);
     set_theme(theme, cx);
 }
 
@@ -2314,7 +2327,11 @@ fn main() {
         bind_shortcuts(cx);
         cx.set_menus(app_menus());
 
-        apply_ui_theme(settings.ui_theme, cx);
+        // Before the theme is applied: the id in the settings may well name one
+        // of the user's own themes, and the same goes for the scheme every
+        // session is about to be opened with.
+        theme_store::reload(cx);
+        apply_ui_theme(&settings.ui_theme, cx);
 
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
         cx.on_window_closed(|cx| {
@@ -2353,7 +2370,7 @@ fn main() {
             |window, cx| {
                 let workspace = cx.new(|cx| Workspace::new(titlebar, window, cx));
                 window.focus(&workspace.read(cx).focus_handle);
-                apply_caption_theme(window, settings.ui_theme, &theme(cx));
+                apply_caption_theme(window, &theme(cx));
                 workspace
             },
         )

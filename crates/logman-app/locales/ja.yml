@@ -106,8 +106,6 @@ settings:
     terminal: ターミナル
     connection: 新規接続
   ui_theme: UI テーマ
-  theme_dark: ダーク
-  theme_light: ライト
   titlebar: タイトルバー
   titlebar_custom: カスタム
   titlebar_system: システム
@@ -130,6 +128,53 @@ settings:
   keepalive_hint: 秒 (0 で無効)
   timeout: 接続タイムアウト
   timeout_hint: 秒
+  manage:
+    duplicate: 複製
+    edit: 編集
+    delete: 削除
+    import: インポート…
+    export: エクスポート…
+    import_select: インポート
+    import_failed: 選択したファイルはいずれも読み込めませんでした。
+    import_skipped: "%{count} 件のファイルをスキップしました。"
+    delete_theme_confirm: "テーマ %{name} を削除しますか?"
+    delete_scheme_confirm: "カラースキーム %{name} を削除しますか?"
+    copy_name: "%{name} のコピー"
+    write_failed: "ファイルを書き込めませんでした: %{error}"
+    delete_failed: "ファイルを削除できませんでした: %{error}"
+  editor:
+    theme_title: UI テーマを編集
+    scheme_title: カラースキームを編集
+    name: 名前
+    dark: ダークパレット
+    invalid: "色はすべて #RRGGBB の形式で入力してください。"
+    slot:
+      background: 背景
+      surface: サーフェス
+      surface_hover: サーフェス (ホバー)
+      surface_active: サーフェス (アクティブ)
+      border: 境界線
+      text: テキスト
+      text_muted: テキスト (控えめ)
+      accent: アクセント
+      danger: 危険
+      success: 成功
+      overlay: オーバーレイ (アルファ付き)
+    term:
+      foreground: 前景
+      background: 背景
+      cursor: カーソル
+      selection: 選択範囲
+      ansi: ANSI カラー
+      black: 黒
+      red: 赤
+      green: 緑
+      yellow: 黄
+      blue: 青
+      magenta: マゼンタ
+      cyan: シアン
+      white: 白
+      bright: "明るい%{name}"
 
 connection:
   title_new: 新規接続

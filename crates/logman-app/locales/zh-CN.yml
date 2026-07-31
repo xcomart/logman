@@ -106,8 +106,6 @@ settings:
     terminal: 终端
     connection: 新建连接
   ui_theme: 界面主题
-  theme_dark: 深色
-  theme_light: 浅色
   titlebar: 标题栏
   titlebar_custom: 自定义
   titlebar_system: 系统
@@ -130,6 +128,53 @@ settings:
   keepalive_hint: 秒（0 表示禁用）
   timeout: 连接超时
   timeout_hint: 秒
+  manage:
+    duplicate: 创建副本
+    edit: 编辑
+    delete: 删除
+    import: 导入…
+    export: 导出…
+    import_select: 导入
+    import_failed: 所选文件都无法读取。
+    import_skipped: "已跳过 %{count} 个文件。"
+    delete_theme_confirm: "删除主题 %{name}？"
+    delete_scheme_confirm: "删除配色方案 %{name}？"
+    copy_name: "%{name} 副本"
+    write_failed: "无法写入文件：%{error}"
+    delete_failed: "无法删除文件：%{error}"
+  editor:
+    theme_title: 编辑界面主题
+    scheme_title: 编辑配色方案
+    name: 名称
+    dark: 深色调色板
+    invalid: "每个颜色都必须写成 #RRGGBB。"
+    slot:
+      background: 背景
+      surface: 表面
+      surface_hover: 表面（悬停）
+      surface_active: 表面（激活）
+      border: 边框
+      text: 文本
+      text_muted: 文本（次要）
+      accent: 强调色
+      danger: 危险
+      success: 成功
+      overlay: 遮罩（含透明度）
+    term:
+      foreground: 前景
+      background: 背景
+      cursor: 光标
+      selection: 选中
+      ansi: ANSI 颜色
+      black: 黑色
+      red: 红色
+      green: 绿色
+      yellow: 黄色
+      blue: 蓝色
+      magenta: 品红
+      cyan: 青色
+      white: 白色
+      bright: "亮%{name}"
 
 connection:
   title_new: 新建连接

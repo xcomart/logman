@@ -106,8 +106,6 @@ settings:
     terminal: Terminal
     connection: Neue Verbindungen
   ui_theme: Design der Oberfläche
-  theme_dark: Dunkel
-  theme_light: Hell
   titlebar: Titelleiste
   titlebar_custom: Benutzerdefiniert
   titlebar_system: System
@@ -130,6 +128,53 @@ settings:
   keepalive_hint: Sekunden (0 deaktiviert)
   timeout: Verbindungszeitlimit
   timeout_hint: Sekunden
+  manage:
+    duplicate: Duplizieren
+    edit: Bearbeiten
+    delete: Löschen
+    import: Importieren…
+    export: Exportieren…
+    import_select: Importieren
+    import_failed: Keine der gewählten Dateien konnte gelesen werden.
+    import_skipped: "%{count} Dateien wurden übersprungen."
+    delete_theme_confirm: "Design %{name} löschen?"
+    delete_scheme_confirm: "Farbschema %{name} löschen?"
+    copy_name: "%{name} Kopie"
+    write_failed: "Die Datei konnte nicht geschrieben werden: %{error}"
+    delete_failed: "Die Datei konnte nicht entfernt werden: %{error}"
+  editor:
+    theme_title: Design der Oberfläche bearbeiten
+    scheme_title: Farbschema bearbeiten
+    name: Name
+    dark: Dunkle Palette
+    invalid: "Jede Farbe muss als #RRGGBB geschrieben werden."
+    slot:
+      background: Hintergrund
+      surface: Fläche
+      surface_hover: Fläche, überfahren
+      surface_active: Fläche, aktiv
+      border: Rahmen
+      text: Text
+      text_muted: Text, gedämpft
+      accent: Akzent
+      danger: Gefahr
+      success: Erfolg
+      overlay: Overlay (mit Alpha)
+    term:
+      foreground: Vordergrund
+      background: Hintergrund
+      cursor: Cursor
+      selection: Auswahl
+      ansi: ANSI-Farben
+      black: Schwarz
+      red: Rot
+      green: Grün
+      yellow: Gelb
+      blue: Blau
+      magenta: Magenta
+      cyan: Cyan
+      white: Weiß
+      bright: "Helles %{name}"
 
 connection:
   title_new: Neue Verbindung

@@ -106,8 +106,6 @@ settings:
     terminal: Terminal
     connection: Nuevas conexiones
   ui_theme: Tema de la interfaz
-  theme_dark: Oscuro
-  theme_light: Claro
   titlebar: Barra de título
   titlebar_custom: Personalizada
   titlebar_system: Sistema
@@ -130,6 +128,53 @@ settings:
   keepalive_hint: segundos (0 lo desactiva)
   timeout: Tiempo de espera
   timeout_hint: segundos
+  manage:
+    duplicate: Duplicar
+    edit: Editar
+    delete: Eliminar
+    import: Importar…
+    export: Exportar…
+    import_select: Importar
+    import_failed: No se pudo leer ninguno de los archivos elegidos.
+    import_skipped: "Se omitieron %{count} archivos."
+    delete_theme_confirm: "¿Eliminar el tema %{name}?"
+    delete_scheme_confirm: "¿Eliminar el esquema de color %{name}?"
+    copy_name: "%{name} copia"
+    write_failed: "No se pudo escribir el archivo: %{error}"
+    delete_failed: "No se pudo eliminar el archivo: %{error}"
+  editor:
+    theme_title: Editar el tema de la interfaz
+    scheme_title: Editar el esquema de color
+    name: Nombre
+    dark: Paleta oscura
+    invalid: "Cada color debe escribirse como #RRGGBB."
+    slot:
+      background: Fondo
+      surface: Superficie
+      surface_hover: Superficie, con el puntero encima
+      surface_active: Superficie, activa
+      border: Borde
+      text: Texto
+      text_muted: Texto, atenuado
+      accent: Acento
+      danger: Peligro
+      success: Éxito
+      overlay: Superposición (con alfa)
+    term:
+      foreground: Primer plano
+      background: Fondo
+      cursor: Cursor
+      selection: Selección
+      ansi: Colores ANSI
+      black: Negro
+      red: Rojo
+      green: Verde
+      yellow: Amarillo
+      blue: Azul
+      magenta: Magenta
+      cyan: Cian
+      white: Blanco
+      bright: "%{name} brillante"
 
 connection:
   title_new: Nueva conexión
