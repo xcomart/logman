@@ -31,4 +31,8 @@ delete the remote tag (`git push origin :refs/tags/vX.Y.Z`), recreate the
 annotated tag on the new merge commit and push it. GitHub turns the old
 release into a draft when its tag disappears; the re-triggered workflow
 republishes it with the rebuilt artifacts, and any leftover draft should be
-checked for and removed afterwards.
+checked for and removed afterwards. One caveat, learned the hard way: the
+release action replaces the *assets* of a pre-existing release but keeps its
+old *body*, so after a re-release the notes must be pushed by hand with
+`gh release edit vX.Y.Z --notes-file <file>` (tag-annotation bullets plus
+the "What's Changed" PR links).
