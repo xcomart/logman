@@ -1323,6 +1323,14 @@ impl SettingsDialog {
                 move |id, _window, cx| {
                     let id = SharedString::from(id.to_owned());
                     this.update(cx, |dialog, cx| {
+                        // A scheme answering to the same id follows along, so
+                        // picking "Dracula" up here dresses the terminal to
+                        // match in one gesture. One-way on purpose: the scheme
+                        // picker below never touches the UI theme, so the
+                        // terminal can still be recolored independently.
+                        if TerminalTheme::by_name(&id).is_some() {
+                            dialog.scheme = id.clone();
+                        }
                         dialog.ui_theme = id;
                         cx.notify();
                     });
