@@ -37,6 +37,13 @@ pub const REFRESH: &str = "icons/refresh.svg";
 /// The file panel button that uploads local files into the current directory.
 pub const UPLOAD: &str = "icons/upload.svg";
 
+/// The file panel button that uploads a whole local folder.
+///
+/// A second button rather than a second mode of the first: the platform file
+/// pickers cannot offer files and folders at once everywhere, so the choice has
+/// to be made before the dialog opens.
+pub const UPLOAD_FOLDER: &str = "icons/upload-folder.svg";
+
 /// The file panel button that saves the selected remote file locally.
 pub const DOWNLOAD: &str = "icons/download.svg";
 
@@ -44,12 +51,16 @@ pub const DOWNLOAD: &str = "icons/download.svg";
 pub const PANEL: &str = "icons/panel.svg";
 
 /// Every icon, paired with the bytes [`Icons`] hands back for it.
-const ICONS: [(&str, &[u8]); 7] = [
+const ICONS: [(&str, &[u8]); 8] = [
     (FOLDER, include_bytes!("../assets/icons/folder.svg")),
     (FILE, include_bytes!("../assets/icons/file.svg")),
     (SYMLINK, include_bytes!("../assets/icons/symlink.svg")),
     (REFRESH, include_bytes!("../assets/icons/refresh.svg")),
     (UPLOAD, include_bytes!("../assets/icons/upload.svg")),
+    (
+        UPLOAD_FOLDER,
+        include_bytes!("../assets/icons/upload-folder.svg"),
+    ),
     (DOWNLOAD, include_bytes!("../assets/icons/download.svg")),
     (PANEL, include_bytes!("../assets/icons/panel.svg")),
 ];

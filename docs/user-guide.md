@@ -232,10 +232,27 @@ authentication.
 - Directories sort before files, then by name, ignoring case.
 - Folders take the accent colour, symlinks carry a small badge, and files show
   their size in the right-hand column.
-- A single click selects a row; the selection is what the download button acts
-  on, and it is dropped whenever the directory changes.
-- The header shows the current path. A path longer than about 38 characters is
-  elided from the *front*, so the directory you are actually in stays readable.
+- A single click selects a row; the selection is what the download button and
+  the context menu act on, and it is dropped whenever the directory changes.
+- **<kbd>Ctrl</kbd>-click** (<kbd>Cmd</kbd>-click on macOS) adds a row to the
+  selection or takes it back out, leaving the rest alone.
+- **<kbd>Shift</kbd>-click** selects everything between the last row clicked
+  without <kbd>Shift</kbd> and this one, counted in the order the listing is
+  *displayed* in — directories first, then by name — which is the only order
+  visible on screen.
+- The `..` row is never part of a selection.
+- **The header is a breadcrumb**: the current path, broken into one pressable
+  piece per directory. Pressing a piece opens a menu of the directories *beside*
+  it — everything in its parent — and choosing one goes straight there. So the
+  way from `/srv/app/releases/2026-07-30` into last week's release is one press
+  on the last piece and one on the date you want, rather than a trip through
+  `..`. The leading `/` has no parent, so it offers what is inside the root
+  instead, which is the same menu the first name gives.
+- A path too long for the header keeps its leaf and as many directories above it
+  as fit; the rest fold into a single `…` piece. Pressing that piece lists
+  exactly the directories that were folded away, so nothing in the path becomes
+  unreachable. How much fits follows the panel's own width — dragging the edge
+  wider unfolds the path as you go, and narrower folds more of it.
 - **⟳** lists the directory again. It is also the way out of a failed first
   listing, which is not retried on its own — otherwise every chunk of terminal
   output would trigger another attempt.
@@ -244,19 +261,106 @@ authentication.
 
 - **↑** opens the platform file picker and uploads the chosen files into the
   directory on screen. Several files at once are fine; they go one after
-  another, and the status line names each one as it goes.
-- **↓** saves the selected file locally, asking where to put it first. The save
-  dialog opens in your home directory.
-- **Dropping files onto the panel uploads them** into the directory on screen.
-  The panel's frame takes the accent colour while a drag is over it.
-- **Folders are skipped, not copied recursively.** A dropped folder is far more
-  likely to be a slip than a request to copy a tree, and half a tree on the
-  server would be worse than none. The status line names what was skipped.
-- The listing refreshes itself after a successful upload.
+  another.
+- **The folder button beside it** uploads a whole folder. It is a *second*
+  button rather than a second mode of the first because no platform picker
+  offers files and folders in one dialog: macOS can, but Windows'
+  `IFileOpenDialog` turns into a folder browser as soon as folders are allowed,
+  and the Linux portal behaves the same way. Two buttons work identically
+  everywhere.
+- **↓** saves the selection locally, asking where to put it first. With one row
+  selected that is a save dialog, opening in your home directory, and a selected
+  **directory** is copied whole into a local folder of the name you choose. With
+  several rows selected it is a *folder* picker instead: the entries keep the
+  names they have on the server, and a local file of the same name is
+  overwritten.
+- **Dropping files or folders onto the panel uploads them** into the directory
+  on screen. The panel's frame takes the accent colour while a drag is over it.
+  The drop is the one place a mixture of files and folders can be handed over at
+  once.
+- The listing refreshes itself after an upload, so whatever landed before a
+  failure is visible.
 
-The line along the bottom of the panel reports progress, the outcome of the last
-transfer, or a failure. A failure stays there until something works, rather than
-until the next repaint.
+**Folders are copied recursively, with two rules about symbolic links:**
+
+- A link **to a directory** is left out — of both directions. A tree can link
+  back into itself, and a walk that followed such a link would either recurse
+  until it ran out of memory or copy the same subtree forever. There is no cheap
+  way to prove a given link is safe, so none of them are followed.
+- A link **to a file** is transferred as its target, which is what dragging a
+  link usually means.
+
+Anything that cannot be read — a broken link, a file removed between the drop
+and the walk — is left out and logged rather than failing the whole batch.
+
+### The context menu
+
+**Right-clicking a row** opens a menu acting on the selection. A right-click on
+a row that is not selected selects it first; a right-click *inside* an existing
+selection leaves that selection alone, which is how a command is aimed at
+several entries at once.
+
+- **Download…** — the same thing the **↓** button does.
+- **Rename…** — offered only when exactly one row is selected.
+- **Delete…** — asks before it does anything.
+- **Refresh** — the same thing **⟳** does.
+
+**Right-clicking empty space** — or the `..` row — opens the other menu, which
+is about the directory rather than its contents: **Upload files…**, **Upload
+folder…** and **Refresh**. An empty directory still has a background to
+right-click, so this is the way to upload into one.
+
+Both menus close on <kbd>Esc</kbd> or on a click outside them.
+
+### Renaming
+
+Choosing **Rename…** opens a field along the bottom of the panel, prefilled with
+the current name and focused. <kbd>Enter</kbd> or **Rename** applies it,
+**Cancel** drops it. A name that is empty, or that carries a `/`, a `\` or `..`,
+is refused before anything is sent — such a name would move the entry into a
+different directory rather than rename it in this one.
+
+Whether an existing name is overwritten or refused is left to the server, which
+is the only party that can answer it without a race. If it refuses, its own
+message appears along the bottom.
+
+The renamed row stays selected, so a second rename needs no second click.
+
+### Deleting
+
+Choosing **Delete…** asks first, along the bottom of the panel: the question
+names the entry when there is one and counts them when there are more, and
+nothing is sent until **Delete** is pressed. Cancelling — or switching to
+another session, or leaving the directory — drops the question unasked.
+
+- **A file is removed with one call.**
+- **A symbolic link is removed as a link**, whatever it points at. A link to a
+  directory looks like a directory in the listing, deliberately, so that it can
+  be opened; deleting one removes the link and leaves the target untouched.
+- **A directory is emptied from the leaves upwards.** SFTP has no recursive
+  delete and refuses to remove a directory that still holds anything, so the
+  panel walks the tree and removes the contents first.
+
+The progress bar counts entries rather than bytes while this runs, and a delete
+takes the same one-at-a-time slot a transfer does: neither can start while the
+other is running. A failure stops the batch where it stands; the listing is
+refreshed either way, so what did go is visible.
+
+### Watching a transfer
+
+The line along the bottom of the panel names the file in flight and the
+percentage the **whole batch** has reached, with a thin progress bar under it.
+The percentage keeps climbing across a folder rather than restarting at every
+file, because the total is worked out from the tree before the first byte moves.
+
+**One transfer runs per session at a time.** A second upload or download asked
+for while one is running is refused with a note on that same line, not queued:
+one bar cannot honestly describe two transfers. Other sessions are unaffected —
+each tab has its own panel state and its own transfer slot.
+
+A transfer cannot be cancelled once it has started. A failure stops the batch
+where it is, leaves what already landed in place, and stays on the status line
+until something else works.
 
 ### Resizing the panel
 
@@ -618,8 +722,9 @@ The full list is in the README's [Limitations](../README.md#limitations)
 section. The ones that come up most:
 
 - no SSH agent support, and no keyboard-interactive authentication;
-- the files panel browses and transfers only — no rename, delete, new directory,
-  recursive upload, or transfer percentage;
+- the files panel cannot create a directory except by uploading one, cannot
+  change permissions or ownership, and cannot cancel a transfer or a delete once
+  it has started;
 - panes can be resized by dragging but not rearranged, and neither a split
   layout nor the panel's width survives a restart;
 - a selection is anchored to the viewport and is not re-anchored when the

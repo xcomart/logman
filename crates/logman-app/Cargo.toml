@@ -45,3 +45,8 @@ futures.workspace = true
 gpui.workspace = true
 rust-i18n.workspace = true
 sys-locale.workspace = true
+
+[dev-dependencies]
+# The file panel's upload planner walks a real tree, symlinks included, so the
+# test builds one rather than mocking the filesystem out.
+tempfile.workspace = true
