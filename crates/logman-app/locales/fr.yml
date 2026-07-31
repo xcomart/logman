@@ -44,12 +44,33 @@ files:
   loading: Chargement…
   empty: Ce répertoire est vide.
   select_upload: Envoyer
-  uploading: "Envoi de %{name}…"
+  select_upload_folder: Envoyer un dossier
+  select_download_folder: Enregistrer
+  menu_download: Télécharger…
+  menu_rename: Renommer…
+  menu_delete: Supprimer…
+  menu_upload: Envoyer des fichiers…
+  menu_upload_folder: Envoyer un dossier…
+  menu_refresh: Actualiser
+  uploading: "Envoi de %{name}… %{percent} %"
+  downloading: "Téléchargement de %{name}… %{percent} %"
+  deleting: "Suppression de %{name}… %{percent} %"
+  transfer_busy: Un transfert est déjà en cours ici.
   uploaded: "%{name} a été envoyé."
   uploaded_many: "%{count} fichiers ont été envoyés."
-  downloading: "Téléchargement de %{name}…"
+  uploaded_tree: "%{files} fichiers dans %{folders} dossiers ont été envoyés."
+  nothing_to_upload: Rien n'a pu être lu pour l'envoi.
   downloaded: "Enregistré dans %{path}."
-  skipped_directory: "%{name} a été ignoré : seuls les fichiers peuvent être envoyés."
+  downloaded_tree: "%{count} fichiers ont été enregistrés dans %{path}."
+  delete_confirm_one: "Supprimer %{name} ?"
+  delete_confirm: "Supprimer %{count} éléments ?"
+  delete: Supprimer
+  deleted: "%{name} a été supprimé."
+  deleted_many: "%{count} éléments ont été supprimés."
+  rename_prompt: "Renommer %{name} en :"
+  rename: Renommer
+  renamed: "Renommé en %{name}."
+  invalid_name: Ce nom ne peut pas être utilisé.
   failed: "Fichiers distants : %{error}"
 
 empty:

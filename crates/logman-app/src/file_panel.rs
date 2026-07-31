@@ -24,13 +24,17 @@
 //! listings in flight whose answers must not overwrite the third.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use futures::StreamExt;
+use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, DragMoveEvent, ElementId, Entity, EntityId,
-    ExternalPaths, PathPromptOptions, ScrollHandle, SharedString, Subscription, Window, div,
-    prelude::*, px,
+    AnyElement, App, AsyncApp, ClickEvent, Context, Div, DragMoveEvent, ElementId, Entity,
+    EntityId, ExternalPaths, Focusable, Modifiers, MouseButton, MouseDownEvent, PathPromptOptions,
+    Pixels, Point, ScrollHandle, SharedString, Subscription, WeakEntity, Window, div, prelude::*,
+    px, relative,
 };
 use logman_ssh::{RemoteEntry, SftpClient, SftpError};
 
@@ -38,7 +42,7 @@ use crate::app_settings;
 use crate::i18n::ts;
 use crate::icons;
 use crate::session::Session;
-use crate::ui::{Theme, theme};
+use crate::ui::{Button, ButtonVariant, ContextMenu, MenuEntry, TextInput, Theme, theme};
 
 /// Width the panel opens at, in pixels.
 ///
@@ -82,6 +86,13 @@ const BADGE_ICON: f32 = 11.;
 /// Size of a toolbar button's icon, in pixels.
 const TOOLBAR_ICON: f32 = 15.;
 
+/// Height of the transfer progress bar, in pixels.
+///
+/// A hairline rather than a widget: the panel is a sidebar, and the percentage
+/// in the line above it is what a user actually reads. The bar is there to make
+/// "still moving" visible at a glance.
+const PROGRESS_BAR: f32 = 3.;
+
 /// Style group of one toolbar button, so hovering the button recolours the
 /// icon inside it: an SVG takes its tint from its own `text_color`, which —
 /// unlike a text glyph's — does not inherit from the button around it.
@@ -89,6 +100,13 @@ const BUTTON_GROUP: &str = "file-panel-button";
 
 /// The row standing for the parent directory. Punctuation, never translated.
 const PARENT_NAME: &str = "..";
+
+/// How long a success message stays on the status line before it goes away.
+///
+/// Long enough to be read after looking away from the panel, short enough that
+/// the line is not still claiming something finished minutes after it did.
+/// Failures are deliberately exempt — see [`Notice`].
+const NOTICE_LINGER: Duration = Duration::from_secs(5);
 
 /// The panel's right edge, while a drag is holding it.
 ///
@@ -114,8 +132,19 @@ enum Target {
 
 /// The line along the bottom of the panel.
 ///
-/// Cleared by the next successful listing, so a failure stays readable until
-/// something works rather than until the next repaint.
+/// The two halves have deliberately different lifetimes:
+///
+/// * an **[`Notice::Error`]** stays until something works. A failure the user
+///   did not happen to be looking at is a failure they never saw, and the next
+///   successful listing is the earliest moment it stops being true.
+/// * an **[`Notice::Info`]** goes away on its own after [`NOTICE_LINGER`]. It
+///   reports something that has already finished, so leaving it up makes the
+///   panel look permanently mid-transfer.
+///
+/// A successful listing also clears an error, except when the action that just
+/// finished asked for that listing itself — see [`SessionState::keep_notice`],
+/// which is what keeps "Deleted 3 items." on screen long enough for its own
+/// timer to be the thing that removes it.
 enum Notice {
     /// Progress, in the panel's muted text color.
     Info(SharedString),
@@ -134,14 +163,141 @@ impl Notice {
     }
 }
 
+/// What the one batch a session may run at a time is doing.
+///
+/// The three share a progress slot rather than getting one each because they
+/// share the constraint that made the slot exist: all three walk the same
+/// remote directory, and two of them running against it at once would show a
+/// listing that matches neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Activity {
+    /// Bytes going out to the server.
+    Upload,
+    /// Bytes coming in from it.
+    Download,
+    /// Entries being removed from it. The counters hold entries rather than
+    /// bytes — a delete moves nothing, and "3 of 40 removed" is what a user
+    /// waiting on one actually wants to know.
+    Delete,
+}
+
+/// A batch transfer in flight for one session.
+///
+/// One of these exists per session at most, which is what makes the progress
+/// line unambiguous: a second upload started while the first is running would
+/// otherwise overwrite the counters of a transfer still using them, and the bar
+/// would jump around describing neither. New requests are refused instead.
+struct TransferProgress {
+    /// What the batch is doing. Picks the wording and the unit of the counters.
+    activity: Activity,
+    /// Name of the file being moved — or removed — right now.
+    name: SharedString,
+    /// Bytes moved since the batch started, across every file in it; entries
+    /// removed, for a delete.
+    done: u64,
+    /// Bytes the whole batch will move, known before the first chunk because
+    /// the plan is built from sizes. Zero when every file in it is empty. For a
+    /// delete, the number of entries the walk found.
+    total: u64,
+    /// Whole percent last put on screen.
+    ///
+    /// A 64 KB chunk of a large file moves the bar by a fraction of a pixel, so
+    /// a repaint per chunk would be wasted work; the panel only notifies when
+    /// this changes. It is also what the status line shows, so the number and
+    /// the bar can never disagree.
+    percent: u8,
+}
+
+impl TransferProgress {
+    /// A batch that has not moved anything yet.
+    fn new(activity: Activity) -> Self {
+        Self {
+            activity,
+            name: SharedString::default(),
+            done: 0,
+            total: 0,
+            percent: 0,
+        }
+    }
+
+    /// How far along the batch is, as a whole percent.
+    ///
+    /// A batch of nothing but empty files has no bytes to count, and reporting
+    /// it as 0% forever would be a lie: it is as finished as it will ever be.
+    fn percent_of(done: u64, total: u64) -> u8 {
+        if total == 0 {
+            return 100;
+        }
+        let percent = done.saturating_mul(100) / total;
+        u8::try_from(percent.min(100)).unwrap_or(100)
+    }
+
+    /// The bar's fill, as a fraction of its track.
+    fn fraction(&self) -> f32 {
+        f32::from(self.percent) / 100.
+    }
+
+    /// The status line for this transfer.
+    fn line(&self) -> SharedString {
+        let key = match self.activity {
+            Activity::Upload => "files.uploading",
+            Activity::Download => "files.downloading",
+            Activity::Delete => "files.deleting",
+        };
+        ts!(key, name = self.name.clone(), percent = self.percent)
+    }
+}
+
+/// A question the panel is waiting on an answer to, drawn where the status line
+/// would otherwise be.
+///
+/// Both of these are modal in intent but not on screen: a dialog over the
+/// window would hide the very listing that says what is about to be renamed or
+/// deleted, so the question is asked in the panel, under the rows it is about.
+enum Prompt {
+    /// Names selected for deletion, in display order, awaiting confirmation.
+    ///
+    /// Held as names rather than as entries so that a listing arriving in the
+    /// meantime cannot leave the question pointing at rows that moved.
+    Delete(Vec<String>),
+    /// A rename of one entry: the name it has now, and the field holding the
+    /// name it should get.
+    Rename {
+        /// Name as it is on the server right now.
+        from: String,
+        /// The field, prefilled with `from` so a small edit stays small.
+        input: Entity<TextInput>,
+    },
+}
+
+/// An open context menu: where it hangs, and which of the two it is.
+struct PanelMenu {
+    /// Top-left corner of the panel, in window coordinates.
+    at: Point<Pixels>,
+    /// Whether the click landed on a row rather than on empty space. Decides
+    /// which commands the menu offers, not which rows are selected — the
+    /// selection was already settled before the menu opened.
+    on_rows: bool,
+}
+
 /// What one session is looking at, kept while the session lives.
 struct SessionState {
     /// Directory currently listed. `None` until the first listing lands.
     path: Option<String>,
     /// Entries of [`SessionState::path`], directories first and then by name.
     entries: Vec<RemoteEntry>,
-    /// Name of the selected entry, if the selection still exists.
-    selected: Option<String>,
+    /// Names of the selected entries.
+    ///
+    /// A set rather than a list because membership is what every reader asks —
+    /// "is this row selected?", once per row per frame — while the *order* of a
+    /// selection is never stored: it is read back off [`SessionState::entries`]
+    /// so that it always matches what is on screen.
+    selected: BTreeSet<String>,
+    /// Row a range selection measures from: the last row clicked without
+    /// <kbd>Shift</kbd>. `None` until something is clicked.
+    anchor: Option<String>,
+    /// The question waiting for an answer under the listing, if any.
+    prompt: Option<Prompt>,
     /// The shell directory the panel last followed.
     ///
     /// Compared against [`Session::cwd`] on every session notification; a
@@ -160,6 +316,26 @@ struct SessionState {
     busy: bool,
     /// The bottom status line.
     notice: Option<Notice>,
+    /// Whether the next listing to land must leave the status line alone.
+    ///
+    /// An action that changes the directory — an upload, a delete, a rename —
+    /// says how it went and *then* asks for a fresh listing. Without this the
+    /// listing would arrive a moment later and clear the very sentence it was
+    /// asked for, so every one of those messages would flash and vanish.
+    keep_notice: bool,
+    /// Bumped every time something is said on the status line.
+    ///
+    /// An expiring message leaves a timer running behind it, and by the time
+    /// that timer fires the line may be carrying something else entirely. The
+    /// timer therefore remembers the value this had when it was armed and does
+    /// nothing unless it still matches — so a message never takes a later one
+    /// down with it.
+    notice_epoch: u64,
+    /// The transfer running for this session, if any.
+    ///
+    /// Outranks [`SessionState::notice`] on screen and doubles as the lock that
+    /// keeps a second transfer from starting.
+    transfer: Option<TransferProgress>,
     /// Vertical scroll of the list, kept per session so returning to a tab
     /// returns to the same place in its directory.
     scroll: ScrollHandle,
@@ -171,20 +347,63 @@ impl SessionState {
         Self {
             path: None,
             entries: Vec::new(),
-            selected: None,
+            selected: BTreeSet::new(),
+            anchor: None,
+            prompt: None,
             followed: None,
             attempted: false,
             generation: 0,
             busy: false,
             notice: None,
+            keep_notice: false,
+            notice_epoch: 0,
+            transfer: None,
             scroll: ScrollHandle::new(),
         }
     }
 
-    /// The selected entry, if one is selected and still listed.
-    fn selection(&self) -> Option<&RemoteEntry> {
-        let name = self.selected.as_deref()?;
-        self.entries.iter().find(|entry| entry.name == name)
+    /// The selected entries, in display order.
+    ///
+    /// Driven by [`SessionState::entries`] rather than by the set, so a name
+    /// left over from a directory that is no longer listed simply drops out
+    /// instead of having to be pruned.
+    fn selection(&self) -> impl Iterator<Item = &RemoteEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| self.selected.contains(&entry.name))
+    }
+
+    /// How many listed entries are selected.
+    fn selected_count(&self) -> usize {
+        self.selection().count()
+    }
+
+    /// Replaces the selection with `name` alone, and anchors ranges on it.
+    fn select_only(&mut self, name: &str) {
+        self.selected.clear();
+        self.selected.insert(name.to_owned());
+        self.anchor = Some(name.to_owned());
+    }
+
+    /// Puts `notice` on the status line, retiring whatever it replaced.
+    ///
+    /// Returns the epoch the message was said at, which is what an expiry timer
+    /// has to be armed with. Every write to the line goes through here so that
+    /// no message can be left with a timer belonging to an older one.
+    fn say(&mut self, notice: Notice) -> u64 {
+        self.notice_epoch = self.notice_epoch.wrapping_add(1);
+        self.notice = Some(notice);
+        self.notice_epoch
+    }
+
+    /// Drops the selection, the range anchor and any open question.
+    ///
+    /// Called wherever the listing stops describing what these refer to: a new
+    /// directory, or a session going away from the panel.
+    fn reset_selection(&mut self) {
+        self.selected.clear();
+        self.anchor = None;
+        self.prompt = None;
     }
 }
 
@@ -205,6 +424,19 @@ pub struct FilePanel {
     /// the key would earn its keep only once there is more to remember about the
     /// panel than a flag and a number.
     width: f32,
+    /// The context menu currently open over the panel, if any.
+    ///
+    /// Panel state rather than session state: a menu is a gesture in progress,
+    /// and a gesture does not survive the tab switch that would be the only way
+    /// to leave it behind.
+    context: Option<PanelMenu>,
+    /// Whether the rename field should be given the keyboard on the next
+    /// render.
+    ///
+    /// Focus cannot be moved from the click that opens the field, because the
+    /// field does not exist yet at that point; this defers it by exactly one
+    /// frame, the way the connection dialog focuses its first field.
+    focus_prompt: bool,
     /// Watches the active session for directory and status changes.
     _observer: Option<Subscription>,
 }
@@ -216,6 +448,8 @@ impl FilePanel {
             session: None,
             states: HashMap::new(),
             width: DEFAULT_PANEL_WIDTH,
+            context: None,
+            focus_prompt: false,
             _observer: None,
         }
     }
@@ -246,6 +480,15 @@ impl FilePanel {
         let next = session.as_ref().map(Entity::entity_id);
         if current == next {
             return;
+        }
+
+        // A question asked of the session leaving the panel is dropped rather
+        // than parked: it names entries the user can no longer see, and a
+        // confirmed delete has to be the one the user was just looking at.
+        self.context = None;
+        self.focus_prompt = false;
+        if let Some(state) = current.and_then(|current| self.states.get_mut(&current)) {
+            state.prompt = None;
         }
 
         // Only the active session is observed. A background session that
@@ -361,18 +604,69 @@ impl FilePanel {
             Ok((path, mut entries)) => {
                 sort_entries(&mut entries);
                 // A directory change invalidates the selection; staying on the
-                // old name would let the download button act on a file from a
-                // directory that is no longer on screen.
-                if state.path.as_deref() != Some(path.as_str()) {
-                    state.selected = None;
+                // old names would let the download button — or, worse, the
+                // delete — act on files from a directory that is no longer on
+                // screen.
+                let moved = state.path.as_deref() != Some(path.as_str());
+                if moved {
+                    state.reset_selection();
                     state.scroll.set_offset(Default::default());
                 }
                 state.path = Some(path);
                 state.entries = entries;
-                state.notice = None;
+                // Moving somewhere else drops whatever was said about the
+                // directory being left, but a listing asked for *by* a finished
+                // action has to leave that action's verdict on screen. Taken
+                // unconditionally so the flag never survives into a listing it
+                // was not set for.
+                if !(std::mem::take(&mut state.keep_notice) && !moved) {
+                    state.notice = None;
+                }
             }
-            Err(error) => state.notice = Some(Notice::from_error(&error)),
+            Err(error) => {
+                state.keep_notice = false;
+                state.say(Notice::from_error(&error));
+            }
         }
+        cx.notify();
+    }
+
+    /// Says `notice` on `session`'s status line, and retires it if it can be.
+    ///
+    /// A success message is given [`NOTICE_LINGER`] and then taken down by a
+    /// timer; a failure is left alone, because only a later success can honestly
+    /// replace it. The timer carries the epoch the message was said at, so a
+    /// message that has since been replaced expires without touching whatever
+    /// replaced it.
+    fn show_notice(&mut self, session: EntityId, notice: Notice, cx: &mut Context<Self>) {
+        let Some(state) = self.states.get_mut(&session) else {
+            return;
+        };
+        let expires = matches!(notice, Notice::Info(_));
+        let epoch = state.say(notice);
+        cx.notify();
+        if !expires {
+            return;
+        }
+
+        cx.spawn(async move |panel, cx| {
+            cx.background_executor().timer(NOTICE_LINGER).await;
+            panel
+                .update(cx, |panel, cx| panel.expire_notice(session, epoch, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Takes the status line down, unless something newer is on it.
+    fn expire_notice(&mut self, session: EntityId, epoch: u64, cx: &mut Context<Self>) {
+        let Some(state) = self.states.get_mut(&session) else {
+            return;
+        };
+        if state.notice_epoch != epoch || state.notice.is_none() {
+            return;
+        }
+        state.notice = None;
         cx.notify();
     }
 
@@ -388,13 +682,101 @@ impl FilePanel {
         Some((id, sftp, path))
     }
 
-    /// Puts `notice` on `session`'s status line.
-    fn set_notice(&mut self, session: EntityId, notice: Notice, cx: &mut Context<Self>) {
+    /// Claims the session's transfer slot, or refuses and says why.
+    ///
+    /// Returns `false` when a transfer is already running for that session, in
+    /// which case the status line explains the refusal. Claiming happens before
+    /// anything is scanned or asked of the server, so two drops in quick
+    /// succession cannot both get past this.
+    fn begin_transfer(
+        &mut self,
+        session: EntityId,
+        activity: Activity,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(state) = self.states.get_mut(&session) else {
+            return false;
+        };
+        if state.transfer.is_some() {
+            state.say(Notice::Error(ts!("files.transfer_busy")));
+            cx.notify();
+            return false;
+        }
+        state.transfer = Some(TransferProgress::new(activity));
+        state.notice = None;
+        cx.notify();
+        true
+    }
+
+    /// Records how many bytes the batch that just started will move.
+    fn size_transfer(&mut self, session: EntityId, total: u64, cx: &mut Context<Self>) {
+        let Some(transfer) = self
+            .states
+            .get_mut(&session)
+            .and_then(|state| state.transfer.as_mut())
+        else {
+            return;
+        };
+        transfer.total = total;
+        transfer.percent = TransferProgress::percent_of(transfer.done, total);
+        cx.notify();
+    }
+
+    /// Moves the batch on to `name`, with `done` bytes already behind it.
+    fn transfer_file(
+        &mut self,
+        session: EntityId,
+        name: SharedString,
+        done: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(transfer) = self
+            .states
+            .get_mut(&session)
+            .and_then(|state| state.transfer.as_mut())
+        else {
+            return;
+        };
+        transfer.name = name;
+        transfer.done = done;
+        transfer.percent = TransferProgress::percent_of(done, transfer.total);
+        cx.notify();
+    }
+
+    /// Records `done` bytes moved, repainting only when that is visible.
+    ///
+    /// Called once per 64 KB chunk. Repainting each time would redraw the whole
+    /// panel hundreds of times a second for a bar that has not moved a pixel,
+    /// so the notify is spent only when the whole percent changes.
+    fn advance_transfer(&mut self, session: EntityId, done: u64, cx: &mut Context<Self>) {
+        let Some(transfer) = self
+            .states
+            .get_mut(&session)
+            .and_then(|state| state.transfer.as_mut())
+        else {
+            return;
+        };
+        transfer.done = done;
+        let percent = TransferProgress::percent_of(done, transfer.total);
+        if percent == transfer.percent {
+            return;
+        }
+        transfer.percent = percent;
+        cx.notify();
+    }
+
+    /// Releases the transfer slot and reports the outcome.
+    fn finish_transfer(&mut self, session: EntityId, notice: Notice, cx: &mut Context<Self>) {
         let Some(state) = self.states.get_mut(&session) else {
             return;
         };
-        state.notice = Some(notice);
-        cx.notify();
+        state.transfer = None;
+        // Every caller that refreshes the listing does so straight after this,
+        // and the answer must not take the verdict off the screen with it. What
+        // does take it off is the expiry `show_notice` arms below, so a success
+        // survives its own refresh and still does not stay up for good.
+        state.keep_notice = true;
+        self.show_notice(session, notice, cx);
     }
 
     /// Lists the current directory again.
@@ -416,19 +798,103 @@ impl FilePanel {
         self.go(id, sftp, target, cx);
     }
 
-    /// Selects the entry named `name`.
-    fn select(&mut self, name: &str, cx: &mut Context<Self>) {
+    /// Applies a click on the row named `name` to the selection.
+    ///
+    /// The three gestures are the ones every file manager has, so they are
+    /// spelled the same way here:
+    ///
+    /// * plain click — that row alone, and ranges measure from it afterwards;
+    /// * <kbd>Ctrl</kbd> (<kbd>Cmd</kbd> on macOS) — add or drop that one row,
+    ///   leaving the rest of the selection as it was;
+    /// * <kbd>Shift</kbd> — everything between the anchor and this row, in the
+    ///   order the listing is *displayed* in, which is the only order the user
+    ///   can see and therefore the only one the gesture can mean.
+    fn select(&mut self, name: &str, modifiers: Modifiers, cx: &mut Context<Self>) {
         let Some(session) = self.session.as_ref().map(Entity::entity_id) else {
             return;
         };
         let Some(state) = self.states.get_mut(&session) else {
             return;
         };
-        if state.selected.as_deref() == Some(name) {
+        if !state.entries.iter().any(|entry| entry.name == name) {
             return;
         }
-        state.selected = Some(name.to_owned());
+
+        if modifiers.secondary() {
+            if !state.selected.remove(name) {
+                state.selected.insert(name.to_owned());
+            }
+            // The anchor follows the last row touched even when the touch was
+            // a removal: a Shift-click after a Ctrl-click extends from where
+            // the pointer just was, not from wherever it started out.
+            state.anchor = Some(name.to_owned());
+        } else if let Some(anchor) = modifiers.shift.then(|| state.anchor.clone()).flatten() {
+            let first = state.entries.iter().position(|entry| entry.name == anchor);
+            let last = state.entries.iter().position(|entry| entry.name == name);
+            match (first, last) {
+                (Some(first), Some(last)) => {
+                    let (low, high) = if first <= last {
+                        (first, last)
+                    } else {
+                        (last, first)
+                    };
+                    state.selected = state
+                        .entries
+                        .iter()
+                        .skip(low)
+                        .take(high.saturating_sub(low).saturating_add(1))
+                        .map(|entry| entry.name.clone())
+                        .collect();
+                }
+                // The anchor is gone from the listing — a refresh dropped it —
+                // so there is no range to speak of and the click stands alone.
+                _ => state.select_only(name),
+            }
+        } else {
+            state.select_only(name);
+        }
         cx.notify();
+    }
+
+    /// Opens the context menu at `at`, over the row named `name`.
+    ///
+    /// A right-click on a row that is *not* selected selects it first, the way
+    /// every file manager does: the menu that follows has to act on what the
+    /// pointer is on. A right-click inside an existing selection leaves that
+    /// selection alone, which is how a multi-entry command is asked for.
+    ///
+    /// `name` is `None` for the background and for the `..` row, and the menu
+    /// then offers what can be done to the directory rather than to its
+    /// contents.
+    fn open_context(&mut self, name: Option<&str>, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().map(Entity::entity_id) else {
+            return;
+        };
+        let Some(state) = self.states.get_mut(&session) else {
+            return;
+        };
+        if state.path.is_none() {
+            return;
+        }
+
+        let on_rows = match name {
+            Some(name) if state.entries.iter().any(|entry| entry.name == name) => {
+                if !state.selected.contains(name) {
+                    state.select_only(name);
+                }
+                true
+            }
+            _ => false,
+        };
+        self.context = Some(PanelMenu { at, on_rows });
+        cx.notify();
+    }
+
+    /// Puts the context menu away, if one is open.
+    fn close_context(&mut self, cx: &mut Context<Self>) {
+        if self.context.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// Opens the entry named `name`, if it is a directory.
@@ -455,16 +921,27 @@ impl FilePanel {
         self.go(session, sftp, Target::Resolve(join(&path, PARENT_NAME)), cx);
     }
 
-    /// Asks the platform for local files and uploads them here.
-    fn pick_upload(&mut self, cx: &mut Context<Self>) {
+    /// Asks the platform for local files or a folder and uploads them here.
+    ///
+    /// `folders` picks which of the two pickers opens, because no single dialog
+    /// offers both on every platform: macOS's `NSOpenPanel` can choose files and
+    /// directories at once, but Windows' `IFileOpenDialog` turns into a folder
+    /// browser once `FOS_PICKFOLDERS` is set, and the Linux portal's `directory`
+    /// flag is just as exclusive. Two buttons behave the same everywhere; one
+    /// button would behave differently on each.
+    fn pick_upload(&mut self, folders: bool, cx: &mut Context<Self>) {
         if self.acting_on(cx).is_none() {
             return;
         }
         let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
+            files: !folders,
+            directories: folders,
             multiple: true,
-            prompt: Some(ts!("files.select_upload")),
+            prompt: Some(if folders {
+                ts!("files.select_upload_folder")
+            } else {
+                ts!("files.select_upload")
+            }),
         });
 
         cx.spawn(async move |panel, cx| {
@@ -481,83 +958,98 @@ impl FilePanel {
         .detach();
     }
 
-    /// Uploads `paths` into the current directory, one after another.
+    /// Uploads `paths` into the current directory, recursing into folders.
     ///
-    /// Directories are skipped rather than recursed into: a dropped folder is
-    /// much more likely to be a slip than a request to copy a tree, and half a
-    /// tree on the server would be worse than none.
+    /// The whole tree is resolved before anything moves — see [`plan_upload`] —
+    /// so the progress bar has a total to measure against from the first chunk,
+    /// and so the walk itself happens off the UI thread. The directories are
+    /// then created in order and the files sent one after another; a failure
+    /// stops the batch, leaving what already landed in place, which the refresh
+    /// at the end makes visible.
     fn upload(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let Some((session, sftp, directory)) = self.acting_on(cx) else {
             return;
         };
-
-        let mut files = Vec::new();
-        let mut skipped: Option<SharedString> = None;
-        for path in paths {
-            // A `metadata` call per dropped path, on the UI thread: a handful of
-            // local stats, against a network round trip per file about to
-            // follow. Anything unreadable is left to the transfer to report.
-            if std::fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) {
-                skipped.get_or_insert_with(|| file_name(&path));
-                continue;
-            }
-            files.push(path);
-        }
-
-        if files.is_empty() {
-            if let Some(name) = skipped {
-                self.set_notice(
-                    session,
-                    Notice::Error(ts!("files.skipped_directory", name = name)),
-                    cx,
-                );
-            }
+        if !self.begin_transfer(session, Activity::Upload, cx) {
             return;
         }
 
+        let listing = directory.clone();
+        // A dropped folder can hold tens of thousands of entries and every one
+        // of them costs a `stat`; on the UI thread that is dropped frames.
+        let scan = cx
+            .background_executor()
+            .spawn(async move { plan_upload(paths, directory) });
+
         cx.spawn(async move |panel, cx| {
-            let mut uploaded = 0usize;
-            let mut last = SharedString::default();
+            let plan = scan.await;
+            let folders = plan.directories.len();
+            if panel
+                .update(cx, |panel, cx| panel.size_transfer(session, plan.total, cx))
+                .is_err()
+            {
+                return;
+            }
+
             let mut failure = None;
-
-            for file in files {
-                let name = file_name(&file);
-                let progress = ts!("files.uploading", name = name.clone());
-                if panel
-                    .update(cx, |panel, cx| {
-                        panel.set_notice(session, Notice::Info(progress), cx);
-                    })
-                    .is_err()
-                {
-                    return;
+            // Parents come first out of the plan, which is the whole ordering
+            // requirement: SFTP has no `mkdir -p`.
+            for directory in plan.directories {
+                if let Err(error) = sftp.mkdir(&directory).await {
+                    failure = Some(error);
+                    break;
                 }
+            }
 
-                match sftp.upload(file, &directory).await {
-                    Ok(_) => {
-                        uploaded += 1;
-                        last = name;
+            let mut moved = 0u64;
+            let mut sent = 0usize;
+            let mut last = SharedString::default();
+            if failure.is_none() {
+                for file in plan.files {
+                    let name = file_name(&file.local);
+                    if panel
+                        .update(cx, |panel, cx| {
+                            panel.transfer_file(session, name.clone(), moved, cx);
+                        })
+                        .is_err()
+                    {
+                        return;
                     }
-                    Err(error) => {
-                        failure = Some(error);
-                        break;
+
+                    let (sender, receiver) = mpsc::unbounded();
+                    let transfer = sftp.upload(file.local, &file.directory, Some(sender));
+                    match follow(&panel, cx, session, moved, receiver, transfer).await {
+                        Ok(_) => {
+                            sent += 1;
+                            last = name;
+                            moved = moved.saturating_add(file.size);
+                        }
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
+                        }
                     }
                 }
             }
 
-            // A skipped directory outranks the success line: the transfer that
-            // did happen is visible in the listing, the one that did not is not.
-            let notice = match (failure, skipped) {
-                (Some(error), _) => Notice::from_error(&error),
-                (None, Some(name)) => Notice::Error(ts!("files.skipped_directory", name = name)),
-                (None, None) if uploaded == 1 => Notice::Info(ts!("files.uploaded", name = last)),
-                (None, None) => Notice::Info(ts!("files.uploaded_many", count = uploaded)),
+            let notice = match failure {
+                Some(error) => Notice::from_error(&error),
+                None if folders > 0 => {
+                    Notice::Info(ts!("files.uploaded_tree", files = sent, folders = folders))
+                }
+                None if sent == 1 => Notice::Info(ts!("files.uploaded", name = last)),
+                // Nothing at all could be read — every path was a broken link,
+                // or vanished between the drop and the walk. Saying "uploaded
+                // 0 files" would read as success, which it is not.
+                None if sent == 0 => Notice::Error(ts!("files.nothing_to_upload")),
+                None => Notice::Info(ts!("files.uploaded_many", count = sent)),
             };
 
             panel
                 .update(cx, |panel, cx| {
-                    panel.set_notice(session, notice, cx);
-                    if uploaded > 0 {
-                        panel.go(session, sftp, Target::Exact(directory), cx);
+                    panel.finish_transfer(session, notice, cx);
+                    if sent > 0 || folders > 0 {
+                        panel.go(session, sftp, Target::Exact(listing), cx);
                     }
                 })
                 .ok();
@@ -565,21 +1057,45 @@ impl FilePanel {
         .detach();
     }
 
-    /// Saves the selected file locally, asking where to put it first.
+    /// Saves the selection locally, asking where to put it first.
+    ///
+    /// The question differs with the size of the selection, because the answer
+    /// has to: one entry can be renamed on the way down, so it gets a save
+    /// dialog with its name in it, while several have to keep the names they
+    /// have and so only need a folder to land in.
     fn download(&mut self, cx: &mut Context<Self>) {
         let Some((session, sftp, directory)) = self.acting_on(cx) else {
             return;
         };
-        let Some(entry) = self
-            .states
-            .get(&session)
-            .and_then(SessionState::selection)
-            .filter(|entry| !entry.is_dir)
-        else {
+        let Some(state) = self.states.get(&session) else {
             return;
         };
+        let chosen: Vec<RemoteEntry> = state.selection().cloned().collect();
+
+        match chosen.as_slice() {
+            [] => (),
+            [only] => self.download_one(session, sftp, &directory, only, cx),
+            _ => self.download_many(session, sftp, &directory, chosen, cx),
+        }
+    }
+
+    /// Saves one entry, asking for the path to write it to.
+    ///
+    /// A directory is copied whole: the remote tree is walked with `read_dir`,
+    /// the local directories are created, and the files come down one after
+    /// another against the same progress bar an upload uses.
+    fn download_one(
+        &mut self,
+        session: EntityId,
+        sftp: SftpClient,
+        directory: &str,
+        entry: &RemoteEntry,
+        cx: &mut Context<Self>,
+    ) {
         let name = entry.name.clone();
-        let remote = join(&directory, &name);
+        let is_dir = entry.is_dir;
+        let size = entry.size;
+        let remote = join(directory, &name);
         let prompt = cx.prompt_for_new_path(&suggested_directory(), Some(&name));
 
         cx.spawn(async move |panel, cx| {
@@ -592,38 +1108,431 @@ impl FilePanel {
                 }
             };
 
-            let progress = ts!("files.downloading", name = name);
+            // Claimed only now, not before the dialog: a save dialog can stand
+            // open for minutes, and a transfer that was running when it opened
+            // has very likely finished by the time a path comes back.
+            let claimed = panel.update(cx, |panel, cx| {
+                panel.begin_transfer(session, Activity::Download, cx)
+            });
+            if !matches!(claimed, Ok(true)) {
+                return;
+            }
+            let shown = local.display().to_string();
+
+            let plan = if is_dir {
+                match plan_download(&sftp, remote, local).await {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel.finish_transfer(session, Notice::from_error(&error), cx);
+                            })
+                            .ok();
+                        return;
+                    }
+                }
+            } else {
+                DownloadPlan {
+                    directories: Vec::new(),
+                    total: size,
+                    files: vec![PlannedDownload {
+                        remote,
+                        local,
+                        size,
+                    }],
+                }
+            };
+
+            let count = plan.files.len();
+            let failure = match run_download(&panel, cx, session, &sftp, plan).await {
+                Ran::Finished(failure) => failure,
+                Ran::Abandoned => return,
+            };
+
+            let notice = match failure {
+                Some(error) => Notice::from_error(&error),
+                None if is_dir => {
+                    Notice::Info(ts!("files.downloaded_tree", count = count, path = shown))
+                }
+                None => Notice::Info(ts!("files.downloaded", path = shown)),
+            };
+            panel
+                .update(cx, |panel, cx| panel.finish_transfer(session, notice, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Saves several entries into one folder, keeping their names.
+    ///
+    /// The whole selection moves as a single batch against a single progress
+    /// bar: separate transfers would each want the session's one progress slot
+    /// and all but the first would be refused. A local file of the same name is
+    /// overwritten, exactly as a single download overwrites what the save
+    /// dialog was pointed at.
+    fn download_many(
+        &mut self,
+        session: EntityId,
+        sftp: SftpClient,
+        directory: &str,
+        chosen: Vec<RemoteEntry>,
+        cx: &mut Context<Self>,
+    ) {
+        let directory = directory.to_owned();
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(ts!("files.select_download_folder")),
+        });
+
+        cx.spawn(async move |panel, cx| {
+            let destination = match prompt.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(path) => path,
+                    None => return,
+                },
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(error)) => {
+                    log::warn!("the folder picker could not be opened: {error:#}");
+                    return;
+                }
+            };
+
+            let claimed = panel.update(cx, |panel, cx| {
+                panel.begin_transfer(session, Activity::Download, cx)
+            });
+            if !matches!(claimed, Ok(true)) {
+                return;
+            }
+            let shown = destination.display().to_string();
+
+            let mut plan = DownloadPlan::default();
+            let mut failure = None;
+            for entry in chosen {
+                // Server-sent names reach `Path::join` here, so the same guard
+                // the recursive walk uses has to stand at the top of it too.
+                if !is_plain_name(&entry.name) {
+                    log::debug!("not downloading {}/{}: odd name", directory, entry.name);
+                    continue;
+                }
+                let remote = join(&directory, &entry.name);
+                let local = destination.join(&entry.name);
+
+                if entry.is_dir {
+                    match plan_download(&sftp, remote, local).await {
+                        Ok(part) => plan.absorb(part),
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                } else {
+                    plan.total = plan.total.saturating_add(entry.size);
+                    plan.files.push(PlannedDownload {
+                        remote,
+                        local,
+                        size: entry.size,
+                    });
+                }
+            }
+
+            let count = plan.files.len();
+            if failure.is_none() {
+                failure = match run_download(&panel, cx, session, &sftp, plan).await {
+                    Ran::Finished(failure) => failure,
+                    Ran::Abandoned => return,
+                };
+            }
+
+            let notice = match failure {
+                Some(error) => Notice::from_error(&error),
+                None => Notice::Info(ts!("files.downloaded_tree", count = count, path = shown)),
+            };
+            panel
+                .update(cx, |panel, cx| panel.finish_transfer(session, notice, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Asks whether the selection should really be deleted.
+    ///
+    /// Nothing is sent until the question is answered — this only records what
+    /// was asked about. Deleting is the one thing the panel does that cannot be
+    /// undone by doing it again, and it is a *single* right-click away, so it
+    /// gets the one confirmation step in the panel.
+    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().map(Entity::entity_id) else {
+            return;
+        };
+        let Some(state) = self.states.get_mut(&session) else {
+            return;
+        };
+        let names: Vec<String> = state
+            .selection()
+            .map(|entry| entry.name.clone())
+            .filter(|name| is_plain_name(name))
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        state.prompt = Some(Prompt::Delete(names));
+        cx.notify();
+    }
+
+    /// Drops whatever question is open without acting on it.
+    fn cancel_prompt(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().map(Entity::entity_id) else {
+            return;
+        };
+        let Some(state) = self.states.get_mut(&session) else {
+            return;
+        };
+        if state.prompt.take().is_some() {
+            self.focus_prompt = false;
+            cx.notify();
+        }
+    }
+
+    /// Deletes the entries the open confirmation names.
+    ///
+    /// Each is removed the way its own type requires: a file — or a symbolic
+    /// link of any kind — with one call, a real directory by walking it and
+    /// removing the contents from the leaves upwards, since SFTP has no
+    /// recursive delete. The walk itself is remote round trips, so it runs
+    /// under the progress slot rather than before it.
+    fn delete(&mut self, cx: &mut Context<Self>) {
+        let Some((session, sftp, directory)) = self.acting_on(cx) else {
+            return;
+        };
+        let Some(state) = self.states.get_mut(&session) else {
+            return;
+        };
+        // Read before it is cleared, so that a call arriving with some *other*
+        // question open leaves that question standing instead of eating it.
+        let names = match state.prompt.as_ref() {
+            Some(Prompt::Delete(names)) => names.clone(),
+            _ => return,
+        };
+        state.prompt = None;
+        self.focus_prompt = false;
+
+        // Resolved against the listing now rather than inside the walk: this is
+        // where "is it a link?" is still answerable without another round trip,
+        // and getting that wrong would delete a link's target instead of the
+        // link.
+        let Some(state) = self.states.get(&session) else {
+            return;
+        };
+        let targets: Vec<RemoteEntry> = names
+            .iter()
+            .filter_map(|name| state.entries.iter().find(|entry| &entry.name == name))
+            .cloned()
+            .collect();
+        let count = targets.len();
+        let last = targets
+            .first()
+            .map(|entry| SharedString::from(entry.name.clone()))
+            .unwrap_or_default();
+        if targets.is_empty() || !self.begin_transfer(session, Activity::Delete, cx) {
+            return;
+        }
+
+        cx.spawn(async move |panel, cx| {
+            let removals = match plan_delete(&sftp, &directory, targets).await {
+                Ok(removals) => removals,
+                Err(error) => {
+                    panel
+                        .update(cx, |panel, cx| {
+                            panel.finish_transfer(session, Notice::from_error(&error), cx);
+                            panel.go(session, sftp, Target::Exact(directory), cx);
+                        })
+                        .ok();
+                    return;
+                }
+            };
+
             if panel
                 .update(cx, |panel, cx| {
-                    panel.set_notice(session, Notice::Info(progress), cx);
+                    panel.size_transfer(session, removals.len() as u64, cx);
                 })
                 .is_err()
             {
                 return;
             }
 
-            let shown = local.display().to_string();
-            let notice = match sftp.download(&remote, local).await {
-                Ok(()) => Notice::Info(ts!("files.downloaded", path = shown)),
-                Err(error) => Notice::from_error(&error),
+            let mut failure = None;
+            let mut done = 0u64;
+            for removal in removals {
+                if panel
+                    .update(cx, |panel, cx| {
+                        panel.transfer_file(session, removal.name.clone(), done, cx);
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                let outcome = if removal.directory {
+                    sftp.remove_dir(&removal.path).await
+                } else {
+                    sftp.remove_file(&removal.path).await
+                };
+                if let Err(error) = outcome {
+                    failure = Some(error);
+                    break;
+                }
+                done = done.saturating_add(1);
+            }
+
+            let notice = match failure {
+                Some(error) => Notice::from_error(&error),
+                None if count == 1 => Notice::Info(ts!("files.deleted", name = last)),
+                None => Notice::Info(ts!("files.deleted_many", count = count)),
             };
+            // Listed again either way: a batch stopped half-way has removed
+            // real entries, and leaving them on screen would be worse than the
+            // failure itself.
             panel
-                .update(cx, |panel, cx| panel.set_notice(session, notice, cx))
+                .update(cx, |panel, cx| {
+                    panel.finish_transfer(session, notice, cx);
+                    if let Some(state) = panel.states.get_mut(&session) {
+                        state.reset_selection();
+                    }
+                    panel.go(session, sftp, Target::Exact(directory), cx);
+                })
                 .ok();
         })
         .detach();
     }
 
-    /// Renders the header: the current path and the three action buttons.
+    /// Opens the rename field over the one selected entry.
+    fn begin_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().map(Entity::entity_id) else {
+            return;
+        };
+        let Some(state) = self.states.get(&session) else {
+            return;
+        };
+        let from = {
+            let mut selection = state.selection();
+            match (selection.next(), selection.next()) {
+                (Some(entry), None) => entry.name.clone(),
+                _ => return,
+            }
+        };
+
+        let panel = cx.entity().downgrade();
+        let input = cx.new(|cx| {
+            // The typed text arrives as an argument rather than being read back
+            // off the field: this runs inside the field's own update, and
+            // reading an entity that is currently leased panics.
+            let mut input = TextInput::new(cx).on_submit(move |typed, _window, cx| {
+                let typed = typed.to_owned();
+                panel
+                    .update(cx, |panel, cx| panel.commit_rename(&typed, cx))
+                    .ok();
+            });
+            input.set_content(from.clone(), cx);
+            input
+        });
+
+        let Some(state) = self.states.get_mut(&session) else {
+            return;
+        };
+        state.prompt = Some(Prompt::Rename { from, input });
+        self.focus_prompt = true;
+        cx.notify();
+    }
+
+    /// Applies `typed` as the new name of the entry the rename field is over.
+    ///
+    /// The name comes in as an argument rather than being read off the field,
+    /// because one of the two callers is the field's own `Enter` handler and
+    /// the field is leased while that runs.
+    ///
+    /// The new name is checked before it is sent, not after: the only thing a
+    /// server can say about `../etc` is that it worked, and by then something
+    /// outside the directory the user was looking at has been renamed.
+    fn commit_rename(&mut self, typed: &str, cx: &mut Context<Self>) {
+        let Some((session, sftp, directory)) = self.acting_on(cx) else {
+            return;
+        };
+        let Some(state) = self.states.get(&session) else {
+            return;
+        };
+        let Some(Prompt::Rename { from, .. }) = state.prompt.as_ref() else {
+            return;
+        };
+        let from = from.clone();
+        // Trimmed because a trailing space is legal on every server and almost
+        // never meant: it produces a name that looks identical to one already
+        // there and cannot be typed again by hand.
+        let to = typed.trim().to_owned();
+
+        if to == from {
+            self.cancel_prompt(cx);
+            return;
+        }
+        if !is_plain_name(&to) {
+            self.show_notice(session, Notice::Error(ts!("files.invalid_name")), cx);
+            return;
+        }
+        // Exclusive with a transfer for the same reason two transfers are:
+        // both end in a listing, and the one that lands second would describe a
+        // directory the other has already changed.
+        if self
+            .states
+            .get(&session)
+            .is_some_and(|state| state.transfer.is_some())
+        {
+            self.show_notice(session, Notice::Error(ts!("files.transfer_busy")), cx);
+            return;
+        }
+
+        let old = join(&directory, &from);
+        let new = join(&directory, &to);
+        if let Some(state) = self.states.get_mut(&session) {
+            state.prompt = None;
+        }
+        self.focus_prompt = false;
+        cx.notify();
+
+        cx.spawn(async move |panel, cx| {
+            let outcome = sftp.rename(&old, &new).await;
+            panel
+                .update(cx, |panel, cx| match outcome {
+                    Ok(()) => {
+                        if let Some(state) = panel.states.get_mut(&session) {
+                            state.keep_notice = true;
+                            // Carried across the refresh: the listing keeps its
+                            // selection when the path has not changed, so this
+                            // leaves the renamed row highlighted where the old
+                            // one was.
+                            state.select_only(&to);
+                        }
+                        let said = ts!("files.renamed", name = to.clone());
+                        panel.show_notice(session, Notice::Info(said), cx);
+                        panel.go(session, sftp, Target::Exact(directory), cx);
+                    }
+                    Err(error) => {
+                        panel.show_notice(session, Notice::from_error(&error), cx);
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Renders the header: the current path and the action buttons.
     fn render_header(&self, state: Option<&SessionState>, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
         let path = state
             .and_then(|state| state.path.as_deref())
             .map_or_else(|| ts!("files.title"), |path| elide_start(path).into());
         let ready = state.is_some_and(|state| state.path.is_some());
-        let downloadable = state
-            .and_then(SessionState::selection)
-            .is_some_and(|entry| !entry.is_dir);
+        // Directories included: a selected folder is copied whole.
+        let downloadable = state.is_some_and(|state| state.selected_count() > 0);
 
         div()
             .flex()
@@ -665,7 +1574,18 @@ impl FilePanel {
                         icons::UPLOAD,
                         ready,
                         &theme,
-                        cx.listener(|panel, _: &ClickEvent, _window, cx| panel.pick_upload(cx)),
+                        cx.listener(|panel, _: &ClickEvent, _window, cx| {
+                            panel.pick_upload(false, cx);
+                        }),
+                    ))
+                    .child(icon_button(
+                        "file-panel-upload-folder",
+                        icons::UPLOAD_FOLDER,
+                        ready,
+                        &theme,
+                        cx.listener(|panel, _: &ClickEvent, _window, cx| {
+                            panel.pick_upload(true, cx);
+                        }),
                     ))
                     .child(icon_button(
                         "file-panel-download",
@@ -722,14 +1642,17 @@ impl FilePanel {
                 entry.is_dir,
                 entry.is_symlink,
                 size,
-                state.selected.as_deref() == Some(entry.name.as_str()),
+                state.selected.contains(&entry.name),
                 &theme,
                 cx,
             ));
         }
 
+        // The placeholder goes *inside* the scroll box rather than replacing
+        // it, so that an empty directory still has a background to right-click
+        // — which is the only way to upload into one without the toolbar.
         if rows.is_empty() {
-            return placeholder(ts!("files.empty"), &theme);
+            rows.push(placeholder(ts!("files.empty"), &theme));
         }
 
         div()
@@ -741,6 +1664,14 @@ impl FilePanel {
             .py(px(2.))
             .overflow_y_scroll()
             .track_scroll(&state.scroll)
+            // Reached by the `..` row and by empty space alike: neither has an
+            // entry behind it, and both mean "do something to this directory".
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|panel, event: &MouseDownEvent, _window, cx| {
+                    panel.open_context(None, event.position, cx);
+                }),
+            )
             .children(rows)
             .into_any_element()
     }
@@ -761,6 +1692,7 @@ impl FilePanel {
         let label = SharedString::from(name.to_owned());
         let parent = name == PARENT_NAME;
         let owned = label.clone();
+        let clicked = label.clone();
 
         div()
             .id(id)
@@ -789,9 +1721,23 @@ impl FilePanel {
                         panel.activate(&owned, cx);
                     }
                 } else if !parent {
-                    panel.select(&owned, cx);
+                    panel.select(&owned, event.modifiers(), cx);
                 }
             }))
+            // The `..` row deliberately has no handler of its own: letting the
+            // press bubble to the list is what makes right-clicking it mean the
+            // same as right-clicking empty space.
+            .when(!parent, |row| {
+                row.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |panel, event: &MouseDownEvent, _window, cx| {
+                        // The press belongs to this row, not to the list under
+                        // it, which would take it as a click on the background.
+                        cx.stop_propagation();
+                        panel.open_context(Some(&clicked), event.position, cx);
+                    }),
+                )
+            })
             // The accent on directories is what makes a listing scannable at a
             // glance: it separates the folders from the files ahead of the
             // sort order, in both themes.
@@ -819,41 +1765,266 @@ impl FilePanel {
             .into_any_element()
     }
 
+    /// Moves the keyboard into the rename field the frame after it appears.
+    ///
+    /// The field is created inside a menu callback, where it has not been laid
+    /// out yet; focusing it there would put the caret in a box that does not
+    /// exist. Doing it from the render that first draws it is the same trick
+    /// the connection dialog uses to focus its host field.
+    fn apply_pending_focus(&mut self, window: &mut Window, cx: &mut App) {
+        if !self.focus_prompt {
+            return;
+        }
+        self.focus_prompt = false;
+        let Some(state) = self
+            .session
+            .as_ref()
+            .and_then(|session| self.states.get(&session.entity_id()))
+        else {
+            return;
+        };
+        if let Some(Prompt::Rename { input, .. }) = state.prompt.as_ref() {
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle);
+        }
+    }
+
+    /// Renders the context menu, if one is open.
+    ///
+    /// Two menus, picked by where the press landed. A row whose command would
+    /// be refused is left out rather than shown greyed: "Rename…" appears only
+    /// over a selection of exactly one, because renaming several things to one
+    /// name is not a thing to offer and then decline.
+    fn render_context(
+        &self,
+        state: Option<&SessionState>,
+        cx: &mut Context<Self>,
+    ) -> Option<ContextMenu> {
+        let menu = self.context.as_ref()?;
+        let selected = state.map_or(0, SessionState::selected_count);
+        let this = cx.entity();
+
+        let mut entries = Vec::new();
+        if menu.on_rows && selected > 0 {
+            entries.push(MenuEntry::new(ts!("files.menu_download")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |panel, cx| panel.download(cx));
+                }
+            }));
+            if selected == 1 {
+                entries.push(MenuEntry::new(ts!("files.menu_rename")).on_activate({
+                    let this = this.clone();
+                    move |_window, cx| {
+                        this.update(cx, |panel, cx| panel.begin_rename(cx));
+                    }
+                }));
+            }
+            entries.push(MenuEntry::new(ts!("files.menu_delete")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |panel, cx| panel.confirm_delete(cx));
+                }
+            }));
+        } else {
+            for (label, folders) in [
+                (ts!("files.menu_upload"), false),
+                (ts!("files.menu_upload_folder"), true),
+            ] {
+                let this = this.clone();
+                entries.push(MenuEntry::new(label).on_activate(move |_window, cx| {
+                    this.update(cx, |panel, cx| panel.pick_upload(folders, cx));
+                }));
+            }
+        }
+        entries.push(MenuEntry::separator());
+        entries.push(MenuEntry::new(ts!("files.menu_refresh")).on_activate({
+            let this = this.clone();
+            move |_window, cx| {
+                this.update(cx, |panel, cx| panel.refresh(cx));
+            }
+        }));
+
+        Some(
+            ContextMenu::new("file-panel-context")
+                .position(menu.at)
+                .entries(entries)
+                .on_dismiss(move |_window, cx| {
+                    this.update(cx, |panel, cx| panel.close_context(cx));
+                }),
+        )
+    }
+
+    /// Renders the delete confirmation or the rename field, if one is open.
+    ///
+    /// Both sit under the listing rather than over the window, so the rows they
+    /// are about stay readable while the question is being answered.
+    fn render_prompt(
+        &self,
+        state: Option<&SessionState>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (question, confirm, body) = match state?.prompt.as_ref()? {
+            Prompt::Delete(names) => {
+                let question = match names.as_slice() {
+                    [only] => ts!("files.delete_confirm_one", name = only.clone()),
+                    names => ts!("files.delete_confirm", count = names.len()),
+                };
+                (
+                    question,
+                    Button::new("file-panel-delete", ts!("files.delete"))
+                        .variant(ButtonVariant::Danger)
+                        .on_click(cx.listener(|panel, _: &ClickEvent, _window, cx| {
+                            panel.delete(cx);
+                        })),
+                    None,
+                )
+            }
+            Prompt::Rename { from, input } => {
+                let field = input.clone();
+                (
+                    ts!("files.rename_prompt", name = from.clone()),
+                    Button::new("file-panel-rename", ts!("files.rename")).on_click(cx.listener(
+                        move |panel, _: &ClickEvent, _window, cx| {
+                            // Safe to read here, unlike in the field's own
+                            // `Enter` handler: this runs from the panel's
+                            // update, so the field itself is not leased.
+                            let typed = field.read(cx).content().to_owned();
+                            panel.commit_rename(&typed, cx);
+                        },
+                    )),
+                    Some(input.clone()),
+                )
+            }
+        };
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .gap(px(6.))
+                .w_full()
+                .min_w_0()
+                .child(
+                    // The header's recipe, for the header's reason: `truncate`
+                    // resolves its width from a row flexing the text child, and
+                    // a bare `w_full` leaves it with nothing to measure against
+                    // — the whole line then collapses to an ellipsis.
+                    div().flex().flex_row().w_full().child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(theme.text)
+                            .child(question),
+                    ),
+                )
+                .children(body)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        // Wraps rather than overflowing: the panel can be
+                        // dragged down to 180px, and a locale that spells
+                        // "Cancel" and "Rename" long enough would otherwise
+                        // push a button out past the panel's own border.
+                        .flex_wrap()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(6.))
+                        .child(
+                            Button::new("file-panel-prompt-cancel", ts!("common.cancel"))
+                                .variant(ButtonVariant::Secondary)
+                                .on_click(cx.listener(|panel, _: &ClickEvent, _window, cx| {
+                                    panel.cancel_prompt(cx);
+                                })),
+                        )
+                        .child(confirm),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Renders the status line, when there is anything to say.
+    ///
+    /// A running transfer outranks everything else here: it is the only state
+    /// the user can neither see in the listing nor guess at, and while it lasts
+    /// the line carries a progress bar under it. An open question is drawn
+    /// *under* whatever the line says, so a refused name explains itself right
+    /// above the field it was typed into.
     fn render_notice(
         &self,
         state: Option<&SessionState>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = theme(cx);
+        let prompt = self.render_prompt(state, &theme, cx);
         let state = state?;
-        let (text, color) = match (&state.notice, state.busy) {
-            (Some(Notice::Error(text)), _) => (text.clone(), theme.danger),
-            (Some(Notice::Info(text)), _) => (text.clone(), theme.text_muted),
-            (None, true) => (ts!("files.loading"), theme.text_muted),
-            (None, false) => return None,
+        let transfer = state.transfer.as_ref();
+        let (text, color) = match (transfer, &state.notice, state.busy) {
+            (Some(transfer), _, _) => (transfer.line(), theme.text_muted),
+            (None, Some(Notice::Error(text)), _) => (text.clone(), theme.danger),
+            (None, Some(Notice::Info(text)), _) => (text.clone(), theme.text_muted),
+            (None, None, true) => (ts!("files.loading"), theme.text_muted),
+            (None, None, false) => {
+                // Nothing to report, but a question may still be waiting; it
+                // owns the whole strip in that case.
+                return prompt.map(|prompt| {
+                    notice_strip(&theme)
+                        .text_size(px(11.))
+                        .child(prompt)
+                        .into_any_element()
+                });
+            }
         };
 
-        Some(
+        // The track is the same hairline colour as the panel's own borders, so
+        // an idle-looking bar reads as part of the frame rather than as a
+        // control; only the accent fill claims attention.
+        let bar = transfer.map(|transfer| {
             div()
                 .flex_none()
                 .w_full()
-                .min_w_0()
-                .px(px(8.))
-                .py(px(4.))
-                .border_t_1()
-                .border_color(theme.border)
+                .h(px(PROGRESS_BAR))
+                .rounded_sm()
+                .bg(theme.border)
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(transfer.fraction()))
+                        .rounded_sm()
+                        .bg(theme.accent),
+                )
+        });
+
+        Some(
+            notice_strip(&theme)
                 .text_size(px(11.))
                 .text_color(color)
-                .child(text)
+                // Same recipe as the header: `truncate` needs a row flexing the
+                // text child to resolve its width against, and a bare `w_full`
+                // gives it none, so the whole line collapses to an ellipsis.
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .w_full()
+                        .child(div().flex_1().min_w_0().truncate().child(text)),
+                )
+                .children(bar)
+                .children(prompt)
                 .into_any_element(),
         )
     }
 }
 
 impl Render for FilePanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
+        self.apply_pending_focus(window, cx);
         let state = self
             .session
             .as_ref()
@@ -862,6 +2033,7 @@ impl Render for FilePanel {
         let header = self.render_header(state, cx);
         let list = self.render_list(state, cx);
         let notice = self.render_notice(state, cx);
+        let context = self.render_context(state, cx);
         let accent = theme.accent;
 
         // Kept wholly inside the panel and added last, so it wins the hit test
@@ -919,6 +2091,406 @@ impl Render for FilePanel {
             .child(list)
             .children(notice)
             .child(handle)
+            .children(context)
+    }
+}
+
+/// One local file an upload will send, and where it goes.
+struct PlannedUpload {
+    /// Local file to read.
+    local: PathBuf,
+    /// Absolute remote directory it belongs in.
+    directory: String,
+    /// Size in bytes, so the batch total is known before the first chunk.
+    size: u64,
+}
+
+/// A local tree flattened into the calls that reproduce it on the server.
+#[derive(Default)]
+struct UploadPlan {
+    /// Remote directories to create, parents always before their children.
+    directories: Vec<String>,
+    /// Files to send, in the order they will be sent.
+    files: Vec<PlannedUpload>,
+    /// Bytes the whole batch will move.
+    total: u64,
+}
+
+/// One remote file a download will fetch, and where it lands.
+struct PlannedDownload {
+    /// Absolute remote path to read.
+    remote: String,
+    /// Local path to write.
+    local: PathBuf,
+    /// Size in bytes, as the listing reported it.
+    size: u64,
+}
+
+/// A remote tree flattened into the calls that reproduce it locally.
+#[derive(Default)]
+struct DownloadPlan {
+    /// Local directories to create.
+    directories: Vec<PathBuf>,
+    /// Files to fetch, in the order they will be fetched.
+    files: Vec<PlannedDownload>,
+    /// Bytes the whole batch will move.
+    total: u64,
+}
+
+impl DownloadPlan {
+    /// Folds `other` into this plan, keeping both orderings intact.
+    ///
+    /// What makes this safe is that the plans being merged describe disjoint
+    /// local trees — one per selected entry — so appending cannot put a file
+    /// ahead of the directory it belongs in.
+    fn absorb(&mut self, other: Self) {
+        self.directories.extend(other.directories);
+        self.files.extend(other.files);
+        self.total = self.total.saturating_add(other.total);
+    }
+}
+
+/// One remote entry a delete will remove.
+struct Removal {
+    /// Absolute remote path to remove.
+    path: String,
+    /// Name shown on the progress line while it goes.
+    name: SharedString,
+    /// Whether it needs the directory call rather than the file one.
+    directory: bool,
+}
+
+/// How running a plan against the session's progress slot ended.
+enum Ran {
+    /// The batch ran to its end; `Some` carries the failure that stopped it.
+    Finished(Option<SftpError>),
+    /// The panel went away part-way through, so there is nobody left to report
+    /// to and the caller should simply stop.
+    Abandoned,
+}
+
+/// Walks `paths` and works out everything an upload into `directory` will do.
+///
+/// Runs on a background thread, because a dropped folder can hold tens of
+/// thousands of entries and every one of them costs a `stat`.
+///
+/// Two rules decide what is in the plan:
+///
+/// * **Symlinked directories are left out entirely**, not followed. A tree can
+///   link back into itself, and a walk that followed such a link would recurse
+///   until it ran out of memory. A symlinked *file* is sent as its target,
+///   which is what dragging a link into a terminal usually means.
+/// * **Anything that cannot be stat'ed is left out and logged** — a broken
+///   link, or a file removed between the listing and the walk. Failing the
+///   whole batch over one of them would be worse than copying the rest.
+///
+/// The walk is breadth-first so that [`UploadPlan::directories`] comes out with
+/// parents before children: SFTP has no `mkdir -p`, so the list is created in
+/// exactly that order.
+fn plan_upload(paths: Vec<PathBuf>, directory: String) -> UploadPlan {
+    let mut plan = UploadPlan::default();
+    let mut queue: VecDeque<(PathBuf, String)> = paths
+        .into_iter()
+        .map(|path| (path, directory.clone()))
+        .collect();
+
+    while let Some((local, parent)) = queue.pop_front() {
+        // `symlink_metadata` describes the link itself, so this is the real
+        // directory test; a link to one falls through to the follow below.
+        let Ok(link) = std::fs::symlink_metadata(&local) else {
+            log::debug!("not uploading {}: it could not be read", local.display());
+            continue;
+        };
+        let Some(name) = local
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            log::debug!("not uploading {}: it has no file name", local.display());
+            continue;
+        };
+
+        if link.is_dir() {
+            let remote = join(&parent, &name);
+            match std::fs::read_dir(&local) {
+                Ok(entries) => {
+                    plan.directories.push(remote.clone());
+                    for entry in entries.flatten() {
+                        queue.push_back((entry.path(), remote.clone()));
+                    }
+                }
+                Err(error) => {
+                    log::debug!("not uploading {}: {error}", local.display());
+                }
+            }
+            continue;
+        }
+
+        let Ok(target) = std::fs::metadata(&local) else {
+            log::debug!(
+                "not uploading {}: its target could not be read",
+                local.display()
+            );
+            continue;
+        };
+        if target.is_dir() {
+            log::debug!("not uploading {}: it links to a directory", local.display());
+            continue;
+        }
+        plan.total = plan.total.saturating_add(target.len());
+        plan.files.push(PlannedUpload {
+            local,
+            directory: parent,
+            size: target.len(),
+        });
+    }
+    plan
+}
+
+/// Walks the remote directory `remote` and works out what a download into
+/// `local` will do.
+///
+/// Mirrors [`plan_upload`], with the same cycle rule in the other direction: an
+/// entry that is a symlink *and* a directory is not descended into, because a
+/// remote tree can link back into itself and there is no cheap way to prove it
+/// does not. Sizes come from the listing, which is what gives the progress bar
+/// a total without a `stat` per file.
+async fn plan_download(
+    sftp: &SftpClient,
+    remote: String,
+    local: PathBuf,
+) -> Result<DownloadPlan, SftpError> {
+    let mut plan = DownloadPlan {
+        directories: vec![local.clone()],
+        ..DownloadPlan::default()
+    };
+    let mut queue = VecDeque::from([(remote, local)]);
+
+    while let Some((remote, local)) = queue.pop_front() {
+        for entry in sftp.read_dir(&remote).await? {
+            if !is_plain_name(&entry.name) {
+                log::debug!("not downloading {}/{}: odd name", remote, entry.name);
+                continue;
+            }
+            let child_remote = join(&remote, &entry.name);
+            let child_local = local.join(&entry.name);
+
+            if entry.is_dir {
+                if entry.is_symlink {
+                    log::debug!("not downloading {child_remote}: it links to a directory");
+                    continue;
+                }
+                plan.directories.push(child_local.clone());
+                queue.push_back((child_remote, child_local));
+            } else {
+                plan.total = plan.total.saturating_add(entry.size);
+                plan.files.push(PlannedDownload {
+                    remote: child_remote,
+                    local: child_local,
+                    size: entry.size,
+                });
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// Creates the local directories of `plan` and fetches its files in order.
+///
+/// Shared by the one-entry and the many-entry download so that both measure
+/// against the same bar in the same way; only the question asked beforehand and
+/// the sentence said afterwards differ between them.
+async fn run_download(
+    panel: &WeakEntity<FilePanel>,
+    cx: &mut AsyncApp,
+    session: EntityId,
+    sftp: &SftpClient,
+    plan: DownloadPlan,
+) -> Ran {
+    if panel
+        .update(cx, |panel, cx| panel.size_transfer(session, plan.total, cx))
+        .is_err()
+    {
+        return Ran::Abandoned;
+    }
+
+    // One hop to a background thread for every directory at once: the creations
+    // are microseconds each but there can be thousands, and this is a UI thread
+    // that also has to keep drawing the bar.
+    if let Err(error) = create_all(cx, plan.directories).await {
+        return Ran::Finished(Some(error));
+    }
+
+    let mut moved = 0u64;
+    for file in plan.files {
+        let label = file_name(&file.local);
+        if panel
+            .update(cx, |panel, cx| {
+                panel.transfer_file(session, label, moved, cx);
+            })
+            .is_err()
+        {
+            return Ran::Abandoned;
+        }
+
+        let (sender, receiver) = mpsc::unbounded();
+        let transfer = sftp.download(&file.remote, file.local, Some(sender));
+        match follow(panel, cx, session, moved, receiver, transfer).await {
+            Ok(()) => moved = moved.saturating_add(file.size),
+            Err(error) => return Ran::Finished(Some(error)),
+        }
+    }
+    Ran::Finished(None)
+}
+
+/// Works out every remote call a delete of `targets` in `directory` will make.
+///
+/// Two rules, and both of them are about not deleting more than was asked:
+///
+/// * **A symbolic link is removed as a link**, never descended into, even when
+///   it points at a directory. Walking one would delete the target's contents —
+///   somewhere else entirely on the server — and leave the link behind.
+/// * **A real directory is emptied from the leaves upwards.** SFTP refuses to
+///   remove a directory that still holds anything, so the order is not a
+///   preference but the only order that works: the walk collects directories
+///   breadth-first and the plan hands them back reversed.
+async fn plan_delete(
+    sftp: &SftpClient,
+    directory: &str,
+    targets: Vec<RemoteEntry>,
+) -> Result<Vec<Removal>, SftpError> {
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    let mut queue = VecDeque::new();
+
+    for entry in targets {
+        let path = join(directory, &entry.name);
+        if needs_walking(&entry) {
+            directories.push(removal(path.clone(), &entry.name, true));
+            queue.push_back(path);
+        } else {
+            files.push(removal(path, &entry.name, false));
+        }
+    }
+
+    while let Some(parent) = queue.pop_front() {
+        for entry in sftp.read_dir(&parent).await? {
+            if !is_plain_name(&entry.name) {
+                log::debug!("not deleting {}/{}: odd name", parent, entry.name);
+                continue;
+            }
+            let path = join(&parent, &entry.name);
+            if entry.is_dir && !entry.is_symlink {
+                directories.push(removal(path.clone(), &entry.name, true));
+                queue.push_back(path);
+            } else {
+                files.push(removal(path, &entry.name, false));
+            }
+        }
+    }
+
+    // Files first — they can go in any order — then the directories from the
+    // deepest outwards, which is what the reversal of a breadth-first walk is.
+    directories.reverse();
+    files.extend(directories);
+    Ok(files)
+}
+
+/// Whether a delete has to walk into `entry` before it can remove it.
+///
+/// True only for a *real* directory. A symbolic link is removed as itself no
+/// matter what it points at: the listing reports a link to a directory with
+/// `is_dir` set so that it can be navigated into, and treating that as a
+/// directory here would walk somewhere else on the server and delete the
+/// target's contents while leaving the link behind.
+fn needs_walking(entry: &RemoteEntry) -> bool {
+    entry.is_dir && !entry.is_symlink
+}
+
+/// Builds one entry of a delete plan.
+fn removal(path: String, name: &str, directory: bool) -> Removal {
+    Removal {
+        path,
+        name: SharedString::from(name.to_owned()),
+        directory,
+    }
+}
+
+/// Whether a name is safe to append to a path, local or remote.
+///
+/// Names come from the server, and one answering `..` or `a/b` would make
+/// [`Path::join`] write *outside* the directory the user picked — or, on the
+/// remote side, aim a delete at something the user never saw. A listing has no
+/// legitimate use for either, so a name carrying one is dropped rather than
+/// sanitised: there is no correct guess at what it was supposed to be.
+///
+/// The same test guards the rename field, where the name comes from the user
+/// instead. It is the same hazard from the other direction — `../notes.txt`
+/// typed into it would move the entry out of the directory on screen — and the
+/// answer is the same: refuse it rather than interpret it.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
+}
+
+/// Creates every directory in `directories`, on a background thread.
+///
+/// One hop for the whole list rather than one per directory: each creation is
+/// microseconds, but a deep tree has thousands of them and this is a thread
+/// that also has to keep drawing the progress bar.
+async fn create_all(cx: &mut AsyncApp, directories: Vec<PathBuf>) -> Result<(), SftpError> {
+    if directories.is_empty() {
+        return Ok(());
+    }
+    cx.background_executor()
+        .spawn(async move {
+            for directory in directories {
+                std::fs::create_dir_all(&directory).map_err(|error| {
+                    SftpError::Local(format!("could not create {}: {error}", directory.display()))
+                })?;
+            }
+            Ok(())
+        })
+        .await
+}
+
+/// Drives one file transfer while feeding its byte count into the status line.
+///
+/// The transfer future and its progress stream are polled *together*, which is
+/// the whole reason the SFTP layer takes a channel: awaiting the transfer first
+/// and reading the counts afterwards would leave a single large file showing no
+/// movement at all until it landed. `base` is what the batch had already moved
+/// before this file started, so the bar measures the batch and not the file.
+///
+/// The service drops its sender before answering, so the stream ends first and
+/// the loop always leaves through the transfer arm.
+async fn follow<T>(
+    panel: &WeakEntity<FilePanel>,
+    cx: &mut AsyncApp,
+    session: EntityId,
+    base: u64,
+    mut receiver: UnboundedReceiver<u64>,
+    transfer: impl Future<Output = Result<T, SftpError>>,
+) -> Result<T, SftpError> {
+    let transfer = futures::FutureExt::fuse(transfer);
+    futures::pin_mut!(transfer);
+
+    loop {
+        futures::select! {
+            outcome = transfer => return outcome,
+            moved = receiver.next() => {
+                let Some(moved) = moved else { continue };
+                if panel
+                    .update(cx, |panel, cx| {
+                        panel.advance_transfer(session, base.saturating_add(moved), cx);
+                    })
+                    .is_err()
+                {
+                    // The panel is gone; the transfer still has to be waited
+                    // for, or dropping it here would abandon a half-written
+                    // file with no one to report it.
+                    return transfer.await;
+                }
+            }
+        }
     }
 }
 
@@ -1020,6 +2592,25 @@ fn suggested_directory() -> PathBuf {
     directories::UserDirs::new().map_or_else(PathBuf::new, |dirs| dirs.home_dir().to_owned())
 }
 
+/// The frame of the strip along the bottom of the panel.
+///
+/// Shared by the status line and the question below it so that the two never
+/// draw two borders, two paddings or two hairlines between them: whatever is
+/// showing, there is exactly one strip.
+fn notice_strip(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .gap(px(4.))
+        .w_full()
+        .min_w_0()
+        .px(px(8.))
+        .py(px(4.))
+        .border_t_1()
+        .border_color(theme.border)
+}
+
 /// A centred message standing in for a listing.
 fn placeholder(message: SharedString, theme: &Theme) -> AnyElement {
     div()
@@ -1118,6 +2709,140 @@ mod tests {
         assert_eq!(elided.chars().count(), PATH_CHARS);
         assert!(elided.starts_with('\u{2026}'));
         assert!(long.ends_with(elided.trim_start_matches('\u{2026}')));
+    }
+
+    #[test]
+    fn a_percentage_covers_both_ends_and_the_empty_batch() {
+        assert_eq!(TransferProgress::percent_of(0, 1000), 0);
+        assert_eq!(TransferProgress::percent_of(500, 1000), 50);
+        assert_eq!(TransferProgress::percent_of(1000, 1000), 100);
+        // Nothing to move is as finished as it will ever be, and must not
+        // divide by zero on the way to saying so.
+        assert_eq!(TransferProgress::percent_of(0, 0), 100);
+        // A file that grew under us must not overflow the bar.
+        assert_eq!(TransferProgress::percent_of(2000, 1000), 100);
+    }
+
+    /// All three activities carry two placeholders, and a translation that
+    /// dropped one — or a stray `%` the interpolator choked on — would show the
+    /// raw key text to the user instead of failing anywhere a test could see.
+    #[test]
+    fn the_progress_line_carries_the_name_and_the_percentage() {
+        for activity in [Activity::Upload, Activity::Download, Activity::Delete] {
+            let mut progress = TransferProgress::new(activity);
+            progress.name = "notes.txt".into();
+            progress.percent = 42;
+
+            let line = progress.line();
+            assert!(line.contains("notes.txt"), "saw {line}");
+            assert!(line.contains("42"), "saw {line}");
+            assert!(!line.contains("%{"), "unreplaced placeholder in {line}");
+        }
+    }
+
+    /// The guard that stops an expiring message from taking a later one with
+    /// it: every message is said at its own epoch, and the timer left behind by
+    /// the first one no longer matches once the second has been said.
+    #[test]
+    fn each_message_is_said_at_its_own_epoch() {
+        let mut state = SessionState::new();
+
+        let uploaded = state.say(Notice::Info("Uploaded notes.txt.".into()));
+        assert_eq!(state.notice_epoch, uploaded);
+
+        let failed = state.say(Notice::Error("could not list /etc".into()));
+        assert_ne!(
+            uploaded, failed,
+            "the timer armed for the first message must not match the second"
+        );
+        assert_eq!(state.notice_epoch, failed);
+
+        // The failure is what is on screen, so an expiry belonging to the
+        // message before it has to be refused rather than clear the line.
+        assert!(matches!(state.notice, Some(Notice::Error(_))));
+    }
+
+    /// The rule that keeps a delete inside the directory it was asked about.
+    /// A link to a directory looks exactly like a directory in the listing —
+    /// that is deliberate, so it can be opened — and getting this wrong would
+    /// empty the target instead of removing the link.
+    #[test]
+    fn a_delete_walks_into_real_directories_only() {
+        let mut link = entry("shortcut", true);
+        link.is_symlink = true;
+        assert!(!needs_walking(&link));
+
+        let mut broken = entry("dangling", false);
+        broken.is_symlink = true;
+        assert!(!needs_walking(&broken));
+
+        assert!(needs_walking(&entry("logs", true)));
+        assert!(!needs_walking(&entry("notes.txt", false)));
+    }
+
+    #[test]
+    fn a_name_that_could_escape_the_destination_is_refused() {
+        assert!(is_plain_name("notes.txt"));
+        assert!(is_plain_name("a file with spaces"));
+        assert!(!is_plain_name(""));
+        assert!(!is_plain_name("."));
+        assert!(!is_plain_name(".."));
+        assert!(!is_plain_name("etc/passwd"));
+        assert!(!is_plain_name("..\\windows"));
+    }
+
+    #[test]
+    fn an_upload_plan_lists_parents_before_children() {
+        let root = tempfile::tempdir().expect("creating the local tree must succeed");
+        std::fs::create_dir_all(root.path().join("logs/old")).expect("nested dirs must be created");
+        std::fs::write(root.path().join("logs/app.log"), b"line\n")
+            .expect("a file must be written");
+        std::fs::write(root.path().join("logs/old/app.log"), b"older\n")
+            .expect("a nested file must be written");
+
+        let plan = plan_upload(vec![root.path().join("logs")], "/srv".to_owned());
+
+        let base = format!("/srv/{}", "logs");
+        assert_eq!(plan.directories, [base.clone(), format!("{base}/old")]);
+        assert_eq!(plan.files.len(), 2);
+        assert_eq!(plan.total, b"line\n".len() as u64 + b"older\n".len() as u64);
+        // Every file must land in a directory the plan also creates, or the
+        // upload would run `create` inside a directory that is not there yet.
+        for file in &plan.files {
+            assert!(
+                plan.directories.contains(&file.directory),
+                "{} has no directory in the plan",
+                file.local.display()
+            );
+        }
+    }
+
+    /// The cycle guard: a link back to an ancestor must not be walked, or the
+    /// plan would grow until the process ran out of memory.
+    #[cfg(unix)]
+    #[test]
+    fn an_upload_plan_does_not_follow_a_symlinked_directory() {
+        let root = tempfile::tempdir().expect("creating the local tree must succeed");
+        let tree = root.path().join("tree");
+        std::fs::create_dir(&tree).expect("the directory must be created");
+        std::fs::write(tree.join("note.txt"), b"hi\n").expect("a file must be written");
+        std::os::unix::fs::symlink(&tree, tree.join("loop")).expect("the symlink must be created");
+        std::os::unix::fs::symlink(tree.join("note.txt"), tree.join("alias"))
+            .expect("the file symlink must be created");
+
+        let plan = plan_upload(vec![tree], "/srv".to_owned());
+
+        assert_eq!(plan.directories, ["/srv/tree"]);
+        let mut names: Vec<String> = plan
+            .files
+            .iter()
+            .map(|file| file_name(&file.local).to_string())
+            .collect();
+        names.sort();
+        // The link to a directory is gone; the link to a file is sent as its
+        // target, which is why its size counts twice in the total.
+        assert_eq!(names, ["alias", "note.txt"]);
+        assert_eq!(plan.total, 2 * b"hi\n".len() as u64);
     }
 
     #[test]

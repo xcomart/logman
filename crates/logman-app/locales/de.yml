@@ -44,12 +44,33 @@ files:
   loading: Wird geladen…
   empty: Dieses Verzeichnis ist leer.
   select_upload: Hochladen
-  uploading: "%{name} wird hochgeladen…"
+  select_upload_folder: Ordner hochladen
+  select_download_folder: Speichern
+  menu_download: Herunterladen…
+  menu_rename: Umbenennen…
+  menu_delete: Löschen…
+  menu_upload: Dateien hochladen…
+  menu_upload_folder: Ordner hochladen…
+  menu_refresh: Aktualisieren
+  uploading: "%{name} wird hochgeladen… %{percent} %"
+  downloading: "%{name} wird heruntergeladen… %{percent} %"
+  deleting: "%{name} wird gelöscht… %{percent} %"
+  transfer_busy: Hier läuft bereits eine Übertragung.
   uploaded: "%{name} wurde hochgeladen."
   uploaded_many: "%{count} Dateien wurden hochgeladen."
-  downloading: "%{name} wird heruntergeladen…"
+  uploaded_tree: "%{files} Dateien in %{folders} Ordnern wurden hochgeladen."
+  nothing_to_upload: Es konnte nichts zum Hochladen gelesen werden.
   downloaded: "Gespeichert unter %{path}."
-  skipped_directory: "%{name} wurde übersprungen: Es können nur Dateien hochgeladen werden."
+  downloaded_tree: "%{count} Dateien wurden unter %{path} gespeichert."
+  delete_confirm_one: "%{name} löschen?"
+  delete_confirm: "%{count} Einträge löschen?"
+  delete: Löschen
+  deleted: "%{name} wurde gelöscht."
+  deleted_many: "%{count} Einträge wurden gelöscht."
+  rename_prompt: "%{name} umbenennen in:"
+  rename: Umbenennen
+  renamed: "In %{name} umbenannt."
+  invalid_name: Dieser Name kann nicht verwendet werden.
   failed: "Entfernte Dateien: %{error}"
 
 empty:

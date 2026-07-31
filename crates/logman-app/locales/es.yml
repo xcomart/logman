@@ -44,12 +44,33 @@ files:
   loading: Cargando…
   empty: Este directorio está vacío.
   select_upload: Subir
-  uploading: "Subiendo %{name}…"
+  select_upload_folder: Subir carpeta
+  select_download_folder: Guardar
+  menu_download: Descargar…
+  menu_rename: Cambiar nombre…
+  menu_delete: Eliminar…
+  menu_upload: Subir archivos…
+  menu_upload_folder: Subir carpeta…
+  menu_refresh: Actualizar
+  uploading: "Subiendo %{name}… %{percent} %"
+  downloading: "Descargando %{name}… %{percent} %"
+  deleting: "Eliminando %{name}… %{percent} %"
+  transfer_busy: Ya hay una transferencia en curso aquí.
   uploaded: "Se subió %{name}."
   uploaded_many: "Se subieron %{count} archivos."
-  downloading: "Descargando %{name}…"
+  uploaded_tree: "Se subieron %{files} archivos en %{folders} carpetas."
+  nothing_to_upload: No se pudo leer nada para subir.
   downloaded: "Guardado en %{path}."
-  skipped_directory: "Se omitió %{name}: solo se pueden subir archivos."
+  downloaded_tree: "Se guardaron %{count} archivos en %{path}."
+  delete_confirm_one: "¿Eliminar %{name}?"
+  delete_confirm: "¿Eliminar %{count} elementos?"
+  delete: Eliminar
+  deleted: "Se eliminó %{name}."
+  deleted_many: "Se eliminaron %{count} elementos."
+  rename_prompt: "Cambiar el nombre de %{name} a:"
+  rename: Cambiar nombre
+  renamed: "Se cambió el nombre a %{name}."
+  invalid_name: Ese nombre no se puede usar.
   failed: "Archivos remotos: %{error}"
 
 empty:
