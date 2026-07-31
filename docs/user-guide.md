@@ -504,6 +504,7 @@ sections.
 | Setting | Values | Notes |
 | --- | --- | --- |
 | **UI theme** | Dark, Light | Dark by default. Also recolours the window caption on Windows. |
+| **Title bar** | Custom, System | Custom by default: the tab strip doubles as the title bar, with the application name at one end and the window buttons at the other. System brings back the caption the operating system draws. |
 | **Language** | System default, or one of eight | German, English, Spanish, French, Japanese, Korean, Russian, Simplified Chinese. Each is listed under its own name. |
 | **Opacity** | 50–100% | Below 100 the window becomes translucent. |
 | **Blur the desktop behind the window** | on/off | Where the platform supports it. Blur wins over plain translucency. |
@@ -536,6 +537,9 @@ elsewhere.
 ### When a change takes effect
 
 - **UI theme, language, opacity, blur** — immediately, across the whole window.
+- **Title bar** — immediately on Windows and macOS: the open window swaps its
+  caption in place. On Linux the window keeps the compositor's title bar either
+  way.
 - **Color scheme and font** — immediately, in every open session, background
   tabs included.
 - **`TERM`, keepalive, connect timeout** — on the next connect or reconnect. The
