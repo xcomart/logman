@@ -16,9 +16,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Fraction of a split the first child gets when the split is created.
 ///
-/// Panes always start out even. The ratio is nevertheless stored per split so
-/// that a later drag-to-resize has somewhere to write and the renderer never
-/// has to learn whether resizing exists yet.
+/// Panes always start out even; dragging the divider writes a new ratio through
+/// [`PaneTree::set_ratio`]. The value lives on the split rather than on the
+/// renderer so that it survives a repaint, a tab switch, and being merged into
+/// another tab as a subtree.
 const EVEN: f32 = 0.5;
 
 /// Failure message for the one invariant this module upholds internally.
@@ -33,6 +34,13 @@ const ROOT_INVARIANT: &str = "a pane tree always has a root";
 /// to be remapped.
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Source of [`SplitId`]s.
+///
+/// Separate from [`NEXT_PANE_ID`] only so the two counters stay readable in a
+/// debug dump; the types are distinct either way, which is the point — a split
+/// id and a pane id name different things and must not be swappable.
+static NEXT_SPLIT_ID: AtomicU64 = AtomicU64::new(1);
+
 /// The identity of one pane, stable for as long as the pane exists.
 ///
 /// Ids are never reused, so a stale id reads as "gone" rather than as some
@@ -44,6 +52,29 @@ impl PaneId {
     /// Mints an id no pane has ever had.
     fn next() -> Self {
         Self(NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The id as a plain integer, for building element ids.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+/// The identity of one split, stable for as long as the split exists.
+///
+/// A divider is dragged, not clicked: the view starts a drag on one handle and
+/// then receives move events from every enclosing split as well, so it needs a
+/// way to tell "this is the divider being dragged" from "this is an ancestor
+/// watching the same gesture". Positions cannot answer that — the tree is
+/// rewritten whenever a pane opens or closes — so each split carries an id, as
+/// process wide and as non-reusable as [`PaneId`] and for the same reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SplitId(u64);
+
+impl SplitId {
+    /// Mints an id no split has ever had.
+    fn next() -> Self {
+        Self(NEXT_SPLIT_ID.fetch_add(1, Ordering::Relaxed))
     }
 
     /// The id as a plain integer, for building element ids.
@@ -73,6 +104,8 @@ pub enum PaneNode<T> {
     },
     /// Two children sharing this node's area.
     Split {
+        /// Identity of the split, for aiming [`PaneTree::set_ratio`] at it.
+        id: SplitId,
         /// Direction the children are laid out in.
         axis: Axis,
         /// Fraction of the area the first child gets, in `0.0..=1.0`.
@@ -170,6 +203,22 @@ impl<T> PaneTree<T> {
         payload
     }
 
+    /// Moves the divider of the split `id`, giving its first child `ratio` of
+    /// the area.
+    ///
+    /// Returns whether the split was found; an unknown id changes nothing, so a
+    /// drag whose split closed mid-gesture is simply ignored. Only the `0..=1`
+    /// range is enforced here, because how much of a pane must stay visible is
+    /// a question about the rendered layout, not about the tree — the view
+    /// clamps to its own minimum before calling.
+    pub fn set_ratio(&mut self, id: SplitId, ratio: f32) -> bool {
+        let Some(split) = find_split_mut(self.root.as_mut().expect(ROOT_INVARIANT), id) else {
+            return false;
+        };
+        *split = ratio.clamp(0., 1.);
+        true
+    }
+
     /// What the pane `id` shows, if it is in this tree.
     pub fn get(&self, id: PaneId) -> Option<&T> {
         find(self.root(), id)
@@ -260,18 +309,24 @@ fn splice<T>(
                 .take()
                 .expect("the target leaf is spliced exactly once");
             PaneNode::Split {
+                id: SplitId::next(),
                 axis,
                 ratio: EVEN,
                 first: Box::new(leaf),
                 second: Box::new(second),
             }
         }
+        // Rebuilt by value, so every field an untouched split already had —
+        // its id above all — has to be carried over rather than minted afresh,
+        // or a drag in flight would lose track of the divider it holds.
         PaneNode::Split {
+            id,
             axis: split_axis,
             ratio,
             first,
             second,
         } => PaneNode::Split {
+            id,
             axis: split_axis,
             ratio,
             first: Box::new(splice(*first, target, axis, incoming)),
@@ -295,7 +350,10 @@ fn take_leaf<T>(node: PaneNode<T>, target: PaneId) -> (Option<PaneNode<T>>, Opti
                 (Some(PaneNode::Leaf { id, payload }), None)
             }
         }
+        // A split that survives keeps its id and its ratio: only the collapsed
+        // one goes away, and the divider the user dragged is not it.
         PaneNode::Split {
+            id,
             axis,
             ratio,
             first,
@@ -306,6 +364,7 @@ fn take_leaf<T>(node: PaneNode<T>, target: PaneId) -> (Option<PaneNode<T>>, Opti
                 return match rebuilt {
                     Some(first) => (
                         Some(PaneNode::Split {
+                            id,
                             axis,
                             ratio,
                             first: Box::new(first),
@@ -324,6 +383,7 @@ fn take_leaf<T>(node: PaneNode<T>, target: PaneId) -> (Option<PaneNode<T>>, Opti
             match rebuilt {
                 Some(second) => (
                     Some(PaneNode::Split {
+                        id,
                         axis,
                         ratio,
                         first: Box::new(first),
@@ -369,6 +429,31 @@ fn find_mut<T>(node: &mut PaneNode<T>, target: PaneId) -> Option<&mut T> {
     }
 }
 
+/// The ratio of the split `target` inside `node`, mutably.
+fn find_split_mut<T>(node: &mut PaneNode<T>, target: SplitId) -> Option<&mut f32> {
+    match node {
+        PaneNode::Leaf { .. } => None,
+        PaneNode::Split {
+            id,
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            if *id == target {
+                return Some(ratio);
+            }
+            // Spelled out rather than as `or_else`, which would need the first
+            // subtree's mutable borrow to still be live while the second one is
+            // taken.
+            match find_split_mut(first, target) {
+                Some(ratio) => Some(ratio),
+                None => find_split_mut(second, target),
+            }
+        }
+    }
+}
+
 /// How many leaves `node` holds.
 fn count<T>(node: &PaneNode<T>) -> usize {
     match node {
@@ -392,6 +477,19 @@ mod tests {
     /// The payloads of a tree, in layout order.
     fn payloads(tree: &PaneTree<u32>) -> Vec<u32> {
         tree.leaves().into_iter().map(|(_, value)| *value).collect()
+    }
+
+    /// The id of a node, or `None` when it is a leaf.
+    fn split_id<T>(node: &PaneNode<T>) -> Option<SplitId> {
+        match node {
+            PaneNode::Leaf { .. } => None,
+            PaneNode::Split { id, .. } => Some(*id),
+        }
+    }
+
+    /// The id of the split at the root, which the tests below build on purpose.
+    fn root_split<T>(tree: &PaneTree<T>) -> SplitId {
+        split_id(tree.root()).expect("the tree was split")
     }
 
     #[test]
@@ -612,6 +710,136 @@ mod tests {
         assert_eq!(payloads(&broken_out), vec![2]);
         // A fresh leaf, so the old id is gone for good.
         assert_ne!(broken_out.first_leaf().0, two);
+    }
+
+    #[test]
+    fn every_split_gets_its_own_id() {
+        let mut tree = PaneTree::single(1u32);
+        let one = tree.first_leaf().0;
+        let two = tree.split(one, Axis::Horizontal, 2).expect("1 exists");
+        let outer = root_split(&tree);
+        tree.split(two, Axis::Vertical, 3).expect("2 exists");
+
+        let inner = match tree.root() {
+            PaneNode::Split { second, .. } => split_id(second).expect("2 was split in two"),
+            PaneNode::Leaf { .. } => panic!("the tree holds three panes"),
+        };
+        assert_ne!(outer, inner);
+        // The outer split was rebuilt around the inner one and kept its id.
+        assert_eq!(root_split(&tree), outer);
+    }
+
+    #[test]
+    fn a_divider_moves_where_it_is_put() {
+        let mut tree = PaneTree::single(1u32);
+        let one = tree.first_leaf().0;
+        tree.split(one, Axis::Horizontal, 2).expect("1 exists");
+        let split = root_split(&tree);
+
+        assert!(tree.set_ratio(split, 0.3));
+        assert_eq!(split_of(tree.root()), Some((Axis::Horizontal, 0.3)));
+    }
+
+    #[test]
+    fn moving_an_unknown_divider_changes_nothing() {
+        let mut tree = PaneTree::single(1u32);
+        let one = tree.first_leaf().0;
+        tree.split(one, Axis::Vertical, 2).expect("1 exists");
+
+        // A split of another tree, standing in for one that closed mid-drag.
+        let mut other = PaneTree::single(9u32);
+        let nine = other.first_leaf().0;
+        other.split(nine, Axis::Vertical, 8).expect("9 exists");
+        let stale = root_split(&other);
+
+        assert!(!tree.set_ratio(stale, 0.3));
+        assert_eq!(split_of(tree.root()), Some((Axis::Vertical, EVEN)));
+    }
+
+    #[test]
+    fn a_divider_cannot_be_pushed_past_the_edges() {
+        let mut tree = PaneTree::single(1u32);
+        let one = tree.first_leaf().0;
+        tree.split(one, Axis::Horizontal, 2).expect("1 exists");
+        let split = root_split(&tree);
+
+        assert!(tree.set_ratio(split, -4.));
+        assert_eq!(split_of(tree.root()), Some((Axis::Horizontal, 0.)));
+
+        assert!(tree.set_ratio(split, 4.));
+        assert_eq!(split_of(tree.root()), Some((Axis::Horizontal, 1.)));
+    }
+
+    #[test]
+    fn a_nested_divider_moves_without_disturbing_its_parent() {
+        // 1 | (2 / 3): dragging the inner divider must leave the outer one be.
+        let mut tree = PaneTree::single(1u32);
+        let one = tree.first_leaf().0;
+        let two = tree.split(one, Axis::Horizontal, 2).expect("1 exists");
+        let outer = root_split(&tree);
+        tree.split(two, Axis::Vertical, 3).expect("2 exists");
+        let inner = match tree.root() {
+            PaneNode::Split { second, .. } => split_id(second).expect("2 was split in two"),
+            PaneNode::Leaf { .. } => panic!("the tree holds three panes"),
+        };
+
+        assert!(tree.set_ratio(inner, 0.25));
+
+        assert_eq!(split_of(tree.root()), Some((Axis::Horizontal, EVEN)));
+        match tree.root() {
+            PaneNode::Split { second, .. } => {
+                assert_eq!(split_of(second), Some((Axis::Vertical, 0.25)));
+            }
+            PaneNode::Leaf { .. } => panic!("the tree holds three panes"),
+        }
+        assert_eq!(root_split(&tree), outer);
+    }
+
+    #[test]
+    fn a_collapsing_split_leaves_the_surviving_one_untouched() {
+        // 1 | (2 / 3) with both dividers moved: closing 3 collapses the inner
+        // split, and the outer one has to come through with its id and its
+        // ratio intact so a divider drag survives a pane closing.
+        let mut tree = PaneTree::single(1u32);
+        let one = tree.first_leaf().0;
+        let two = tree.split(one, Axis::Horizontal, 2).expect("1 exists");
+        let outer = root_split(&tree);
+        let three = tree.split(two, Axis::Vertical, 3).expect("2 exists");
+        assert!(tree.set_ratio(outer, 0.3));
+
+        assert_eq!(tree.remove(three), Some(3));
+
+        assert_eq!(payloads(&tree), vec![1, 2]);
+        assert_eq!(root_split(&tree), outer);
+        assert_eq!(split_of(tree.root()), Some((Axis::Horizontal, 0.3)));
+        assert!(tree.set_ratio(outer, 0.6));
+        assert_eq!(split_of(tree.root()), Some((Axis::Horizontal, 0.6)));
+    }
+
+    #[test]
+    fn a_merged_subtree_brings_its_dividers_with_it() {
+        let mut target = PaneTree::single(1u32);
+        let one = target.first_leaf().0;
+
+        let mut source = PaneTree::single(2u32);
+        let two = source.first_leaf().0;
+        source.split(two, Axis::Vertical, 3).expect("2 exists");
+        let moved = root_split(&source);
+        assert!(source.set_ratio(moved, 0.75));
+
+        assert!(target.merge_subtree(one, Axis::Horizontal, source));
+
+        // The subtree's divider kept both its position and its id, so the
+        // handle rendered for it still drags the same split.
+        match target.root() {
+            PaneNode::Split { second, .. } => {
+                assert_eq!(split_id(second), Some(moved));
+                assert_eq!(split_of(second), Some((Axis::Vertical, 0.75)));
+            }
+            PaneNode::Leaf { .. } => panic!("the merge produced a split"),
+        }
+        assert_ne!(root_split(&target), moved);
+        assert!(target.set_ratio(moved, 0.4));
     }
 
     #[test]
