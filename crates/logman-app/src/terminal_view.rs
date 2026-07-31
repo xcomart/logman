@@ -464,14 +464,17 @@ impl TerminalView {
     /// known once a frame has been painted.
     fn scrollbar(&self, position: ScrollPosition) -> Option<Scrollbar> {
         let bounds = self.geometry?.bounds;
-        Some(Scrollbar::new(
-            SCROLLBAR,
-            ScrollbarAxis::Vertical,
-            bounds,
-            position.rows as f32,
-            position.history as f32,
-            (position.history - position.display_offset) as f32,
-        ))
+        Some(
+            Scrollbar::new(
+                SCROLLBAR,
+                ScrollbarAxis::Vertical,
+                bounds,
+                position.rows as f32,
+                position.history as f32,
+                (position.history - position.display_offset) as f32,
+            )
+            .fade(self.scrollbar.fade()),
+        )
     }
 
     /// Puts the bar up whenever the viewport has moved through the scrollback,
@@ -880,10 +883,7 @@ impl Render for TerminalView {
         let position = self.session.read(cx).terminal().scroll_position();
         self.watch_scroll(position, cx);
         let scrollbar = self
-            .scrollbar
-            .showing()
-            .then(|| self.scrollbar(position))
-            .flatten()
+            .scrollbar(position)
             .and_then(|bar| bar.render(&theme(cx)));
         let element = TerminalElement {
             view: cx.entity(),

@@ -408,7 +408,8 @@ impl SettingsDialog {
 
     /// The overlay scroll indicator of one surface, as it stands.
     fn scrollbar(&self, id: &'static str, surface: Surface) -> Scrollbar {
-        Scrollbar::for_handle(id, ScrollbarAxis::Vertical, self.surface_ref(surface).0)
+        let (handle, state) = self.surface_ref(surface);
+        Scrollbar::for_handle(id, ScrollbarAxis::Vertical, handle).fade(state.fade())
     }
 
     /// Puts each surface's bar up whenever it has been scrolled, and starts the
@@ -446,14 +447,6 @@ impl SettingsDialog {
                 cx.notify();
             }
         }
-    }
-
-    /// The bar for `surface`, built only while it should be on screen.
-    fn showing(&self, id: &'static str, surface: Surface) -> Option<Scrollbar> {
-        self.surface_ref(surface)
-            .1
-            .showing()
-            .then(|| self.scrollbar(id, surface))
     }
 
     /// Show the dialog, re-reading the current settings into the form.
@@ -761,7 +754,7 @@ impl SettingsDialog {
     /// The "Appearance" section.
     fn render_appearance(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let this = cx.entity();
-        let language_bar = self.showing(SCROLLBARS[2].0, Surface::Language);
+        let language_bar = self.scrollbar(SCROLLBARS[2].0, Surface::Language);
         let selected = match self.ui_theme {
             UiTheme::Dark => 0,
             UiTheme::Light => 1,
@@ -813,7 +806,7 @@ impl SettingsDialog {
             .open(self.open_list == Some(OpenList::Language))
             .tab_index(tab::LANGUAGE)
             .scroll_handle(self.language_scroll.clone())
-            .when_some(language_bar, Select::scrollbar)
+            .scrollbar(language_bar)
             .on_select({
                 let this = this.clone();
                 // By index, not by label: row 0 is "follow the system" and the
@@ -872,7 +865,7 @@ impl SettingsDialog {
 
     /// The "Terminal" section.
     fn render_terminal(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let font_bar = self.showing(SCROLLBARS[1].0, Surface::Font);
+        let font_bar = self.scrollbar(SCROLLBARS[1].0, Surface::Font);
         let this = cx.entity();
 
         let picker = SchemePicker::new("settings-scheme")
@@ -898,7 +891,7 @@ impl SettingsDialog {
             .open(self.open_list == Some(OpenList::Font))
             .tab_index(tab::FONT_FAMILY)
             .scroll_handle(self.font_scroll.clone())
-            .when_some(font_bar, Select::scrollbar)
+            .scrollbar(font_bar)
             .on_select({
                 let this = this.clone();
                 // Row 0 is the "leave it to the OS" entry; comparing its label
@@ -1061,7 +1054,7 @@ impl Render for SettingsDialog {
         self.apply_pending_focus(window, cx);
         self.watch_scroll(cx);
         let theme = theme(cx);
-        let body_bar = self.showing(SCROLLBARS[0].0, Surface::Body);
+        let body_bar = self.scrollbar(SCROLLBARS[0].0, Surface::Body);
 
         // The `min_h_0` chain lets the scroll area shrink below its cap when
         // the modal hits the window height, keeping the footer on screen.
@@ -1093,7 +1086,7 @@ impl Render for SettingsDialog {
                             .child(self.render_terminal(cx))
                             .child(self.render_connection(cx)),
                     )
-                    .children(body_bar.and_then(|bar| bar.render(&theme))),
+                    .children(body_bar.render(&theme)),
             )
             .child(self.render_footer(cx));
 
