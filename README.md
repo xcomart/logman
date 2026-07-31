@@ -8,10 +8,10 @@
 A multi-platform GUI SSH terminal written in Rust, built on
 [gpui](https://gpui.rs) — the GPU-accelerated UI framework behind the Zed editor.
 
-![logman running two SSH sessions in the One Dark theme](docs/screenshots/main-dark.png)
+![logman with two sessions in split panes and the remote files panel, in the One Dark theme](docs/screenshots/main-dark.png)
 
 <details>
-<summary>The settings dialog, with live previews of the six built-in color schemes</summary>
+<summary>The settings dialog: language, theme, live scheme previews, installed fonts</summary>
 
 ![The settings dialog](docs/screenshots/settings.png)
 
@@ -19,11 +19,18 @@ A multi-platform GUI SSH terminal written in Rust, built on
 
 - **Multiple sessions** in one window, as tabs, each with its own connection and
   scrollback.
+- **Split panes**: pull one tab in beside another and work in both sessions at
+  once; a pane closes itself when its connection ends.
+- **A remote files panel**: an SFTP browser beside the terminal that follows the
+  shell's working directory, with drag-and-drop upload and download.
 - **Password and private key authentication**, with secrets kept in the OS
   keychain rather than on disk.
 - **A real terminal**, not a log view: `alacritty_terminal` drives the emulation,
   so colors, cursor addressing, alternate screen and full-screen programs behave
   the way they do in any other terminal.
+- **Your language and your font**: the interface ships in eight languages,
+  follows the system locale, and the terminal font is picked from the fonts
+  installed on the machine.
 - **Trust on first use** host key checking, backed by a `known_hosts` file.
 
 ## Building
@@ -78,20 +85,80 @@ click **New session** to open the connection dialog. Fill in the host and user,
 pick an authentication method, and connect. The profile is saved automatically,
 so the next connection is one click from the empty-state screen.
 
+### Splitting a tab
+
+A tab shows one session per pane. To put two sessions side by side, right-click
+the tab you want to move and pick **Split right of current tab** or **Split
+below current tab**: that tab leaves the strip and its sessions appear next to
+the pane you are looking at. There is no shortcut for it, because a split has to
+say *which* tab to pull in. Right-clicking the active tab offers the reverse,
+moving its focused pane back out into a tab of its own.
+
+When a connection ends — the remote shell exits, or the server hangs up — its
+pane closes on its own: siblings grow into the space, a tab closes with its
+last pane, and closing the last tab returns to the start screen. A session
+that *failed* to connect stays visible instead, with the error and a
+Reconnect button.
+
+### Remote files panel
+
+The sidebar to the left of the terminal is an SFTP browser for the session in
+the focused pane. It rides on the same SSH connection over a channel of its
+own, so listing a directory or copying a file never holds up the shell — and
+the shell never holds up a transfer.
+
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> (<kbd>Cmd</kbd>+<kbd>B</kbd> on
+macOS) shows and hides it, as does the panel button left of the tab strip. It
+is shown by default.
+
+- Double-click a directory to enter it, or `..` to go up. Directories sort
+  before files, ignoring case.
+- **⟳** lists the directory again, **↑** uploads local files into it, and **↓**
+  saves the selected file locally.
+- **Dropping files onto the panel uploads them** into the directory on screen.
+  Folders are skipped rather than copied recursively.
+- Each session keeps its own directory, selection and scroll position, so
+  switching tabs or panes picks up where you left off.
+
+**The panel follows the remote shell's `cd`, but only if the shell says so.**
+Directory tracking is driven by the `OSC 7` escape sequence, which fish emits
+out of the box. bash and zsh need one line — this, in `~/.bashrc`:
+
+```bash
+PROMPT_COMMAND='printf "\033]7;file://%s%s\033\\" "$HOSTNAME" "$PWD"'
+```
+
+or in `~/.zshrc`:
+
+```zsh
+precmd() { printf '\033]7;file://%s%s\033\\' "$HOST" "$PWD" }
+```
+
+Without it the panel simply starts in the login directory and stays wherever
+you navigate it. Browsing by hand always wins until the shell announces a new
+directory, at which point the panel follows again.
+
 ### Shortcuts
 
 | Key | Action |
 | --- | --- |
 | <kbd>Ctrl</kbd>+<kbd>T</kbd> | New session |
-| <kbd>Ctrl</kbd>+<kbd>W</kbd> | Close the active tab |
+| <kbd>Ctrl</kbd>+<kbd>W</kbd> | Close the active pane, and the tab with its last one |
 | <kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd> | Switch to tab *n* |
+| <kbd>Alt</kbd>+<kbd>]</kbd> / <kbd>Alt</kbd>+<kbd>[</kbd> | Next / previous pane of the tab |
+| <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | Move the active pane into its own tab |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | Show or hide the remote files panel |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> | Copy the selection |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> | Paste |
 | <kbd>Esc</kbd> | Dismiss the connection dialog |
 | <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Quit |
 
-On macOS every <kbd>Ctrl</kbd> above is <kbd>Cmd</kbd>, and copy/paste are plain
-<kbd>Cmd</kbd>+<kbd>C</kbd>/<kbd>V</kbd>.
+On macOS every <kbd>Ctrl</kbd> and <kbd>Alt</kbd> above is <kbd>Cmd</kbd>,
+copy/paste are plain <kbd>Cmd</kbd>+<kbd>C</kbd>/<kbd>V</kbd>, and the files
+panel is plain <kbd>Cmd</kbd>+<kbd>B</kbd>. The pane shortcuts use
+<kbd>Alt</kbd> elsewhere because <kbd>Ctrl</kbd>+<kbd>[</kbd> is ESC to a remote
+shell; the files panel takes the shifted chord for the same reason, since
+<kbd>Ctrl</kbd>+<kbd>B</kbd> is tmux's prefix key.
 
 Select text by dragging across the grid; scroll back with the mouse wheel.
 
@@ -113,11 +180,12 @@ keychain the application still runs; it just asks for the secret every time.
 ### Settings
 
 <kbd>Ctrl</kbd>+<kbd>,</kbd> (<kbd>Cmd</kbd>+<kbd>,</kbd> on macOS) opens the
-settings dialog: UI theme, terminal color scheme (One Dark, One Light,
+settings dialog: interface language (eight are built in; the default follows
+the system locale), UI theme, terminal color scheme (One Dark, One Light,
 Solarized Dark/Light, Gruvbox Dark, Dracula — each shown with a live
-preview), font family and size, scrollback depth, `TERM`, copy-on-select,
-window background opacity and blur, and the defaults applied to new
-connections. Everything lands in `settings.json` next to the profiles, is
+preview), font family — picked from the fonts installed on the machine — and
+size, scrollback depth, `TERM`, copy-on-select, window background opacity and
+blur, and the defaults applied to new connections. Everything lands in `settings.json` next to the profiles, is
 safe to edit by hand, and out-of-range values are clamped on load rather
 than breaking the app.
 
@@ -144,7 +212,7 @@ legitimately offer both an Ed25519 and an RSA host key.
 | Crate | Responsibility |
 | --- | --- |
 | `logman-core` | Profiles, OS keychain, `known_hosts`, config paths. No SSH, no GUI. |
-| `logman-ssh` | russh client: authentication, pty, shell, resize. Owns its own thread and Tokio runtime. |
+| `logman-ssh` | russh client: authentication, pty, shell, resize, and the SFTP channel behind the files panel. Owns its own thread and Tokio runtime. |
 | `logman-term` | `alacritty_terminal` wrapper: byte stream in, styled snapshot out; key encoding. No GUI. |
 | `logman-app` | The gpui binary: widgets, terminal rendering, session management. |
 
@@ -157,7 +225,7 @@ cannot stall a repaint.
 **The terminal model knows nothing about gpui, and the GUI knows nothing about
 russh.** `logman-term` turns bytes into a `TerminalSnapshot` of styled runs, and
 that is all the renderer sees. Both lower crates are testable without a window:
-of the 105 tests in the workspace, 68 need neither a GUI nor a network, and the
+of the 231 tests in the workspace, 189 need neither a GUI nor a network, and the
 rest need only loopback.
 
 ### Third-party libraries
@@ -168,10 +236,11 @@ The heavy lifting is done by these projects:
 | --- | --- |
 | [gpui](https://github.com/zed-industries/zed/tree/main/crates/gpui) | GPU-accelerated UI framework, from the Zed editor (vendored 0.2.2, [patched](#gpui-is-vendored-and-patched)) |
 | [russh](https://github.com/warp-tech/russh) | Pure-Rust SSH client: transport, authentication, pty and shell channels |
+| [russh-sftp](https://github.com/AspectUnk/russh-sftp) | SFTP client for the remote files panel, on a channel of the same connection |
 | [alacritty_terminal](https://github.com/alacritty/alacritty) | Terminal emulation: grid, VTE parsing, scrollback |
 | [tokio](https://github.com/tokio-rs/tokio) | Async runtime for the SSH transport thread |
 | [keyring](https://github.com/open-source-cooperative/keyring-rs) | OS credential store: Windows Credential Manager, macOS Keychain, Secret Service |
-| [directories](https://github.com/soc/directories-rs) | Per-platform configuration paths |
+| [directories](https://github.com/soc/directories-rs) | Per-platform configuration paths, and the home directory the save dialog opens in |
 
 Supporting crates:
 [serde](https://github.com/serde-rs/serde) /
@@ -225,8 +294,14 @@ and no external server is needed.
   exercised. Under it, <kbd>Esc</kbd> during composition *commits* the syllable
   and then leaves insert mode, which is the IME's own behavior rather than
   something logman chooses.
-- <kbd>Ctrl</kbd>+<kbd>T</kbd> and <kbd>Ctrl</kbd>+<kbd>W</kbd> are taken by the
-  application, so the remote shell never sees them.
+- <kbd>Ctrl</kbd>+<kbd>T</kbd>, <kbd>Ctrl</kbd>+<kbd>W</kbd> and the
+  <kbd>Alt</kbd> pane shortcuts are taken by the application, so the remote
+  shell never sees them.
+- **The remote files panel browses and transfers, nothing more.** No rename,
+  delete or new directory, no recursive folder upload, no percentage while a
+  transfer runs, and its width is fixed.
+- **Panes cannot be resized or rearranged by dragging**, and a split layout is
+  not remembered across restarts. A split is always an even one.
 - **Runtime palette changes are ignored.** A program that redefines colors with
   `OSC 4` / `OSC 10-11` will render with the static theme.
 - A selection is anchored to the viewport and is not re-anchored when the
