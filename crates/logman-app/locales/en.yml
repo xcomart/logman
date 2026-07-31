@@ -96,6 +96,7 @@ files:
   menu_download: Download…
   menu_rename: Rename…
   menu_delete: Delete…
+  menu_new_folder: New folder…
   menu_upload: Upload files…
   menu_upload_folder: Upload folder…
   menu_refresh: Refresh
@@ -136,8 +137,18 @@ files:
   rename_prompt: "Rename %{name} to:"
   rename: Rename
   renamed: "Renamed to %{name}."
+  # Label over the new-folder field. It carries no `%{path}`: the field opens
+  # under the breadcrumb that already says where "here" is, and a second copy of
+  # a long remote path would only push the field itself off the strip.
+  new_folder_prompt: "Name of the new folder:"
+  # Shown inside the empty field. Unlike the rename field there is nothing to
+  # prefill, so this is what tells the user what is being asked for.
+  new_folder_placeholder: Folder name
+  create: Create
+  created: "Created %{name}."
   # A name that cannot be sent: empty, or one carrying a path separator or
-  # `..`, which would rename the entry into a different directory entirely.
+  # `..`, which would rename the entry — or create the folder — in a different
+  # directory entirely. Shared by both fields, since it is the same refusal.
   invalid_name: That name cannot be used.
   failed: "Remote files: %{error}"
 
