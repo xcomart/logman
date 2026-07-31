@@ -1477,6 +1477,7 @@ impl Workspace {
             .scroll_handle(&self.tab_scroll)
             .scrollbar(self.tab_scrollbar())
             .menu_icon(icons::TAB_LIST)
+            .new_icon(icons::NEW_TAB)
             // The close button reuses the tab menu's own row: it is the same
             // command, worded the same way, and neither takes an ellipsis.
             .tooltips(

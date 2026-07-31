@@ -71,6 +71,13 @@ pub const PANEL: &str = "icons/panel.svg";
 /// says "this opens downwards", which is the one thing the button does.
 pub const TAB_LIST: &str = "icons/tab-list.svg";
 
+/// The button at the end of the tab strip that opens a new session.
+///
+/// Drawn with the stroke of [`TAB_LIST`] rather than the toolbar icons': the
+/// two sit shoulder to shoulder in the strip, and it is that pairing the glyph
+/// has to match.
+pub const NEW_TAB: &str = "icons/new-tab.svg";
+
 /// The custom title bar's minimise button.
 ///
 /// The four window-control glyphs are drawn edge to edge of the 24×24 box
@@ -112,7 +119,7 @@ pub const APP_ICON: &str = "app-icon.png";
 const APP_ICON_BYTES: &[u8] = include_bytes!("../../../assets/icon-128.png");
 
 /// Every icon, paired with the bytes [`Icons`] hands back for it.
-const ICONS: [(&str, &[u8]); 16] = [
+const ICONS: [(&str, &[u8]); 17] = [
     (FOLDER, include_bytes!("../assets/icons/folder.svg")),
     (FILE, include_bytes!("../assets/icons/file.svg")),
     (SYMLINK, include_bytes!("../assets/icons/symlink.svg")),
@@ -128,6 +135,7 @@ const ICONS: [(&str, &[u8]); 16] = [
     (DELETE, include_bytes!("../assets/icons/delete.svg")),
     (PANEL, include_bytes!("../assets/icons/panel.svg")),
     (TAB_LIST, include_bytes!("../assets/icons/tab-list.svg")),
+    (NEW_TAB, include_bytes!("../assets/icons/new-tab.svg")),
     (
         WINDOW_MINIMIZE,
         include_bytes!("../assets/icons/window-minimize.svg"),
