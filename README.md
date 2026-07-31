@@ -142,8 +142,9 @@ is shown by default.
   (<kbd>Cmd</kbd>-click on macOS) adds or removes one, <kbd>Shift</kbd>-click
   takes everything between it and the last row clicked.
 - **Right-click a row** to download, rename or delete the selection; right-click
-  empty space to upload into the directory. Deleting asks first, and a symbolic
-  link is removed as a link rather than followed to whatever it points at.
+  empty space to create a folder or upload into the directory. Deleting asks
+  first, and a symbolic link is removed as a link rather than followed to
+  whatever it points at.
 - **Dropping files or folders onto the panel uploads them** into the directory
   on screen. Folders are copied recursively; a symlinked *directory* is left
   out, because a tree that links back into itself would otherwise be walked
@@ -337,11 +338,10 @@ and no external server is needed.
 - <kbd>Ctrl</kbd>+<kbd>T</kbd>, <kbd>Ctrl</kbd>+<kbd>W</kbd> and the
   <kbd>Alt</kbd> pane shortcuts are taken by the application, so the remote
   shell never sees them.
-- **The remote files panel has no way to create a directory** except by
-  uploading one, and no way to change permissions or ownership. Transfers and
-  deletes run one at a time per session and cannot be cancelled once started.
-  The panel's edge can be dragged, but the width is session state and reverts to
-  the default on the next start.
+- **The remote files panel has no way to change permissions or ownership.**
+  Transfers and deletes run one at a time per session and cannot be cancelled
+  once started. The panel's edge can be dragged, but the width is session state
+  and reverts to the default on the next start.
 - **Panes cannot be rearranged by dragging.** A divider drag changes the
   proportions of an existing split and nothing else — there is no way to move a
   pane to another position, and a split layout is not remembered across
