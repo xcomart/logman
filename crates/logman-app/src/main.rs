@@ -1463,9 +1463,7 @@ impl Workspace {
             .tabs(tabs)
             .active(self.active)
             .scroll_handle(&self.tab_scroll)
-            .when(self.tab_scrollbar.showing(), |bar| {
-                bar.scrollbar(self.tab_scrollbar())
-            })
+            .scrollbar(self.tab_scrollbar())
             .menu_icon(icons::TAB_LIST)
             // The close button reuses the tab menu's own row: it is the same
             // command, worded the same way, and neither takes an ellipsis.
@@ -1686,6 +1684,7 @@ impl Workspace {
     /// afresh by gpui on every layout pass.
     fn tab_scrollbar(&self) -> Scrollbar {
         Scrollbar::for_handle(TAB_SCROLLBAR, ScrollbarAxis::Horizontal, &self.tab_scroll)
+            .fade(self.tab_scrollbar.fade())
     }
 
     /// Puts the strip's bar up whenever the strip has moved, and starts the

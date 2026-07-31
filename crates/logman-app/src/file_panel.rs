@@ -836,6 +836,7 @@ impl FilePanel {
     fn scrollbar(state: &SessionState) -> Scrollbar {
         Scrollbar::for_handle(LIST_SCROLLBAR, ScrollbarAxis::Vertical, &state.scroll)
             .inset(PANEL_HANDLE + INSET)
+            .fade(state.scrollbar.fade())
     }
 
     /// The state of the session the panel is showing, if it is showing one.
@@ -2263,13 +2264,7 @@ impl FilePanel {
                     )
                     .children(rows),
             )
-            .children(
-                state
-                    .scrollbar
-                    .showing()
-                    .then(|| Self::scrollbar(state).render(&theme))
-                    .flatten(),
-            )
+            .children(Self::scrollbar(state).render(&theme))
             .into_any_element()
     }
 

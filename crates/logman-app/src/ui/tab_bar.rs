@@ -500,6 +500,7 @@ impl RenderOnce for TabBar {
 mod tests {
     use std::cell::Cell;
     use std::ops::Deref;
+    use std::time::Duration;
 
     use gpui::{
         Context, DragMoveEvent, Modifiers, MouseUpEvent, Render, ScrollDelta, ScrollWheelEvent,
@@ -507,7 +508,8 @@ mod tests {
     };
 
     use super::super::scrollbar::{
-        DraggedThumb, HIDE_AFTER, ScrollbarAxis, ScrollbarState, hide_later, scroll_to, scrolled,
+        DraggedThumb, FADE_OUT, Fade, HIDE_AFTER, ScrollbarAxis, ScrollbarState, hide_later,
+        scroll_to, scrolled,
     };
 
     use super::*;
@@ -539,6 +541,10 @@ mod tests {
     /// Same reasoning as [`REFERENCE_CONTENT`]: enough that the strip overflows
     /// any plausible test display several times over.
     const CROWDED: usize = 200;
+
+    /// Long enough for a timer that has come due to be seen to have come due,
+    /// and far too short to reach the next one.
+    const A_MOMENT: Duration = Duration::from_millis(10);
 
     /// A row of the strip the overlay bar covers: low enough to be on the
     /// thumb, which rides the bottom edge.
@@ -579,13 +585,13 @@ mod tests {
         strip: ScrollHandle,
         bar: ScrollbarState,
         reference: ScrollHandle,
-        showing: Rc<Cell<bool>>,
+        fade: Rc<Cell<Fade>>,
     }
 
     impl Harness {
         /// The strip's overlay bar, the way the workspace builds it.
         fn scrollbar(&self) -> Scrollbar {
-            Scrollbar::for_handle(BAR, ScrollbarAxis::Horizontal, &self.strip)
+            Scrollbar::for_handle(BAR, ScrollbarAxis::Horizontal, &self.strip).fade(self.bar.fade())
         }
 
         /// Lets go of the thumb, and starts the clock on the bar again.
@@ -614,8 +620,7 @@ mod tests {
             {
                 hide_later(epoch, cx, |harness| Some(&mut harness.bar));
             }
-            let showing = self.bar.showing();
-            self.showing.set(showing);
+            self.fade.set(self.bar.fade());
 
             div()
                 .flex()
@@ -663,7 +668,7 @@ mod tests {
                                 .tabs(self.tabs.clone())
                                 .active(0)
                                 .scroll_handle(&self.strip)
-                                .when(showing, |strip| strip.scrollbar(self.scrollbar()))
+                                .scrollbar(self.scrollbar())
                                 .on_select(move |_, _, _| selected.set(selected.get() + 1))
                                 .on_close(move |_, _, _| closed.set(closed.get() + 1)),
                         ),
@@ -687,8 +692,8 @@ mod tests {
         tally: Tally,
         strip: ScrollHandle,
         reference: ScrollHandle,
-        /// Whether the bar was on screen the last time the harness drew.
-        showing: Rc<Cell<bool>>,
+        /// What the bar was doing the last time the harness drew.
+        fade: Rc<Cell<Fade>>,
     }
 
     /// Opens a window on a strip of `tabs` and hands back its handles.
@@ -697,21 +702,21 @@ mod tests {
             tally: Tally::default(),
             strip: ScrollHandle::new(),
             reference: ScrollHandle::new(),
-            showing: Rc::new(Cell::new(false)),
+            fade: Rc::new(Cell::new(Fade::Hidden)),
         };
 
         let window = cx.add_window({
             let tally = handles.tally.clone();
             let strip = handles.strip.clone();
             let reference = handles.reference.clone();
-            let showing = handles.showing.clone();
+            let fade = handles.fade.clone();
             move |_, _| Harness {
                 tally,
                 tabs,
                 strip,
                 bar: ScrollbarState::new(),
                 reference,
-                showing,
+                fade,
             }
         });
         let cx = VisualTestContext::from_window(*window.deref(), cx);
@@ -816,7 +821,7 @@ mod tests {
     fn scrolling_the_strip_shows_the_overlay_bar(cx: &mut TestAppContext) {
         let (handles, mut cx) = open(cx, many_tabs());
         assert!(
-            !handles.showing.get(),
+            handles.fade.get() == Fade::Hidden,
             "the bar was up before anything moved"
         );
 
@@ -826,30 +831,133 @@ mod tests {
             ScrollDelta::Lines(point(0., -3.)),
         );
 
-        assert!(handles.showing.get(), "scrolling did not show the bar");
+        assert_eq!(
+            handles.fade.get(),
+            Fade::In,
+            "scrolling did not fade the bar in"
+        );
     }
 
-    /// And it goes away again on its own, a little after the scrolling stops.
+    /// And it goes away again on its own: up for its full two seconds, then a
+    /// fade during which it is still drawn, and only then gone.
     #[gpui::test]
-    fn the_overlay_bar_fades_once_the_scrolling_stops(cx: &mut TestAppContext) {
+    fn the_overlay_bar_fades_out_once_the_scrolling_stops(cx: &mut TestAppContext) {
         let (handles, mut cx) = open(cx, many_tabs());
         turn_the_wheel(
             &mut cx,
             point(px(INSIDE_FIRST_TAB), px(ROW_MIDDLE)),
             ScrollDelta::Lines(point(0., -3.)),
         );
-        assert!(handles.showing.get());
 
         cx.executor().advance_clock(HIDE_AFTER / 2);
         cx.run_until_parked();
-        assert!(
-            handles.showing.get(),
-            "the bar went before it had been up its full time"
+        assert_eq!(
+            handles.fade.get(),
+            Fade::In,
+            "the bar started going before its time was up"
         );
 
-        cx.executor().advance_clock(HIDE_AFTER);
+        // Past the expiry but not past the fade it starts, which is the whole
+        // window this test is about.
+        cx.executor().advance_clock(HIDE_AFTER / 2 + A_MOMENT);
         cx.run_until_parked();
-        assert!(!handles.showing.get(), "the bar never went away");
+        assert_eq!(
+            handles.fade.get(),
+            Fade::Out,
+            "the bar did not start fading when its time was up"
+        );
+
+        cx.executor().advance_clock(FADE_OUT / 2);
+        cx.run_until_parked();
+        assert_eq!(
+            handles.fade.get(),
+            Fade::Out,
+            "the bar vanished part way through its fade instead of fading"
+        );
+
+        cx.executor().advance_clock(FADE_OUT);
+        cx.run_until_parked();
+        assert_eq!(
+            handles.fade.get(),
+            Fade::Hidden,
+            "the bar never finished going"
+        );
+    }
+
+    /// Scrolling again while it is on its way out catches it: back to full
+    /// strength, and the fade it interrupted never completes.
+    #[gpui::test]
+    fn scrolling_during_the_fade_catches_the_bar(cx: &mut TestAppContext) {
+        let (handles, mut cx) = open(cx, many_tabs());
+        let wheel = point(px(INSIDE_FIRST_TAB), px(ROW_MIDDLE));
+        turn_the_wheel(&mut cx, wheel, ScrollDelta::Lines(point(0., -3.)));
+
+        cx.executor().advance_clock(HIDE_AFTER + A_MOMENT);
+        cx.run_until_parked();
+        assert_eq!(
+            handles.fade.get(),
+            Fade::Out,
+            "the bar was not on its way out"
+        );
+
+        turn_the_wheel(&mut cx, wheel, ScrollDelta::Lines(point(0., -3.)));
+        assert_eq!(
+            handles.fade.get(),
+            Fade::Shown,
+            "a bar caught mid-fade did not come back at full strength"
+        );
+
+        // The interrupted fade must not finish behind the new showing's back.
+        cx.executor().advance_clock(FADE_OUT * 2);
+        cx.run_until_parked();
+        assert_eq!(
+            handles.fade.get(),
+            Fade::Shown,
+            "the fade that was interrupted completed anyway"
+        );
+    }
+
+    /// A bar on its way out can still be caught by the pointer, because it can
+    /// still be seen — and catching it cancels the fade rather than letting it
+    /// go on going while it is being dragged.
+    #[gpui::test]
+    fn a_fading_bar_can_still_be_grabbed(cx: &mut TestAppContext) {
+        let (handles, mut cx) = open(cx, many_tabs());
+        let wheel = point(px(INSIDE_FIRST_TAB), px(ROW_MIDDLE));
+        turn_the_wheel(&mut cx, wheel, ScrollDelta::Lines(point(0., -1.)));
+
+        let bar = Scrollbar::for_handle(BAR, ScrollbarAxis::Horizontal, &handles.strip)
+            .thumb()
+            .expect("an overflowing strip");
+        cx.executor().advance_clock(HIDE_AFTER + A_MOMENT);
+        cx.run_until_parked();
+        assert_eq!(
+            handles.fade.get(),
+            Fade::Out,
+            "the bar was not on its way out"
+        );
+
+        let before = handles.strip.offset().x;
+        let grab = point(bar.start + px(4.), px(BAR_MIDDLE));
+        cx.simulate_mouse_move(grab, None, Modifiers::none());
+        cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::none());
+        for step in 1..=2 {
+            cx.simulate_mouse_move(
+                point(grab.x + px(step as f32 * 40.), grab.y),
+                Some(MouseButton::Left),
+                Modifiers::none(),
+            );
+        }
+
+        assert!(
+            handles.strip.offset().x < before,
+            "a fading thumb did not answer the pointer that caught it"
+        );
+        assert_eq!(
+            handles.fade.get(),
+            Fade::Shown,
+            "catching the thumb did not cancel the fade"
+        );
     }
 
     /// The thumb takes the strip wherever it is dragged, and keeps the point it
@@ -862,7 +970,11 @@ mod tests {
             point(px(INSIDE_FIRST_TAB), px(ROW_MIDDLE)),
             ScrollDelta::Lines(point(0., -1.)),
         );
-        assert!(handles.showing.get(), "the bar has to be up to be dragged");
+        assert_ne!(
+            handles.fade.get(),
+            Fade::Hidden,
+            "the bar has to be up to be dragged"
+        );
 
         let bar = Scrollbar::for_handle(BAR, ScrollbarAxis::Horizontal, &handles.strip)
             .thumb()
@@ -903,11 +1015,16 @@ mod tests {
 
         // Letting go starts the clock again, rather than leaving the bar up for
         // good — which is what a hold that is never released would do.
-        assert!(handles.showing.get(), "the bar went during the drag");
+        assert_eq!(
+            handles.fade.get(),
+            Fade::Shown,
+            "the bar was not held at full strength through the drag"
+        );
         cx.executor().advance_clock(HIDE_AFTER * 2);
         cx.run_until_parked();
-        assert!(
-            !handles.showing.get(),
+        assert_eq!(
+            handles.fade.get(),
+            Fade::Hidden,
             "the bar stayed up after the thumb was let go"
         );
     }
@@ -943,9 +1060,10 @@ mod tests {
         cx.executor().advance_clock(HIDE_AFTER * 5);
         cx.run_until_parked();
 
-        assert!(
-            handles.showing.get(),
-            "the bar went while a pointer was still holding it"
+        assert_eq!(
+            handles.fade.get(),
+            Fade::Shown,
+            "the bar did not stay at full strength under a still pointer"
         );
     }
 
@@ -961,7 +1079,7 @@ mod tests {
             ScrollDelta::Lines(point(0., -1.)),
         );
         assert!(
-            handles.showing.get(),
+            handles.fade.get() != Fade::Hidden,
             "the bar has to be up to be in the way"
         );
 
