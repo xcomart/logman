@@ -36,7 +36,9 @@ pub use segmented::Segmented;
 pub use select::Select;
 pub use tab_bar::{TabBar, TabItem, TabStatus};
 pub use text_input::TextInput;
-pub use theme::{Theme, set_theme, theme};
+pub use theme::{
+    CustomUiTheme, Theme, ThemeColors, ThemeFile, ThemeRegistry, parse_hex, set_theme, theme,
+};
 pub use tooltip::tooltip_label;
 pub use window_controls::{WindowControlIcons, WindowControls};
 
@@ -44,6 +46,7 @@ use gpui::App;
 
 /// Registers everything the widget layer needs before the first window opens.
 pub fn init(cx: &mut App) {
+    ThemeRegistry::init(cx);
     set_theme(Theme::dark(), cx);
     TextInput::init(cx);
 }

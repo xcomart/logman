@@ -3943,6 +3943,8 @@ dependencies = [
  "anyhow",
  "bitflags 2.13.1",
  "log",
+ "serde",
+ "serde_json",
  "smallvec",
 ]
 

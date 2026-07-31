@@ -17,8 +17,20 @@
 //! Solarized's `base01` or Dracula's `Comment`), the mapping onto the 16 ANSI
 //! slots follows that project's own terminal implementation. The source used
 //! for each scheme is documented on its constructor.
+//!
+//! # Custom schemes
+//!
+//! A scheme can also come from a file. [`SchemeFile`] is the on-disk form, and
+//! it is deliberately the one Windows Terminal already uses, so the thousands
+//! of published `.json` palettes work unchanged. The application layer reads
+//! those files and hands the result to [`TerminalTheme::set_custom_schemes`];
+//! from then on they resolve through [`TerminalTheme::by_name`] like any
+//! built-in one and appear in [`TerminalTheme::all_schemes`].
+
+use std::sync::{OnceLock, RwLock};
 
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
+use serde::{Deserialize, Serialize};
 
 use crate::snapshot::RunFlags;
 
@@ -51,6 +63,44 @@ impl Rgb {
     /// Pack the color into a `0xRRGGBB` value.
     pub const fn to_u32(self) -> u32 {
         ((self.r as u32) << 16) | ((self.g as u32) << 8) | (self.b as u32)
+    }
+
+    /// Parse a `#RRGGBB` string, as written in a scheme file.
+    ///
+    /// The leading `#` is optional and the digits are case-insensitive, which
+    /// covers every spelling found in the wild. Anything else — a short `#rgb`,
+    /// an alpha channel, a color name — answers `None`.
+    pub fn parse_hex(value: &str) -> Option<Self> {
+        let digits = value.trim().strip_prefix('#').unwrap_or(value.trim());
+        if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&digits[range], 16).ok();
+        Some(Self::new(channel(0..2)?, channel(2..4)?, channel(4..6)?))
+    }
+
+    /// Format the color as the lowercase `#rrggbb` a scheme file expects.
+    pub fn to_hex(self) -> String {
+        format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
+    }
+
+    /// Mix `self` with `other`, `amount` being the share of `other`.
+    ///
+    /// Used to derive a selection background from a foreground and a
+    /// background; the channels are mixed as stored, without linearising, which
+    /// is what the schemes' own authors do when they publish a derived color.
+    fn mixed(self, other: Self, amount: f32) -> Self {
+        let amount = amount.clamp(0.0, 1.0);
+        let channel = |from: u8, to: u8| {
+            (from as f32 + (to as f32 - from as f32) * amount)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        Self::new(
+            channel(self.r, other.r),
+            channel(self.g, other.g),
+            channel(self.b, other.b),
+        )
     }
 
     /// Darken the color, used to render the `SGR 2` (dim/faint) attribute.
@@ -96,6 +146,220 @@ pub struct SchemeInfo {
     pub dark: bool,
 }
 
+/// One scheme as it is written to disk, in Windows Terminal's format.
+///
+/// The key names, their camelCase spelling and Microsoft's habit of calling
+/// magenta "purple" are all theirs; matching them exactly is the point, since
+/// it makes every published Windows Terminal palette a logman scheme file and
+/// the reverse. Keys logman does not know — `cursorShape`, a scheme's own
+/// metadata — are ignored rather than rejected.
+///
+/// `cursorColor` and `selectionBackground` are optional because plenty of
+/// palettes in circulation omit them; see [`SchemeFile::to_theme`] for what
+/// they are derived from then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemeFile {
+    /// Human-readable name, shown in the picker.
+    pub name: String,
+    /// Default background color, `#RRGGBB`.
+    pub background: String,
+    /// Default text color, `#RRGGBB`.
+    pub foreground: String,
+    /// Text cursor color; defaults to [`SchemeFile::foreground`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_color: Option<String>,
+    /// Background of selected text; derived when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_background: Option<String>,
+    /// ANSI slot 0.
+    pub black: String,
+    /// ANSI slot 1.
+    pub red: String,
+    /// ANSI slot 2.
+    pub green: String,
+    /// ANSI slot 3.
+    pub yellow: String,
+    /// ANSI slot 4.
+    pub blue: String,
+    /// ANSI slot 5 — magenta, under Windows Terminal's name for it.
+    pub purple: String,
+    /// ANSI slot 6.
+    pub cyan: String,
+    /// ANSI slot 7.
+    pub white: String,
+    /// ANSI slot 8.
+    pub bright_black: String,
+    /// ANSI slot 9.
+    pub bright_red: String,
+    /// ANSI slot 10.
+    pub bright_green: String,
+    /// ANSI slot 11.
+    pub bright_yellow: String,
+    /// ANSI slot 12.
+    pub bright_blue: String,
+    /// ANSI slot 13 — bright magenta.
+    pub bright_purple: String,
+    /// ANSI slot 14.
+    pub bright_cyan: String,
+    /// ANSI slot 15.
+    pub bright_white: String,
+}
+
+/// Share of the foreground mixed into the background to stand in for a
+/// `selectionBackground` a file does not carry.
+///
+/// A quarter is enough for the selection to read as a highlight at every
+/// contrast ratio the palettes span, and little enough that the text drawn on
+/// it keeps the contrast the scheme's author intended.
+const DERIVED_SELECTION_MIX: f32 = 0.25;
+
+impl SchemeFile {
+    /// Turn the file into a renderable palette.
+    ///
+    /// A color that is not a `#RRGGBB` value keeps the default scheme's color
+    /// for that slot rather than failing the whole file, which is the same
+    /// forgiveness the settings loader shows a hand-edited value. A missing
+    /// `cursorColor` becomes the foreground, and a missing
+    /// `selectionBackground` the background with a quarter of the foreground
+    /// mixed in.
+    pub fn to_theme(&self) -> TerminalTheme {
+        let fallback = TerminalTheme::default();
+        let color = |value: &str, fallback: Rgb| Rgb::parse_hex(value).unwrap_or(fallback);
+
+        let foreground = color(&self.foreground, fallback.foreground);
+        let background = color(&self.background, fallback.background);
+        let ansi_sources = [
+            &self.black,
+            &self.red,
+            &self.green,
+            &self.yellow,
+            &self.blue,
+            &self.purple,
+            &self.cyan,
+            &self.white,
+            &self.bright_black,
+            &self.bright_red,
+            &self.bright_green,
+            &self.bright_yellow,
+            &self.bright_blue,
+            &self.bright_purple,
+            &self.bright_cyan,
+            &self.bright_white,
+        ];
+        let mut ansi = fallback.ansi;
+        for (slot, source) in ansi.iter_mut().zip(ansi_sources) {
+            *slot = color(source, *slot);
+        }
+
+        TerminalTheme {
+            foreground,
+            background,
+            cursor: self
+                .cursor_color
+                .as_deref()
+                .and_then(Rgb::parse_hex)
+                .unwrap_or(foreground),
+            selection: self
+                .selection_background
+                .as_deref()
+                .and_then(Rgb::parse_hex)
+                .unwrap_or_else(|| background.mixed(foreground, DERIVED_SELECTION_MIX)),
+            ansi,
+        }
+    }
+
+    /// The file that would reproduce `theme` under the name `name`.
+    ///
+    /// Both optional keys are written out: a file logman saves says what it
+    /// means rather than leaning on the derivations above.
+    pub fn from_theme(name: impl Into<String>, theme: &TerminalTheme) -> Self {
+        let ansi = theme.ansi.map(Rgb::to_hex);
+        let [
+            black,
+            red,
+            green,
+            yellow,
+            blue,
+            purple,
+            cyan,
+            white,
+            bright_black,
+            bright_red,
+            bright_green,
+            bright_yellow,
+            bright_blue,
+            bright_purple,
+            bright_cyan,
+            bright_white,
+        ] = ansi;
+
+        Self {
+            name: name.into(),
+            background: theme.background.to_hex(),
+            foreground: theme.foreground.to_hex(),
+            cursor_color: Some(theme.cursor.to_hex()),
+            selection_background: Some(theme.selection.to_hex()),
+            black,
+            red,
+            green,
+            yellow,
+            blue,
+            purple,
+            cyan,
+            white,
+            bright_black,
+            bright_red,
+            bright_green,
+            bright_yellow,
+            bright_blue,
+            bright_purple,
+            bright_cyan,
+            bright_white,
+        }
+    }
+}
+
+/// A scheme loaded from a file rather than compiled in.
+#[derive(Debug, Clone)]
+pub struct CustomScheme {
+    /// Stable id stored in settings, taken from the file name.
+    pub id: String,
+    /// Human-readable name, taken from the file's `name` key.
+    pub name: String,
+    /// The palette itself.
+    pub theme: TerminalTheme,
+}
+
+/// One entry of the combined built-in + custom scheme listing.
+///
+/// What a picker needs to draw a row, and nothing more: the colors are fetched
+/// with [`TerminalTheme::by_name`] only for the entries that end up on screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemeEntry {
+    /// Stable id stored in settings.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Whether the scheme is dark; lets the UI group or pair them.
+    pub dark: bool,
+    /// Whether the scheme ships with logman rather than coming from a file.
+    pub builtin: bool,
+}
+
+/// The schemes read from the user's `schemes` directory.
+///
+/// Process-wide rather than threaded through every call site, because the
+/// alternative is handing a registry to each of the many places that resolve a
+/// scheme id — the settings dialog, the profile dialog, every session — for a
+/// list that is written once at start-up and only read afterwards.
+static CUSTOM_SCHEMES: OnceLock<RwLock<Vec<CustomScheme>>> = OnceLock::new();
+
+/// The custom scheme registry, created empty on first use.
+fn custom_schemes() -> &'static RwLock<Vec<CustomScheme>> {
+    CUSTOM_SCHEMES.get_or_init(|| RwLock::new(Vec::new()))
+}
+
 /// Id of the default scheme.
 const ID_ONE_DARK: &str = "one-dark";
 /// Id of the light counterpart of [`ID_ONE_DARK`].
@@ -108,6 +372,11 @@ const ID_SOLARIZED_LIGHT: &str = "solarized-light";
 const ID_GRUVBOX_DARK: &str = "gruvbox-dark";
 /// Id of the Dracula scheme.
 const ID_DRACULA: &str = "dracula";
+
+/// What [`ID_ONE_DARK`] was called before the schemes had ids.
+const LEGACY_ID_DARK: &str = "dark";
+/// What [`ID_ONE_LIGHT`] was called before the schemes had ids.
+const LEGACY_ID_LIGHT: &str = "light";
 
 /// Every built-in scheme, in the order they should be presented.
 const BUILTIN_SCHEMES: [SchemeInfo; 6] = [
@@ -344,14 +613,53 @@ impl TerminalTheme {
         &BUILTIN_SCHEMES
     }
 
+    /// Whether the palette reads as a dark one.
+    ///
+    /// Decided from the relative luminance of the background, with the usual
+    /// sRGB channel weights applied to the stored values rather than to
+    /// linearised ones: gamma expansion drags every mid tone below the halfway
+    /// mark, which would have plainly light backgrounds classed as dark.
+    pub fn is_dark(&self) -> bool {
+        let channel = |value: u8| value as f32 / 255.0;
+        let luminance = 0.2126 * channel(self.background.r)
+            + 0.7152 * channel(self.background.g)
+            + 0.0722 * channel(self.background.b);
+        luminance < 0.5
+    }
+
+    /// Replace the schemes loaded from the user's `schemes` directory.
+    ///
+    /// The whole list is swapped at once, so re-scanning the directory cannot
+    /// leave a scheme behind that its file no longer defines. Ids that collide
+    /// with a built-in one are the caller's to reject: [`TerminalTheme::by_name`]
+    /// resolves the built-in first, so such a scheme would simply never be
+    /// reachable.
+    pub fn set_custom_schemes(schemes: Vec<CustomScheme>) {
+        let mut registry = custom_schemes()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *registry = schemes;
+    }
+
+    /// The schemes currently loaded from the user's `schemes` directory.
+    pub fn custom_schemes() -> Vec<CustomScheme> {
+        custom_schemes()
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     /// Look up a scheme by its stable id. Ids are case-insensitive.
     ///
-    /// Returns `None` for ids that are not built in, which lets the settings
-    /// layer distinguish a typo from a deliberate choice.
+    /// Built-in schemes win over custom ones, and the two names the default
+    /// schemes went by before they had ids — `dark` and `light` — still
+    /// resolve. Returns `None` for anything else, which lets the settings layer
+    /// distinguish a typo from a deliberate choice.
     pub fn by_name(id: &str) -> Option<Self> {
-        if id.eq_ignore_ascii_case(ID_ONE_DARK) {
+        if id.eq_ignore_ascii_case(ID_ONE_DARK) || id.eq_ignore_ascii_case(LEGACY_ID_DARK) {
             Some(Self::dark())
-        } else if id.eq_ignore_ascii_case(ID_ONE_LIGHT) {
+        } else if id.eq_ignore_ascii_case(ID_ONE_LIGHT) || id.eq_ignore_ascii_case(LEGACY_ID_LIGHT)
+        {
             Some(Self::light())
         } else if id.eq_ignore_ascii_case(ID_SOLARIZED_DARK) {
             Some(Self::solarized_dark())
@@ -362,8 +670,49 @@ impl TerminalTheme {
         } else if id.eq_ignore_ascii_case(ID_DRACULA) {
             Some(Self::dracula())
         } else {
-            None
+            custom_schemes()
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .find(|scheme| scheme.id.eq_ignore_ascii_case(id))
+                .map(|scheme| scheme.theme.clone())
         }
+    }
+
+    /// Every selectable scheme: the built-in ones in presentation order, then
+    /// the custom ones sorted by name.
+    ///
+    /// A custom scheme whose id shadows a built-in one is left out, since
+    /// [`TerminalTheme::by_name`] would never hand it back anyway.
+    pub fn all_schemes() -> Vec<SchemeEntry> {
+        let mut entries: Vec<SchemeEntry> = BUILTIN_SCHEMES
+            .iter()
+            .map(|info| SchemeEntry {
+                id: info.id.to_string(),
+                name: info.name.to_string(),
+                dark: info.dark,
+                builtin: true,
+            })
+            .collect();
+
+        let mut custom: Vec<SchemeEntry> = Self::custom_schemes()
+            .into_iter()
+            .filter(|scheme| {
+                !BUILTIN_SCHEMES
+                    .iter()
+                    .any(|info| info.id.eq_ignore_ascii_case(&scheme.id))
+            })
+            .map(|scheme| SchemeEntry {
+                dark: scheme.theme.is_dark(),
+                id: scheme.id,
+                name: scheme.name,
+                builtin: false,
+            })
+            .collect();
+        custom.sort_by(|a, b| a.name.cmp(&b.name));
+
+        entries.append(&mut custom);
+        entries
     }
 
     /// [`TerminalTheme::by_name`] with a fallback to the default scheme
@@ -724,6 +1073,205 @@ mod tests {
                 scheme.id
             );
         }
+    }
+
+    #[test]
+    fn hex_round_trips() {
+        assert_eq!(Rgb::parse_hex("#123456"), Some(Rgb::new(0x12, 0x34, 0x56)));
+        // The `#` is optional and the digits are case-insensitive.
+        assert_eq!(Rgb::parse_hex("AABBCC"), Rgb::parse_hex("#aabbcc"));
+        assert_eq!(Rgb::parse_hex("  #FfEeDd "), Some(Rgb::new(255, 238, 221)));
+        assert_eq!(Rgb::from_u32(0x00ff7f).to_hex(), "#00ff7f");
+        for scheme in TerminalTheme::builtin() {
+            let theme = TerminalTheme::by_name(scheme.id).expect("scheme");
+            assert_eq!(
+                Rgb::parse_hex(&theme.background.to_hex()),
+                Some(theme.background)
+            );
+        }
+    }
+
+    #[test]
+    fn hex_rejects_everything_that_is_not_rrggbb() {
+        for value in ["", "#", "#abc", "#abcdefff", "#gghhii", "rebeccapurple"] {
+            assert!(Rgb::parse_hex(value).is_none(), "accepted {value:?}");
+        }
+    }
+
+    #[test]
+    fn scheme_file_round_trips_through_json() {
+        let theme = TerminalTheme::dracula();
+        let file = SchemeFile::from_theme("Dracula", &theme);
+        let json = serde_json::to_string(&file).expect("serialize");
+
+        // The key names are Windows Terminal's, not Rust's.
+        assert!(json.contains("\"brightPurple\""), "{json}");
+        assert!(json.contains("\"selectionBackground\""), "{json}");
+
+        let parsed: SchemeFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, file);
+
+        let restored = parsed.to_theme();
+        assert_eq!(restored.background, theme.background);
+        assert_eq!(restored.foreground, theme.foreground);
+        assert_eq!(restored.cursor, theme.cursor);
+        assert_eq!(restored.selection, theme.selection);
+        assert_eq!(restored.ansi, theme.ansi);
+    }
+
+    #[test]
+    fn a_real_windows_terminal_scheme_loads_with_its_extra_keys_ignored() {
+        // Verbatim from a Windows Terminal `settings.json` scheme entry, down
+        // to the uppercase digits, the absent `selectionBackground` and the
+        // keys that mean nothing here.
+        let json = r##"{
+            "name": "Campbell",
+            "cursorShape": "bar",
+            "experimental.retroTerminalEffect": false,
+            "background": "#0C0C0C",
+            "foreground": "#CCCCCC",
+            "cursorColor": "#FFFFFF",
+            "black": "#0C0C0C",
+            "red": "#C50F1F",
+            "green": "#13A10E",
+            "yellow": "#C19C00",
+            "blue": "#0037DA",
+            "purple": "#881798",
+            "cyan": "#3A96DD",
+            "white": "#CCCCCC",
+            "brightBlack": "#767676",
+            "brightRed": "#E74856",
+            "brightGreen": "#16C60C",
+            "brightYellow": "#F9F1A5",
+            "brightBlue": "#3B78FF",
+            "brightPurple": "#B4009E",
+            "brightCyan": "#61D6D6",
+            "brightWhite": "#F2F2F2"
+        }"##;
+
+        let file: SchemeFile = serde_json::from_str(json).expect("parse");
+        assert_eq!(file.name, "Campbell");
+        assert_eq!(file.selection_background, None);
+
+        let theme = file.to_theme();
+        assert_eq!(theme.background, Rgb::from_u32(0x0c0c0c));
+        assert_eq!(theme.foreground, Rgb::from_u32(0xcccccc));
+        assert_eq!(theme.cursor, Rgb::from_u32(0xffffff));
+        // Windows Terminal's "purple" is the magenta slot.
+        assert_eq!(theme.ansi[5], Rgb::from_u32(0x881798));
+        assert_eq!(theme.ansi[13], Rgb::from_u32(0xb4009e));
+        // The missing selection is a quarter of the way from the background
+        // towards the foreground.
+        assert_eq!(theme.selection, Rgb::new(0x3c, 0x3c, 0x3c));
+        assert!(theme.is_dark());
+    }
+
+    #[test]
+    fn a_missing_cursor_falls_back_to_the_foreground() {
+        let mut file = SchemeFile::from_theme("Sample", &TerminalTheme::light());
+        file.cursor_color = None;
+        assert_eq!(file.to_theme().cursor, TerminalTheme::light().foreground);
+    }
+
+    #[test]
+    fn an_unparseable_color_keeps_the_default_scheme_slot() {
+        let mut file = SchemeFile::from_theme("Sample", &TerminalTheme::gruvbox_dark());
+        file.blue = "not a color".to_string();
+        file.background = "#ff0000".to_string();
+
+        let theme = file.to_theme();
+        assert_eq!(theme.background, Rgb::from_u32(0xff0000));
+        assert_eq!(theme.ansi[4], TerminalTheme::dark().ansi[4]);
+    }
+
+    #[test]
+    fn is_dark_follows_the_background() {
+        assert!(TerminalTheme::dark().is_dark());
+        assert!(TerminalTheme::solarized_dark().is_dark());
+        assert!(TerminalTheme::gruvbox_dark().is_dark());
+        assert!(TerminalTheme::dracula().is_dark());
+        assert!(!TerminalTheme::light().is_dark());
+        assert!(!TerminalTheme::solarized_light().is_dark());
+
+        for scheme in TerminalTheme::builtin() {
+            let theme = TerminalTheme::by_name(scheme.id).expect("scheme");
+            assert_eq!(theme.is_dark(), scheme.dark, "{}", scheme.id);
+        }
+    }
+
+    #[test]
+    fn legacy_ids_still_resolve() {
+        assert_eq!(
+            TerminalTheme::by_name("dark").expect("dark").ansi,
+            TerminalTheme::dark().ansi
+        );
+        assert_eq!(
+            TerminalTheme::by_name("Light").expect("light").ansi,
+            TerminalTheme::light().ansi
+        );
+    }
+
+    // The registry is process-wide, so every assertion that depends on its
+    // contents lives in this one test rather than racing a sibling.
+    #[test]
+    fn custom_schemes_resolve_and_list_after_the_builtins() {
+        let mut palette = TerminalTheme::dark();
+        palette.background = Rgb::from_u32(0xfefefe);
+
+        TerminalTheme::set_custom_schemes(vec![
+            CustomScheme {
+                id: "zzz-custom".to_string(),
+                name: "Zzz".to_string(),
+                theme: palette.clone(),
+            },
+            CustomScheme {
+                id: "aaa-custom".to_string(),
+                name: "Aaa".to_string(),
+                theme: TerminalTheme::dracula(),
+            },
+            // Shadowing a built-in id is pointless and must not show up twice.
+            CustomScheme {
+                id: "dracula".to_string(),
+                name: "Not Dracula".to_string(),
+                theme: palette.clone(),
+            },
+        ]);
+
+        // Case-insensitive, like the built-in ids.
+        assert_eq!(
+            TerminalTheme::by_name("ZZZ-Custom")
+                .expect("custom")
+                .background,
+            Rgb::from_u32(0xfefefe)
+        );
+        // The built-in wins over a custom scheme claiming its id.
+        assert_eq!(
+            TerminalTheme::by_name("dracula")
+                .expect("dracula")
+                .background,
+            TerminalTheme::dracula().background
+        );
+        // An id nobody defines still falls back to the default.
+        assert_eq!(
+            TerminalTheme::by_name_or_default("nothing-here").background,
+            TerminalTheme::dark().background
+        );
+
+        let entries = TerminalTheme::all_schemes();
+        assert_eq!(entries.len(), BUILTIN_SCHEMES.len() + 2);
+        assert!(entries[..BUILTIN_SCHEMES.len()].iter().all(|e| e.builtin));
+        assert_eq!(entries[BUILTIN_SCHEMES.len()].id, "aaa-custom");
+        assert_eq!(entries[BUILTIN_SCHEMES.len() + 1].id, "zzz-custom");
+        // The listing's darkness flag comes from the palette itself.
+        assert!(!entries[BUILTIN_SCHEMES.len() + 1].dark);
+        assert!(entries[BUILTIN_SCHEMES.len()].dark);
+
+        assert_eq!(TerminalTheme::custom_schemes().len(), 3);
+
+        // Leave the registry as it was found.
+        TerminalTheme::set_custom_schemes(Vec::new());
+        assert!(TerminalTheme::by_name("zzz-custom").is_none());
+        assert_eq!(TerminalTheme::all_schemes().len(), BUILTIN_SCHEMES.len());
     }
 
     #[test]

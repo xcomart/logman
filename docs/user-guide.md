@@ -508,7 +508,7 @@ sections.
 
 | Setting | Values | Notes |
 | --- | --- | --- |
-| **UI theme** | Dark, Light | Dark by default. Also recolours the window caption on Windows. |
+| **UI theme** | One Dark, One Light, Solarized Dark, Solarized Light, Gruvbox Dark, Dracula, plus any of your own | One Dark by default. Each card previews the palette it stands for. Also recolours the window caption on Windows. See [Themes and colour schemes](#themes-and-colour-schemes). |
 | **Title bar** | Custom, System | Custom by default: the tab strip doubles as the title bar, with the application name at one end and the window buttons at the other. System brings back the caption the operating system draws. |
 | **Language** | System default, or one of eight | German, English, Spanish, French, Japanese, Korean, Russian, Simplified Chinese. Each is listed under its own name. |
 | **Opacity** | 50–100% | Below 100 the window becomes translucent. |
@@ -518,7 +518,7 @@ sections.
 
 | Setting | Values | Notes |
 | --- | --- | --- |
-| **Color scheme** | One Dark, One Light, Solarized Dark, Solarized Light, Gruvbox Dark, Dracula | Each card shows a live preview of its background, foreground and six ANSI colours. One Dark by default. |
+| **Color scheme** | One Dark, One Light, Solarized Dark, Solarized Light, Gruvbox Dark, Dracula, plus any of your own | Each card shows a live preview of its background, foreground and six ANSI colours. One Dark by default. See [Themes and colour schemes](#themes-and-colour-schemes). |
 | **Font** | System default, or any installed family | The list is read from the fonts on the machine each time the dialog opens. |
 | **Font size** | 6–32 pt | 14 by default. |
 | **Scrollback** | up to 100 000 lines | 5 000 by default. |
@@ -539,9 +539,75 @@ elsewhere.
 | **Keepalive** | seconds, 0 disables | 30 by default. |
 | **Connect timeout** | seconds | How long to wait for the TCP connection. 15 by default. |
 
+### Themes and colour schemes
+
+The two palettes are chosen independently. The **UI theme** colours the chrome
+— window, tab strip, dialogs, the file panel — and the **colour scheme** colours
+the terminal grid. Six of each ship with logman under the same six names, so
+picking "Dracula" in both places is one word twice.
+
+Beyond the six, both are files, and both live next to `settings.json`:
+
+| | Directory | Format |
+| --- | --- | --- |
+| UI themes | `themes/` | logman's own: a `name`, a `dark` flag and eleven colour slots under `colors`. |
+| Colour schemes | `schemes/` | Windows Terminal's, unchanged — so every palette published for it is a logman scheme, `purple` for magenta included. |
+
+One `*.json` file per palette. The **file name is the id**, so
+`schemes/tokyo-night.json` is the scheme `tokyo-night`, and that is what
+`settings.json` — or a profile override — stores. The `name` key inside is what
+the picker shows, and the two need not match. Both formats are read as
+forgivingly as `settings.json` is: unknown keys are ignored, a colour that
+cannot be parsed keeps the built-in colour for that slot, a leading byte order
+mark is tolerated, and one broken file never keeps the others, or the
+application, from loading. A file whose name collides with a built-in id is
+skipped, since it could never be selected anyway.
+
+#### Managing them from the dialog
+
+Under each of the two pickers sits a row of five buttons, which act on whatever
+card is currently selected.
+
+| Button | What it does |
+| --- | --- |
+| **Duplicate** | Copies the selected palette — a built-in one included — into a file of its own named "… copy", then opens it for editing. This is how a palette of your own usually starts. |
+| **Edit** | Opens a palette you own. Greyed out for the six that ship with logman; duplicate one instead. |
+| **Delete** | Removes the file, after asking. The picker falls back to the default palette. |
+| **Import** | Reads `*.json` files from anywhere on the disk into the right directory. Several at once; anything that is not a palette of that kind is skipped, and the dialog says so if nothing could be read at all. |
+| **Export** | Writes the selected palette out to a file you choose — built-in ones included, which is the easiest way to get a starting point to edit elsewhere or to share. |
+
+An imported palette whose name collides with one already there gets a `-2`,
+`-3`, … suffix rather than overwriting it, and one whose name is written in a
+script that yields no id — `테마` — is filed under a generated `theme-1` /
+`scheme-1` instead.
+
+#### The editor
+
+The editor replaces the settings form while it is open. It shows the palette's
+name, a **dark palette** checkbox for a UI theme, one row per colour — a label,
+a `#RRGGBB` field and a swatch — and a live preview at the top that follows
+your typing. A scheme's sixteen ANSI colours come under their own heading,
+each paired with its bright variant.
+
+- A field that does not hold a colour is outlined in red, its swatch goes
+  empty, and **Save** is held back until it is fixed. Only a UI theme's
+  `overlay` slot takes the extra `#RRGGBBAA` alpha pair; every other slot is
+  six digits.
+- **Save** writes the file and applies it at once — see below.
+- **Cancel**, <kbd>Esc</kbd>, or a click outside the panel discards the edits
+  and returns to the settings form without closing it.
+- The id is fixed when the editor opens and never follows the name, so renaming
+  a palette cannot orphan the setting, or the profile override, that selected
+  it.
+
 ### When a change takes effect
 
 - **UI theme, language, opacity, blur** — immediately, across the whole window.
+- **A palette saved in the editor** — immediately, without saving the settings:
+  a theme already in use repaints the window, and a scheme already in use
+  repaints every open session, background tabs included. Selecting a
+  *different* palette in a picker, on the other hand, is an ordinary setting
+  and takes effect when the dialog is saved.
 - **Title bar** — immediately on Windows and macOS: the open window swaps its
   caption in place. On Linux the window keeps the compositor's title bar either
   way.
@@ -641,9 +707,12 @@ that would be refused is left out rather than shown doing nothing.
 | `profiles.json` | Saved connections: name, host, port, user, authentication method, key path, and any session overrides. |
 | `known_hosts` | Trusted host key fingerprints. |
 | `settings.json` | Everything in the settings dialog. |
+| `themes/*.json` | UI themes of your own, one file per theme. Created on demand; see [Themes and colour schemes](#themes-and-colour-schemes). |
+| `schemes/*.json` | Terminal colour schemes of your own, in Windows Terminal's format. |
 
-All three are plain text, safe to edit by hand, written atomically, and tolerant
-of a UTF-8 byte order mark.
+All of them are plain text, safe to edit by hand, written atomically, and
+tolerant of a UTF-8 byte order mark. The two directories only exist once there
+is something in them.
 
 ### Secrets
 

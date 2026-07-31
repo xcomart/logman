@@ -10,4 +10,9 @@ alacritty_terminal.workspace = true
 anyhow.workspace = true
 bitflags.workspace = true
 log.workspace = true
+# The color scheme files are Windows Terminal-compatible JSON, so the palette
+# type carries its own serde representation rather than leaving the format to
+# whichever layer happens to read the file.
+serde.workspace = true
+serde_json.workspace = true
 smallvec.workspace = true
