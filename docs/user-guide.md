@@ -476,6 +476,11 @@ accumulated so a trackpad scrolls smoothly. Typing snaps the viewport back to
 the bottom, the way every other terminal does. The depth of the scrollback is a
 setting, global or per profile.
 
+Every surface that scrolls — the terminal, the files panel, the tab strip and
+the settings dialog — shows a slim indicator over its edge while it is being
+scrolled, which you can drag to move around, and which fades two seconds after
+you stop.
+
 ### Input
 
 Printable characters go through the platform's text input path, so dead keys,

@@ -8,6 +8,7 @@ use gpui::{
 };
 
 use super::menu::{MenuButton, MenuEntry};
+use super::scrollbar::Scrollbar;
 use super::theme::{Theme, theme};
 use super::tooltip::tooltip_label;
 
@@ -107,6 +108,7 @@ pub struct TabBar {
     on_context_menu: Option<ContextHandler>,
     on_new: Option<PlainHandler>,
     on_menu_open_change: Option<OpenChangeHandler>,
+    scrollbar: Option<Scrollbar>,
     menu_icon: Option<SharedString>,
     menu_tooltip: Option<SharedString>,
     new_tooltip: Option<SharedString>,
@@ -122,6 +124,7 @@ impl TabBar {
             active: 0,
             scroll_handle: None,
             menu_open: false,
+            scrollbar: None,
             on_select: None,
             on_close: None,
             on_context_menu: None,
@@ -132,6 +135,19 @@ impl TabBar {
             new_tooltip: None,
             close_tooltip: None,
         }
+    }
+
+    /// Draws `bar` over the tabs as the overlay scroll indicator.
+    ///
+    /// Passed in rather than built here, and only while it should be on screen:
+    /// a bar comes and goes with the scrolling, which is state this widget
+    /// cannot keep — it is built afresh on every render. The owner keeps a
+    /// [`ScrollbarState`](super::scrollbar::ScrollbarState) beside the handle it
+    /// gives [`TabBar::scroll_handle`], and owns the drag too, since the same
+    /// id it built the bar with is what tells that drag from any other.
+    pub fn scrollbar(mut self, bar: Scrollbar) -> Self {
+        self.scrollbar = Some(bar);
+        self
     }
 
     /// Draws the asset at `path` on the tab dropdown instead of its glyph.
@@ -426,19 +442,30 @@ impl RenderOnce for TabBar {
             .border_b_1()
             .border_color(theme.border)
             .child(
+                // The wrapper is what the overlay bar is placed against, and
+                // it exists only for that: the scrolling row cannot hold its
+                // own bar, because its children are what scroll away. Sized to
+                // the row, so the bar spans the tabs and stops short of the
+                // dropdown and the "+" beside them.
                 div()
-                    .id(ElementId::from((id.clone(), "tabs")))
-                    .flex()
-                    .flex_row()
-                    .items_center()
+                    .relative()
                     .flex_grow()
                     .min_w_0()
                     .h_full()
-                    .overflow_x_scroll()
-                    .when_some(self.scroll_handle.as_ref(), |this, handle| {
-                        this.track_scroll(handle)
-                    })
-                    .children(tabs),
+                    .child(
+                        div()
+                            .id(ElementId::from((id.clone(), "tabs")))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .size_full()
+                            .overflow_x_scroll()
+                            .when_some(self.scroll_handle.as_ref(), |this, handle| {
+                                this.track_scroll(handle)
+                            })
+                            .children(tabs),
+                    )
+                    .children(self.scrollbar.as_ref().and_then(|bar| bar.render(&theme))),
             )
             .children(menu)
             .when_some(self.on_new, |this, handler| {
@@ -475,8 +502,12 @@ mod tests {
     use std::ops::Deref;
 
     use gpui::{
-        Context, Modifiers, Render, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
-        VisualTestContext, WindowControlArea, point,
+        Context, DragMoveEvent, Modifiers, MouseUpEvent, Render, ScrollDelta, ScrollWheelEvent,
+        TestAppContext, TouchPhase, VisualTestContext, WindowControlArea, point,
+    };
+
+    use super::super::scrollbar::{
+        DraggedThumb, HIDE_AFTER, ScrollbarAxis, ScrollbarState, hide_later, scroll_to, scrolled,
     };
 
     use super::*;
@@ -509,6 +540,13 @@ mod tests {
     /// any plausible test display several times over.
     const CROWDED: usize = 200;
 
+    /// A row of the strip the overlay bar covers: low enough to be on the
+    /// thumb, which rides the bottom edge.
+    const BAR_MIDDLE: f32 = 31.;
+
+    /// Element id of the harness's overlay bar, as the workspace names its own.
+    const BAR: &str = "tab-scrollbar";
+
     /// The text size the workspace root sets, which the strip inherits.
     ///
     /// The harness repeats it because it is what a line-based wheel delta is
@@ -539,22 +577,77 @@ mod tests {
         tally: Tally,
         tabs: Vec<TabItem>,
         strip: ScrollHandle,
+        bar: ScrollbarState,
         reference: ScrollHandle,
+        showing: Rc<Cell<bool>>,
+    }
+
+    impl Harness {
+        /// The strip's overlay bar, the way the workspace builds it.
+        fn scrollbar(&self) -> Scrollbar {
+            Scrollbar::for_handle(BAR, ScrollbarAxis::Horizontal, &self.strip)
+        }
+
+        /// Lets go of the thumb, and starts the clock on the bar again.
+        fn release(&mut self, cx: &mut Context<Self>) {
+            if let Some(epoch) = self.bar.release() {
+                hide_later(epoch, cx, |harness| Some(&mut harness.bar));
+                cx.notify();
+            }
+        }
     }
 
     impl Render for Harness {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let Tally {
                 selected,
                 closed,
                 dragged,
             } = self.tally.clone();
 
+            // The owner's half of a bar, copied from the workspace: notice the
+            // strip moving, arm the expiry from inside the render that noticed
+            // it, and answer drags of the thumb from the root.
+            if let Some(epoch) = self
+                .bar
+                .moved(scrolled(&self.strip, ScrollbarAxis::Horizontal))
+            {
+                hide_later(epoch, cx, |harness| Some(&mut harness.bar));
+            }
+            let showing = self.bar.showing();
+            self.showing.set(showing);
+
             div()
                 .flex()
                 .flex_col()
                 .size_full()
                 .text_size(px(INHERITED_TEXT))
+                .on_drag_move::<DraggedThumb>(cx.listener(
+                    |harness, event: &DragMoveEvent<DraggedThumb>, _window, cx| {
+                        let Some(progress) = harness.scrollbar().dragged(event, cx) else {
+                            return;
+                        };
+                        harness.bar.hold();
+                        scroll_to(&harness.strip, ScrollbarAxis::Horizontal, progress);
+                        cx.notify();
+                    },
+                ))
+                // Both halves, as the workspace wires them: a drag that ends
+                // with the pointer outside the window — which is where a thumb
+                // dragged off the end of its track leaves it — is released by
+                // the second.
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|harness, _: &MouseUpEvent, _window, cx| {
+                        harness.release(cx);
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|harness, _: &MouseUpEvent, _window, cx| {
+                        harness.release(cx);
+                    }),
+                )
                 .child(
                     div()
                         .id("toolbar")
@@ -570,6 +663,7 @@ mod tests {
                                 .tabs(self.tabs.clone())
                                 .active(0)
                                 .scroll_handle(&self.strip)
+                                .when(showing, |strip| strip.scrollbar(self.scrollbar()))
                                 .on_select(move |_, _, _| selected.set(selected.get() + 1))
                                 .on_close(move |_, _, _| closed.set(closed.get() + 1)),
                         ),
@@ -593,6 +687,8 @@ mod tests {
         tally: Tally,
         strip: ScrollHandle,
         reference: ScrollHandle,
+        /// Whether the bar was on screen the last time the harness drew.
+        showing: Rc<Cell<bool>>,
     }
 
     /// Opens a window on a strip of `tabs` and hands back its handles.
@@ -601,17 +697,21 @@ mod tests {
             tally: Tally::default(),
             strip: ScrollHandle::new(),
             reference: ScrollHandle::new(),
+            showing: Rc::new(Cell::new(false)),
         };
 
         let window = cx.add_window({
             let tally = handles.tally.clone();
             let strip = handles.strip.clone();
             let reference = handles.reference.clone();
+            let showing = handles.showing.clone();
             move |_, _| Harness {
                 tally,
                 tabs,
                 strip,
+                bar: ScrollbarState::new(),
                 reference,
+                showing,
             }
         });
         let cx = VisualTestContext::from_window(*window.deref(), cx);
@@ -707,6 +807,202 @@ mod tests {
         assert!(
             answers.contains(&Answer::Select),
             "no column of the tab selected it: {answers:?}"
+        );
+    }
+
+    /// A wheel puts the overlay bar up, and it comes up over the tabs rather
+    /// than beside them: the strip is the same height with it as without.
+    #[gpui::test]
+    fn scrolling_the_strip_shows_the_overlay_bar(cx: &mut TestAppContext) {
+        let (handles, mut cx) = open(cx, many_tabs());
+        assert!(
+            !handles.showing.get(),
+            "the bar was up before anything moved"
+        );
+
+        turn_the_wheel(
+            &mut cx,
+            point(px(INSIDE_FIRST_TAB), px(ROW_MIDDLE)),
+            ScrollDelta::Lines(point(0., -3.)),
+        );
+
+        assert!(handles.showing.get(), "scrolling did not show the bar");
+    }
+
+    /// And it goes away again on its own, a little after the scrolling stops.
+    #[gpui::test]
+    fn the_overlay_bar_fades_once_the_scrolling_stops(cx: &mut TestAppContext) {
+        let (handles, mut cx) = open(cx, many_tabs());
+        turn_the_wheel(
+            &mut cx,
+            point(px(INSIDE_FIRST_TAB), px(ROW_MIDDLE)),
+            ScrollDelta::Lines(point(0., -3.)),
+        );
+        assert!(handles.showing.get());
+
+        cx.executor().advance_clock(HIDE_AFTER / 2);
+        cx.run_until_parked();
+        assert!(
+            handles.showing.get(),
+            "the bar went before it had been up its full time"
+        );
+
+        cx.executor().advance_clock(HIDE_AFTER);
+        cx.run_until_parked();
+        assert!(!handles.showing.get(), "the bar never went away");
+    }
+
+    /// The thumb takes the strip wherever it is dragged, and keeps the point it
+    /// was grabbed by under the pointer while it does.
+    #[gpui::test]
+    fn dragging_the_thumb_scrolls_the_strip(cx: &mut TestAppContext) {
+        let (handles, mut cx) = open(cx, many_tabs());
+        turn_the_wheel(
+            &mut cx,
+            point(px(INSIDE_FIRST_TAB), px(ROW_MIDDLE)),
+            ScrollDelta::Lines(point(0., -1.)),
+        );
+        assert!(handles.showing.get(), "the bar has to be up to be dragged");
+
+        let bar = Scrollbar::for_handle(BAR, ScrollbarAxis::Horizontal, &handles.strip)
+            .thumb()
+            .expect("an overflowing strip");
+        let track = handles.strip.bounds().size.width;
+        let before = handles.strip.offset().x;
+
+        // Down on the thumb, then past the threshold gpui uses to tell a drag
+        // from a click, then a little way along, and finally clear off the end
+        // of the track — which should leave the strip pinned to its end rather
+        // than running past it.
+        let grab = point(bar.start + px(4.), px(BAR_MIDDLE));
+        cx.simulate_mouse_move(grab, None, Modifiers::none());
+        cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            point(grab.x + px(40.), grab.y),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+
+        let halfway = point(bar.start + (track - bar.length) / 2. + px(4.), grab.y);
+        cx.simulate_mouse_move(halfway, Some(MouseButton::Left), Modifiers::none());
+        let dragged = handles.strip.offset().x;
+        assert!(
+            dragged < before,
+            "dragging the thumb left the strip where it was"
+        );
+
+        let past_the_end = point(track * 4., grab.y);
+        cx.simulate_mouse_move(past_the_end, Some(MouseButton::Left), Modifiers::none());
+        cx.simulate_mouse_up(past_the_end, MouseButton::Left, Modifiers::none());
+
+        assert_eq!(
+            handles.strip.offset().x,
+            -handles.strip.max_offset().width,
+            "dragging the thumb off the end did not reach the end"
+        );
+
+        // Letting go starts the clock again, rather than leaving the bar up for
+        // good — which is what a hold that is never released would do.
+        assert!(handles.showing.get(), "the bar went during the drag");
+        cx.executor().advance_clock(HIDE_AFTER * 2);
+        cx.run_until_parked();
+        assert!(
+            !handles.showing.get(),
+            "the bar stayed up after the thumb was let go"
+        );
+    }
+
+    /// A pointer that takes hold of the thumb and then keeps perfectly still
+    /// keeps the bar up, however long it holds: a motionless drag scrolls
+    /// nothing, and nothing scrolling is otherwise what takes a bar down.
+    #[gpui::test]
+    fn a_held_thumb_outlasts_the_clock(cx: &mut TestAppContext) {
+        let (handles, mut cx) = open(cx, many_tabs());
+        turn_the_wheel(
+            &mut cx,
+            point(px(INSIDE_FIRST_TAB), px(ROW_MIDDLE)),
+            ScrollDelta::Lines(point(0., -1.)),
+        );
+
+        let bar = Scrollbar::for_handle(BAR, ScrollbarAxis::Horizontal, &handles.strip)
+            .thumb()
+            .expect("an overflowing strip");
+        let grab = point(bar.start + px(4.), px(BAR_MIDDLE));
+        cx.simulate_mouse_move(grab, None, Modifiers::none());
+        cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::none());
+        // Twice: gpui turns the press into a drag on the first move past its
+        // threshold, and only reports the moves after that one.
+        for step in 1..=2 {
+            cx.simulate_mouse_move(
+                point(grab.x + px(step as f32 * 20.), grab.y),
+                Some(MouseButton::Left),
+                Modifiers::none(),
+            );
+        }
+
+        cx.executor().advance_clock(HIDE_AFTER * 5);
+        cx.run_until_parked();
+
+        assert!(
+            handles.showing.get(),
+            "the bar went while a pointer was still holding it"
+        );
+    }
+
+    /// The thumb is the only part of the bar that takes a press: the track it
+    /// slides along is not drawn, so a click beside it reaches the tab under it
+    /// exactly as it did before the bar existed.
+    #[gpui::test]
+    fn the_track_beside_the_thumb_still_reaches_the_tabs(cx: &mut TestAppContext) {
+        let (handles, mut cx) = open(cx, many_tabs());
+        turn_the_wheel(
+            &mut cx,
+            point(px(INSIDE_FIRST_TAB), px(ROW_MIDDLE)),
+            ScrollDelta::Lines(point(0., -1.)),
+        );
+        assert!(
+            handles.showing.get(),
+            "the bar has to be up to be in the way"
+        );
+
+        let bar = Scrollbar::for_handle(BAR, ScrollbarAxis::Horizontal, &handles.strip)
+            .thumb()
+            .expect("an overflowing strip");
+        let beyond = bar.start + bar.length + px(40.);
+        assert!(
+            beyond < handles.strip.bounds().size.width,
+            "the thumb filled the track, leaving no bare track to test"
+        );
+
+        let selected = handles.tally.selected.get();
+        let position = point(beyond, px(BAR_MIDDLE));
+        cx.simulate_mouse_move(position, None, Modifiers::none());
+        cx.simulate_click(position, Modifiers::none());
+
+        assert_eq!(
+            handles.tally.selected.get(),
+            selected + 1,
+            "a click on the bare track did not reach the tab under it"
+        );
+
+        // And the thumb itself is the exception that makes the rule worth
+        // stating: a press there belongs to the bar, and the tab under it must
+        // not also answer. On Windows the same occlusion is what keeps the
+        // press off the title bar's caption hit test.
+        let selected = handles.tally.selected.get();
+        let on_the_thumb = point(bar.start + bar.length / 2., px(BAR_MIDDLE));
+        cx.simulate_mouse_move(on_the_thumb, None, Modifiers::none());
+        cx.simulate_click(on_the_thumb, Modifiers::none());
+
+        assert_eq!(
+            handles.tally.selected.get(),
+            selected,
+            "a press on the thumb also selected the tab under it"
+        );
+        assert_eq!(
+            handles.tally.dragged.get(),
+            0,
+            "a press on the thumb reached the window drag area"
         );
     }
 

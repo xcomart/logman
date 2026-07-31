@@ -35,5 +35,7 @@ pub mod theme;
 pub use cwd::CwdTracker;
 pub use keys::{KeyCode, KeyInput, TermModes, encode_key, encode_paste};
 pub use model::TerminalModel;
-pub use snapshot::{CursorPos, RunFlags, StyledRun, TerminalLine, TerminalSnapshot};
+pub use snapshot::{
+    CursorPos, RunFlags, ScrollPosition, StyledRun, TerminalLine, TerminalSnapshot,
+};
 pub use theme::{Rgb, SchemeInfo, TerminalTheme};
