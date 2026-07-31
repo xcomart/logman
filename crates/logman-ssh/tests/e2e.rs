@@ -519,6 +519,42 @@ impl russh_sftp::server::Handler for SftpTestHandler {
         Ok(ok_status(id))
     }
 
+    /// Creates a directory, and refuses an existing one exactly as a real
+    /// server does — which is what makes the client's own tolerance testable.
+    async fn mkdir(
+        &mut self,
+        id: u32,
+        path: String,
+        _attrs: FileAttributes,
+    ) -> Result<Status, Self::Error> {
+        std::fs::create_dir(self.local(&path)).map_err(to_status)?;
+        Ok(ok_status(id))
+    }
+
+    /// Deletes a file or a symbolic link, never what a link points at —
+    /// `remove_file` is the local call that describes the link itself.
+    async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
+        std::fs::remove_file(self.local(&filename)).map_err(to_status)?;
+        Ok(ok_status(id))
+    }
+
+    /// Deletes a directory, and refuses a non-empty one exactly as a real
+    /// server does — which is what makes the client's bottom-up walk testable.
+    async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+        std::fs::remove_dir(self.local(&path)).map_err(to_status)?;
+        Ok(ok_status(id))
+    }
+
+    async fn rename(
+        &mut self,
+        id: u32,
+        oldpath: String,
+        newpath: String,
+    ) -> Result<Status, Self::Error> {
+        std::fs::rename(self.local(&oldpath), self.local(&newpath)).map_err(to_status)?;
+        Ok(ok_status(id))
+    }
+
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
         self.dirs.remove(&handle);
         self.files.remove(&handle);
@@ -1820,7 +1856,11 @@ fn sftp_downloads_a_remote_file() {
 
     let local = tempfile::tempdir().expect("creating the local dir must succeed");
     let target = local.path().join("payload.bin");
-    let outcome = server.run(session.sftp().download("/payload.bin", target.clone()));
+    let outcome = server.run(
+        session
+            .sftp()
+            .download("/payload.bin", target.clone(), None),
+    );
 
     assert_eq!(outcome, Ok(()));
     let written = std::fs::read(&target).expect("the downloaded file must exist");
@@ -1845,7 +1885,7 @@ fn sftp_uploads_a_local_file() {
     std::fs::write(&source, &payload).expect("writing the local file must succeed");
 
     let remote = server
-        .run(session.sftp().upload(source.clone(), "/logs"))
+        .run(session.sftp().upload(source.clone(), "/logs", None))
         .expect("uploading must succeed");
     assert_eq!(remote, "/logs/report.txt");
 
@@ -1856,7 +1896,7 @@ fn sftp_uploads_a_local_file() {
     // A second, shorter upload must truncate rather than leave a tail behind.
     std::fs::write(&source, b"short").expect("rewriting the local file must succeed");
     let remote = server
-        .run(session.sftp().upload(source, "/logs"))
+        .run(session.sftp().upload(source, "/logs", None))
         .expect("overwriting must succeed");
     assert_eq!(remote, "/logs/report.txt");
     assert_eq!(
@@ -1864,6 +1904,233 @@ fn sftp_uploads_a_local_file() {
             .expect("the overwritten file must exist"),
         b"short"
     );
+}
+
+/// Creating a directory must work, and creating it *again* must not fail: the
+/// recursive upload creates every directory of a tree unconditionally, so a
+/// folder sent twice would otherwise break on its own root.
+#[test]
+fn sftp_creates_a_remote_directory_and_tolerates_one_that_exists() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+    let sftp = session.sftp();
+
+    assert_eq!(server.run(sftp.mkdir("/archive")), Ok(()));
+    assert!(
+        root.path().join("archive").is_dir(),
+        "the directory must exist on the server"
+    );
+
+    assert_eq!(
+        server.run(sftp.mkdir("/archive")),
+        Ok(()),
+        "creating an existing directory must be a no-op, not a failure"
+    );
+    // A *file* of that name is a genuine collision and must still be reported.
+    let outcome = server.run(sftp.mkdir("/notes.txt"));
+    assert!(
+        matches!(outcome, Err(SftpError::Remote(_))),
+        "expected a remote error over an existing file, got {outcome:?}"
+    );
+}
+
+/// The panel's delete acts on one entry at a time, so a plain file has to go
+/// away on its own without touching anything beside it.
+#[test]
+fn sftp_deletes_a_remote_file() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+    let sftp = session.sftp();
+
+    assert_eq!(server.run(sftp.remove_file("/notes.txt")), Ok(()));
+    assert!(
+        !root.path().join("notes.txt").exists(),
+        "the file must be gone from the server"
+    );
+    assert!(
+        root.path().join("logs").is_dir(),
+        "deleting a file must leave its siblings alone"
+    );
+}
+
+/// The bottom-up half of a recursive delete: once the children are gone, the
+/// directory itself is removed by this call.
+#[test]
+fn sftp_deletes_an_empty_remote_directory() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+    let sftp = session.sftp();
+
+    assert_eq!(server.run(sftp.remove_file("/logs/app.log")), Ok(()));
+    assert_eq!(server.run(sftp.remove_dir("/logs")), Ok(()));
+    assert!(
+        !root.path().join("logs").exists(),
+        "the directory must be gone from the server"
+    );
+}
+
+/// SFTP has no recursive delete, so a directory that still holds something
+/// must be refused — that refusal is what forces the panel to walk the tree
+/// itself instead of hoping the server will.
+#[test]
+fn sftp_refuses_to_delete_a_directory_that_is_not_empty() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+    let sftp = session.sftp();
+
+    let outcome = server.run(sftp.remove_dir("/logs"));
+    assert!(
+        matches!(outcome, Err(SftpError::Remote(_))),
+        "expected a remote error over a populated directory, got {outcome:?}"
+    );
+    assert!(
+        root.path().join("logs").join("app.log").is_file(),
+        "a refused delete must leave the contents in place"
+    );
+}
+
+/// Renaming is how the panel's inline rename lands, and it moves the entry
+/// rather than copying it: the old name has to disappear.
+#[test]
+fn sftp_renames_a_remote_entry() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+    let sftp = session.sftp();
+
+    assert_eq!(
+        server.run(sftp.rename("/notes.txt", "/journal.txt")),
+        Ok(())
+    );
+    assert!(
+        !root.path().join("notes.txt").exists(),
+        "the old name must be gone"
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("journal.txt")).expect("the renamed file must exist"),
+        b"remote notes\n"
+    );
+}
+
+/// The server's verdict is passed straight through, so a rename of something
+/// that is not there has to reach the user as a failure rather than a silent
+/// no-op that leaves the listing looking wrong.
+#[test]
+fn sftp_reports_a_rename_of_a_missing_entry() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+    let sftp = session.sftp();
+
+    let outcome = server.run(sftp.rename("/absent.txt", "/journal.txt"));
+    assert!(
+        matches!(outcome, Err(SftpError::Remote(_))),
+        "expected a remote error over a missing entry, got {outcome:?}"
+    );
+    assert!(
+        !root.path().join("journal.txt").exists(),
+        "a failed rename must not create the target"
+    );
+}
+
+/// Checks a byte count reported by a transfer: at least one update, never
+/// going backwards, and ending exactly on the file's size.
+fn assert_progress(updates: &[u64], size: u64) {
+    assert!(
+        !updates.is_empty(),
+        "a transfer larger than one chunk must report progress"
+    );
+    assert!(
+        updates.windows(2).all(|pair| match pair {
+            [before, after] => after > before,
+            _ => true,
+        }),
+        "progress must increase strictly; saw {updates:?}"
+    );
+    assert_eq!(
+        updates.last().copied(),
+        Some(size),
+        "the last update must account for the whole file; saw {updates:?}"
+    );
+}
+
+/// The status line is driven by the byte counts the transfer loop emits, so an
+/// upload has to report them — one per chunk, rising, finishing on the size.
+#[test]
+fn sftp_reports_upload_progress() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+
+    let local = tempfile::tempdir().expect("creating the local dir must succeed");
+    let source = local.path().join("payload.bin");
+    let payload: Vec<u8> = (0..300_000u32).map(|index| (index % 89) as u8).collect();
+    std::fs::write(&source, &payload).expect("writing the local file must succeed");
+
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    server
+        .run(session.sftp().upload(source, "/logs", Some(sender)))
+        .expect("uploading must succeed");
+
+    // The service drops its sender before answering, so the stream is already
+    // finished by the time the upload resolves and this cannot block.
+    let updates: Vec<u64> = server.run(receiver.collect());
+    assert_progress(&updates, payload.len() as u64);
+}
+
+/// The same contract in the other direction.
+#[test]
+fn sftp_reports_download_progress() {
+    let root = remote_tree();
+    let payload: Vec<u8> = (0..300_000u32).map(|index| (index % 83) as u8).collect();
+    std::fs::write(root.path().join("payload.bin"), &payload)
+        .expect("writing the payload must succeed");
+
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+
+    let local = tempfile::tempdir().expect("creating the local dir must succeed");
+    let target = local.path().join("payload.bin");
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    assert_eq!(
+        server.run(
+            session
+                .sftp()
+                .download("/payload.bin", target, Some(sender))
+        ),
+        Ok(())
+    );
+
+    let updates: Vec<u64> = server.run(receiver.collect());
+    assert_progress(&updates, payload.len() as u64);
+}
+
+/// A caller that stops listening must not stop the transfer: the progress
+/// stream is a hint for a status line, not a back channel.
+#[test]
+fn sftp_finishes_a_transfer_whose_progress_is_ignored() {
+    let root = remote_tree();
+    let server = TestServer::with_sftp("alice", "hunter2", root.path());
+    let (session, _events) = sftp_session(&server);
+
+    let local = tempfile::tempdir().expect("creating the local dir must succeed");
+    let source = local.path().join("payload.bin");
+    let payload: Vec<u8> = (0..200_000u32).map(|index| (index % 71) as u8).collect();
+    std::fs::write(&source, &payload).expect("writing the local file must succeed");
+
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    drop(receiver);
+    server
+        .run(session.sftp().upload(source, "/logs", Some(sender)))
+        .expect("uploading must succeed even with nobody watching");
+
+    let landed = std::fs::read(root.path().join("logs").join("payload.bin"))
+        .expect("the uploaded file must exist on the server");
+    assert!(landed == payload, "the uploaded bytes must match exactly");
 }
 
 /// The whole point of a separate channel: SFTP traffic must leave the shell

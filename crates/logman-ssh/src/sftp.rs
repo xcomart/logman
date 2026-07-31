@@ -39,8 +39,9 @@ use tokio::sync::Mutex;
 /// Bytes moved between the local file and the remote one per iteration.
 ///
 /// Transfers are streamed rather than buffered whole, so file size is bounded
-/// by the remote disk and not by this process's memory. The loop is also the
-/// natural place for a future progress callback: it already sees every chunk.
+/// by the remote disk and not by this process's memory. The loop is also where
+/// progress is reported from: it already sees every chunk, so the running byte
+/// count costs nothing beyond the send.
 const TRANSFER_CHUNK: usize = 64 * 1024;
 
 /// Why an SFTP operation could not be completed.
@@ -150,18 +151,82 @@ impl SftpClient {
             .await
     }
 
+    /// Creates the remote directory `path`, and succeeds if it already exists.
+    ///
+    /// Existing-is-fine rather than an error, because the caller creating a
+    /// tree creates every directory in it unconditionally: probing first would
+    /// cost a round trip per directory to learn what the create is about to
+    /// report anyway, and re-sending a folder into a place it was sent before
+    /// is a merge, not a mistake.
+    pub async fn mkdir(&self, path: &str) -> Result<(), SftpError> {
+        let path = path.to_owned();
+        self.request(move |reply| SftpRequest::MkDir { path, reply })
+            .await
+    }
+
+    /// Deletes the remote file at `path`.
+    ///
+    /// A symbolic link is removed as itself, never followed: this is what the
+    /// file panel calls for a link to a directory, and following it would
+    /// delete the target's contents instead of the link.
+    ///
+    /// Directories are not handled — the protocol has a separate request for
+    /// them — so pointing this at one fails with whatever the server answers.
+    pub async fn remove_file(&self, path: &str) -> Result<(), SftpError> {
+        let path = path.to_owned();
+        self.request(move |reply| SftpRequest::RemoveFile { path, reply })
+            .await
+    }
+
+    /// Deletes the remote directory at `path`, which must already be empty.
+    ///
+    /// Emptiness is the server's rule, not one added here: SFTP has no
+    /// recursive delete, so a caller removing a tree walks it itself and
+    /// removes the children first — which is also the only way the progress
+    /// line can say how much is left.
+    pub async fn remove_dir(&self, path: &str) -> Result<(), SftpError> {
+        let path = path.to_owned();
+        self.request(move |reply| SftpRequest::RemoveDir { path, reply })
+            .await
+    }
+
+    /// Renames the remote entry `old` to `new`.
+    ///
+    /// Whether an existing `new` is overwritten or refused is left entirely to
+    /// the server: SFTP 3 does not say, implementations disagree, and probing
+    /// first would only widen the window in which the answer stops being true.
+    /// A refusal surfaces as the server's own sentence.
+    pub async fn rename(&self, old: &str, new: &str) -> Result<(), SftpError> {
+        let old = old.to_owned();
+        let new = new.to_owned();
+        self.request(move |reply| SftpRequest::Rename { old, new, reply })
+            .await
+    }
+
     /// Uploads the local file `local` into the remote directory `remote_dir`,
     /// keeping its file name, and returns the remote path it was written to.
     ///
     /// An existing remote file of the same name is truncated and overwritten.
     /// Only regular files are handled; pointing this at a directory fails
     /// rather than recursing, which keeps the failure obvious instead of
-    /// half-copying a tree.
-    pub async fn upload(&self, local: PathBuf, remote_dir: &str) -> Result<String, SftpError> {
+    /// half-copying a tree. Callers that *want* a tree walk it themselves and
+    /// call [`SftpClient::mkdir`] along the way.
+    ///
+    /// `progress`, when given, receives this file's running byte count — one
+    /// message per chunk, monotonically increasing, ending at the file's size.
+    /// It is a hint for a status line, so a receiver that has gone away is not
+    /// an error and does not stop the transfer.
+    pub async fn upload(
+        &self,
+        local: PathBuf,
+        remote_dir: &str,
+        progress: Option<UnboundedSender<u64>>,
+    ) -> Result<String, SftpError> {
         let remote_dir = remote_dir.to_owned();
         self.request(move |reply| SftpRequest::Upload {
             local,
             remote_dir,
+            progress,
             reply,
         })
         .await
@@ -171,11 +236,19 @@ impl SftpClient {
     ///
     /// An existing local file is truncated and overwritten. The parent
     /// directory must already exist.
-    pub async fn download(&self, remote_path: &str, local: PathBuf) -> Result<(), SftpError> {
+    ///
+    /// `progress` behaves exactly as it does for [`SftpClient::upload`].
+    pub async fn download(
+        &self,
+        remote_path: &str,
+        local: PathBuf,
+        progress: Option<UnboundedSender<u64>>,
+    ) -> Result<(), SftpError> {
         let remote_path = remote_path.to_owned();
         self.request(move |reply| SftpRequest::Download {
             remote_path,
             local,
+            progress,
             reply,
         })
         .await
@@ -229,12 +302,44 @@ pub(crate) enum SftpRequest {
         /// Where the answer goes.
         reply: oneshot::Sender<Result<Vec<RemoteEntry>, SftpError>>,
     },
+    /// Create a remote directory.
+    MkDir {
+        /// Directory to create.
+        path: String,
+        /// Where the answer goes.
+        reply: oneshot::Sender<Result<(), SftpError>>,
+    },
+    /// Delete a remote file, or a symbolic link of any kind.
+    RemoveFile {
+        /// File to delete.
+        path: String,
+        /// Where the answer goes.
+        reply: oneshot::Sender<Result<(), SftpError>>,
+    },
+    /// Delete an empty remote directory.
+    RemoveDir {
+        /// Directory to delete.
+        path: String,
+        /// Where the answer goes.
+        reply: oneshot::Sender<Result<(), SftpError>>,
+    },
+    /// Rename a remote entry.
+    Rename {
+        /// Path as it is now.
+        old: String,
+        /// Path it should have.
+        new: String,
+        /// Where the answer goes.
+        reply: oneshot::Sender<Result<(), SftpError>>,
+    },
     /// Copy a local file to the remote host.
     Upload {
         /// Local file to read.
         local: PathBuf,
         /// Remote directory to write into.
         remote_dir: String,
+        /// Running byte count of this file, for a status line.
+        progress: Option<UnboundedSender<u64>>,
         /// Where the resulting remote path goes.
         reply: oneshot::Sender<Result<String, SftpError>>,
     },
@@ -244,6 +349,8 @@ pub(crate) enum SftpRequest {
         remote_path: String,
         /// Local path to write.
         local: PathBuf,
+        /// Running byte count of this file, for a status line.
+        progress: Option<UnboundedSender<u64>>,
         /// Where the answer goes.
         reply: oneshot::Sender<Result<(), SftpError>>,
     },
@@ -300,19 +407,40 @@ impl<H: client::Handler> Service<H> {
             SftpRequest::ReadDir { path, reply } => {
                 let _ = reply.send(self.read_dir(&path).await);
             }
+            SftpRequest::MkDir { path, reply } => {
+                let _ = reply.send(self.mkdir(&path).await);
+            }
+            SftpRequest::RemoveFile { path, reply } => {
+                let _ = reply.send(self.remove_file(&path).await);
+            }
+            SftpRequest::RemoveDir { path, reply } => {
+                let _ = reply.send(self.remove_dir(&path).await);
+            }
+            SftpRequest::Rename { old, new, reply } => {
+                let _ = reply.send(self.rename(&old, &new).await);
+            }
             SftpRequest::Upload {
                 local,
                 remote_dir,
+                progress,
                 reply,
             } => {
-                let _ = reply.send(self.upload(&local, &remote_dir).await);
+                let outcome = self.upload(&local, &remote_dir, progress.as_ref()).await;
+                // Dropped before the answer goes out, so a caller watching both
+                // sees the progress stream end first and never has to decide
+                // which of the two arriving in the other order means "done".
+                drop(progress);
+                let _ = reply.send(outcome);
             }
             SftpRequest::Download {
                 remote_path,
                 local,
+                progress,
                 reply,
             } => {
-                let _ = reply.send(self.download(&remote_path, &local).await);
+                let outcome = self.download(&remote_path, &local, progress.as_ref()).await;
+                drop(progress);
+                let _ = reply.send(outcome);
             }
         }
     }
@@ -481,8 +609,69 @@ impl<H: client::Handler> Service<H> {
         Ok(entries)
     }
 
+    /// Creates `path`, treating "it is already a directory" as success.
+    ///
+    /// Servers disagree on how they refuse an existing name — `Failure`,
+    /// `PermissionDenied` and `NoSuchFile` have all been seen — so the status
+    /// code is not worth inspecting. One stat settles it, and only on the
+    /// failure path, so the common case still costs a single round trip.
+    async fn mkdir(&self, path: &str) -> Result<(), SftpError> {
+        let session = self.session().await?;
+        let outcome = session.create_dir(path).await;
+        if outcome.is_ok() {
+            return Ok(());
+        }
+        if session
+            .metadata(path)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+        {
+            return Ok(());
+        }
+        self.remote(
+            outcome,
+            &format!("could not create the remote directory {path}"),
+        )
+        .await
+    }
+
+    /// Deletes the file — or the link — at `path`.
+    async fn remove_file(&self, path: &str) -> Result<(), SftpError> {
+        let session = self.session().await?;
+        self.remote(
+            session.remove_file(path).await,
+            &format!("could not delete the remote file {path}"),
+        )
+        .await
+    }
+
+    /// Deletes the empty directory at `path`.
+    async fn remove_dir(&self, path: &str) -> Result<(), SftpError> {
+        let session = self.session().await?;
+        self.remote(
+            session.remove_dir(path).await,
+            &format!("could not delete the remote directory {path}"),
+        )
+        .await
+    }
+
+    /// Renames `old` to `new`, passing the server's verdict straight through.
+    async fn rename(&self, old: &str, new: &str) -> Result<(), SftpError> {
+        let session = self.session().await?;
+        self.remote(
+            session.rename(old, new).await,
+            &format!("could not rename {old} to {new}"),
+        )
+        .await
+    }
+
     /// Streams `local` into `remote_dir`, returning the remote path written.
-    async fn upload(&self, local: &Path, remote_dir: &str) -> Result<String, SftpError> {
+    async fn upload(
+        &self,
+        local: &Path,
+        remote_dir: &str,
+        progress: Option<&UnboundedSender<u64>>,
+    ) -> Result<String, SftpError> {
         let name = local
             .file_name()
             .and_then(|name| name.to_str())
@@ -509,6 +698,7 @@ impl<H: client::Handler> Service<H> {
             .await?;
 
         let mut buffer = vec![0u8; TRANSFER_CHUNK];
+        let mut moved = 0u64;
         loop {
             let read = source.read(&mut buffer).await.map_err(|error| {
                 SftpError::Local(format!("could not read {}: {error}", local.display()))
@@ -522,6 +712,8 @@ impl<H: client::Handler> Service<H> {
                 &format!("could not write to the remote file {remote_path}"),
             )
             .await?;
+            moved = moved.saturating_add(read as u64);
+            report(progress, moved);
         }
 
         // Writes are pipelined, so only the shutdown proves they all landed —
@@ -536,7 +728,12 @@ impl<H: client::Handler> Service<H> {
     }
 
     /// Streams the remote file at `remote_path` into the local path `local`.
-    async fn download(&self, remote_path: &str, local: &Path) -> Result<(), SftpError> {
+    async fn download(
+        &self,
+        remote_path: &str,
+        local: &Path,
+        progress: Option<&UnboundedSender<u64>>,
+    ) -> Result<(), SftpError> {
         let session = self.session().await?;
         let mut source = self
             .remote(
@@ -550,6 +747,7 @@ impl<H: client::Handler> Service<H> {
         })?;
 
         let mut buffer = vec![0u8; TRANSFER_CHUNK];
+        let mut moved = 0u64;
         loop {
             let read = self
                 .transfer(
@@ -564,6 +762,8 @@ impl<H: client::Handler> Service<H> {
             target.write_all(&buffer[..read]).await.map_err(|error| {
                 SftpError::Local(format!("could not write {}: {error}", local.display()))
             })?;
+            moved = moved.saturating_add(read as u64);
+            report(progress, moved);
         }
 
         target.flush().await.map_err(|error| {
@@ -576,6 +776,17 @@ impl<H: client::Handler> Service<H> {
         // until the channel goes away, and a file panel opens many of them.
         let _ = source.shutdown().await;
         Ok(())
+    }
+}
+
+/// Announces `moved` bytes on `progress`, if anyone is still listening.
+///
+/// A closed channel means the UI stopped watching — the panel was closed, the
+/// session went away — and never that the transfer should stop, so the send is
+/// deliberately unchecked.
+fn report(progress: Option<&UnboundedSender<u64>>, moved: u64) {
+    if let Some(progress) = progress {
+        let _ = progress.unbounded_send(moved);
     }
 }
 
