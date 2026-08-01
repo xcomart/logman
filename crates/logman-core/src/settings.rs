@@ -31,6 +31,15 @@ const MAX_SCROLLBACK_LINES: usize = 100_000;
 const DEFAULT_SCROLLBACK_LINES: usize = 5_000;
 /// Color scheme used when none is configured.
 const DEFAULT_SCHEME: &str = "one-dark";
+/// UI chrome theme used when none is configured.
+const DEFAULT_UI_THEME: &str = "one-dark";
+/// Light counterpart of [`DEFAULT_UI_THEME`], named here only so the legacy
+/// value `"light"` can be mapped onto it.
+const LIGHT_UI_THEME: &str = "one-light";
+/// Value builds before themes had ids wrote for the dark chrome.
+const LEGACY_UI_THEME_DARK: &str = "dark";
+/// Value builds before themes had ids wrote for the light chrome.
+const LEGACY_UI_THEME_LIGHT: &str = "light";
 /// `TERM` value advertised when none is configured.
 const DEFAULT_TERM: &str = "xterm-256color";
 /// SSH port offered by the connection form.
@@ -68,15 +77,23 @@ fn non_blank(value: &str, default: &str) -> String {
     }
 }
 
-/// UI chrome theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum UiTheme {
-    /// Dark chrome; the default.
-    #[default]
-    Dark,
-    /// Light chrome.
-    Light,
+/// Map a stored UI theme id onto one this build can be asked to resolve.
+///
+/// Builds before the UI themes had ids stored the two enum variants `"dark"`
+/// and `"light"`; those name the same palettes the `one-dark` and `one-light`
+/// themes carry today, so they are rewritten rather than dropped. A blank value
+/// falls back to the default. Everything else is kept verbatim — exactly like
+/// [`TerminalSettings::scheme`] — so an id belonging to a theme file the app
+/// layer loads survives a round trip through a build that cannot see it.
+fn sanitize_ui_theme(value: &str) -> String {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case(LEGACY_UI_THEME_DARK) {
+        DEFAULT_UI_THEME.to_string()
+    } else if value.eq_ignore_ascii_case(LEGACY_UI_THEME_LIGHT) {
+        LIGHT_UI_THEME.to_string()
+    } else {
+        non_blank(value, DEFAULT_UI_THEME)
+    }
 }
 
 /// Who draws the window's title bar.
@@ -229,8 +246,9 @@ pub struct AppSettings {
     /// nothing here validates the string: an unknown tag is resolved the same
     /// way `None` is, by falling back to the system locale and then to English.
     pub language: Option<String>,
-    /// UI chrome theme.
-    pub ui_theme: UiTheme,
+    /// UI chrome theme id, e.g. `"one-dark"`. Resolution lives in the app
+    /// layer, which also knows the themes loaded from the `themes` directory.
+    pub ui_theme: String,
     /// Window background treatment.
     pub window: WindowSettings,
     /// Terminal defaults shared by every session.
@@ -244,7 +262,7 @@ impl Default for AppSettings {
         Self {
             version: Self::CURRENT_VERSION,
             language: None,
-            ui_theme: UiTheme::default(),
+            ui_theme: DEFAULT_UI_THEME.to_string(),
             window: WindowSettings::default(),
             terminal: TerminalSettings::default(),
             connection: ConnectionSettings::default(),
@@ -327,12 +345,17 @@ impl AppSettings {
     /// to 6.0 ..= 32.0 (NaN becomes 14.0), scrollback to at most 100 000 lines,
     /// and blank strings fall back to their defaults. The UI should call it
     /// again after editing values.
+    ///
+    /// This is also where the one migration the file has needed so far happens:
+    /// a `ui_theme` written as `"dark"` or `"light"` by an older build becomes
+    /// the equivalent theme id.
     pub fn sanitize(&mut self) {
         if let Some(language) = &self.language
             && language.trim().is_empty()
         {
             self.language = None;
         }
+        self.ui_theme = sanitize_ui_theme(&self.ui_theme);
         self.window.sanitize();
         self.terminal.sanitize();
         self.connection.sanitize();
@@ -395,7 +418,7 @@ mod tests {
         let settings = AppSettings::default();
         assert_eq!(settings.version, 1);
         assert_eq!(settings.language, None);
-        assert_eq!(settings.ui_theme, UiTheme::Dark);
+        assert_eq!(settings.ui_theme, "one-dark");
         assert_eq!(settings.window.background_opacity, 1.0);
         assert!(!settings.window.background_blur);
         assert_eq!(settings.window.titlebar, TitlebarStyle::Custom);
@@ -412,15 +435,56 @@ mod tests {
     }
 
     #[test]
-    fn ui_theme_serializes_in_snake_case() {
+    fn ui_theme_is_stored_as_a_plain_id() {
+        let settings = AppSettings {
+            ui_theme: "gruvbox-dark".to_string(),
+            ..AppSettings::default()
+        };
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["ui_theme"], serde_json::json!("gruvbox-dark"));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        settings.save_to(&path).expect("save");
         assert_eq!(
-            serde_json::to_value(UiTheme::Light).unwrap(),
-            serde_json::json!("light")
+            AppSettings::load_from(&path).expect("load").ui_theme,
+            "gruvbox-dark"
         );
+    }
+
+    #[test]
+    fn a_legacy_ui_theme_becomes_its_named_equivalent() {
+        // Files written before the themes had ids carry the two enum variants.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+
+        fs::write(&path, br#"{"ui_theme":"light"}"#).expect("write");
         assert_eq!(
-            serde_json::from_str::<UiTheme>("\"dark\"").unwrap(),
-            UiTheme::Dark
+            AppSettings::load_from(&path).expect("load").ui_theme,
+            "one-light"
         );
+
+        fs::write(&path, br#"{"ui_theme":"Dark"}"#).expect("write");
+        assert_eq!(
+            AppSettings::load_from(&path).expect("load").ui_theme,
+            "one-dark"
+        );
+    }
+
+    #[test]
+    fn an_unknown_ui_theme_id_survives_sanitize() {
+        // The app layer owns the theme registry — the `themes` directory
+        // included — so core must not drop an id it happens not to know.
+        let mut settings = AppSettings {
+            ui_theme: "my-theme".to_string(),
+            ..AppSettings::default()
+        };
+        settings.sanitize();
+        assert_eq!(settings.ui_theme, "my-theme");
+
+        settings.ui_theme = "   ".to_string();
+        settings.sanitize();
+        assert_eq!(settings.ui_theme, "one-dark");
     }
 
     #[test]
@@ -455,7 +519,7 @@ mod tests {
 
         let settings = AppSettings {
             language: Some("zh-CN".to_string()),
-            ui_theme: UiTheme::Light,
+            ui_theme: "one-light".to_string(),
             window: WindowSettings {
                 background_opacity: 0.8,
                 background_blur: true,
@@ -504,7 +568,7 @@ mod tests {
         fs::write(&path, with_bom).expect("write");
 
         let settings = AppSettings::load_from(&path).expect("load");
-        assert_eq!(settings.ui_theme, UiTheme::Light);
+        assert_eq!(settings.ui_theme, "one-light");
         // Everything else falls back to the defaults.
         assert_eq!(settings.terminal, TerminalSettings::default());
     }
@@ -526,7 +590,7 @@ mod tests {
 
         let settings = AppSettings::load_from(&path).expect("load");
         assert_eq!(settings.version, 99);
-        assert_eq!(settings.ui_theme, UiTheme::Light);
+        assert_eq!(settings.ui_theme, "one-light");
         assert_eq!(settings.terminal.font_size, 18.0);
         // Unspecified keys of a partially specified section still default.
         assert_eq!(settings.terminal.scheme, "one-dark");

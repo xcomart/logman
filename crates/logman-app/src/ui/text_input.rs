@@ -138,6 +138,7 @@ pub struct TextInput {
     is_selecting: bool,
     masked: bool,
     disabled: bool,
+    invalid: bool,
     on_submit: Option<SubmitHandler>,
 }
 
@@ -157,6 +158,7 @@ impl TextInput {
             is_selecting: false,
             masked: false,
             disabled: false,
+            invalid: false,
             on_submit: None,
         }
     }
@@ -237,6 +239,22 @@ impl TextInput {
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
+    }
+
+    /// Marks the content as refused, outlining the field in the danger color.
+    ///
+    /// The field itself has no notion of what a valid value is — only its owner
+    /// does — so this is a setter rather than a builder: whoever is checking
+    /// the content keeps the flag in step with it. The outline wins over the
+    /// focus ring, since a field one is typing into is exactly the field whose
+    /// refusal has to stay visible. Setting the flag to the value it already
+    /// holds is a no-op, which is what keeps an observer that sets it from
+    /// waking itself up again.
+    pub fn set_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if self.invalid != invalid {
+            self.invalid = invalid;
+            cx.notify();
+        }
     }
 
     /// Places the field at `index` in the window's tab order and makes it a tab
@@ -675,7 +693,11 @@ impl Render for TextInput {
             .rounded_md()
             .overflow_hidden()
             .border_1()
-            .border_color(if focused { theme.accent } else { theme.border })
+            .border_color(match (self.invalid, focused) {
+                (true, _) => theme.danger,
+                (false, true) => theme.accent,
+                (false, false) => theme.border,
+            })
             .bg(if disabled {
                 theme.surface.opacity(0.6)
             } else {

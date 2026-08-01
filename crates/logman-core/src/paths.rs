@@ -7,6 +7,12 @@
 //! * Windows: `%APPDATA%\logman\logman\config`
 //! * macOS: `~/Library/Application Support/dev.logman.logman`
 //! * Linux: `~/.config/logman`
+//!
+//! Most of what logman persists is a single file in that directory —
+//! [`config_file`], [`known_hosts_file`], [`settings_file`]. Two kinds of
+//! user-supplied appearance files get a subdirectory each instead, because
+//! there is no fixed number of them: [`ui_themes_dir`] holds UI theme files and
+//! [`schemes_dir`] holds terminal color scheme files.
 
 use std::ffi::OsString;
 use std::fs;
@@ -25,6 +31,12 @@ const KNOWN_HOSTS_FILE_NAME: &str = "known_hosts";
 /// Name of the file holding the serialized [`crate::AppSettings`].
 const SETTINGS_FILE_NAME: &str = "settings.json";
 
+/// Name of the directory holding user-supplied UI theme files.
+const UI_THEMES_DIR_NAME: &str = "themes";
+
+/// Name of the directory holding user-supplied terminal color scheme files.
+const SCHEMES_DIR_NAME: &str = "schemes";
+
 /// Byte order mark that Windows editors readily prepend to UTF-8 files.
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 
@@ -33,9 +45,9 @@ const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 /// Neither `serde_json` nor the `known_hosts` line parser tolerates a BOM: it
 /// turns a perfectly valid file into a parse error, or silently glues itself to
 /// the first host name. Since these files are meant to be editable by hand, and
-/// several Windows editors add a BOM on save, every reader in this crate goes
-/// through here.
-pub(crate) fn strip_bom(bytes: &[u8]) -> &[u8] {
+/// several Windows editors add a BOM on save, every reader of one goes through
+/// here — the theme and scheme files the app layer reads included.
+pub fn strip_bom(bytes: &[u8]) -> &[u8] {
     bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes)
 }
 
@@ -84,6 +96,31 @@ pub fn settings_file() -> Result<PathBuf> {
     Ok(config_dir()?.join(SETTINGS_FILE_NAME))
 }
 
+/// Directory holding the user's own UI theme files (`themes`).
+///
+/// One `*.json` file per theme, whose stem is the id the theme is selected by.
+/// Like [`config_dir`], the directory is not created by this call; a user who
+/// has never added a theme simply has none.
+///
+/// # Errors
+///
+/// Fails when no home directory can be determined for the current user.
+pub fn ui_themes_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join(UI_THEMES_DIR_NAME))
+}
+
+/// Directory holding the user's own terminal color scheme files (`schemes`).
+///
+/// Laid out exactly like [`ui_themes_dir`]: one `*.json` file per scheme, named
+/// after the id it is selected by.
+///
+/// # Errors
+///
+/// Fails when no home directory can be determined for the current user.
+pub fn schemes_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join(SCHEMES_DIR_NAME))
+}
+
 /// Build a unique temporary path next to `path`.
 ///
 /// Keeping the temporary file in the same directory guarantees that the final
@@ -104,7 +141,12 @@ fn temp_sibling(path: &Path) -> PathBuf {
 /// Missing parent directories are created first. The data is written to a
 /// temporary sibling file and then renamed over the destination, so a crash
 /// mid-write can never leave a half-written configuration behind.
-pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+///
+/// # Errors
+///
+/// Fails when the parent directory cannot be created, the temporary file cannot
+/// be written, or the rename onto `path` does not go through.
+pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -145,13 +187,19 @@ mod tests {
         let profiles = config_file().expect("config file");
         let hosts = known_hosts_file().expect("known hosts file");
         let settings = settings_file().expect("settings file");
+        let themes = ui_themes_dir().expect("themes dir");
+        let schemes = schemes_dir().expect("schemes dir");
 
         assert_eq!(profiles.parent(), Some(dir.as_path()));
         assert_eq!(hosts.parent(), Some(dir.as_path()));
         assert_eq!(settings.parent(), Some(dir.as_path()));
+        assert_eq!(themes.parent(), Some(dir.as_path()));
+        assert_eq!(schemes.parent(), Some(dir.as_path()));
         assert_eq!(profiles.file_name().unwrap(), PROFILES_FILE_NAME);
         assert_eq!(hosts.file_name().unwrap(), KNOWN_HOSTS_FILE_NAME);
         assert_eq!(settings.file_name().unwrap(), SETTINGS_FILE_NAME);
+        assert_eq!(themes.file_name().unwrap(), UI_THEMES_DIR_NAME);
+        assert_eq!(schemes.file_name().unwrap(), SCHEMES_DIR_NAME);
     }
 
     #[test]

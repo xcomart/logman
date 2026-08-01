@@ -3874,7 +3874,7 @@ dependencies = [
 
 [[package]]
 name = "logman-app"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3904,7 +3904,7 @@ dependencies = [
 
 [[package]]
 name = "logman-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "directories",
@@ -3919,7 +3919,7 @@ dependencies = [
 
 [[package]]
 name = "logman-ssh"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3937,12 +3937,14 @@ dependencies = [
 
 [[package]]
 name = "logman-term"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
  "bitflags 2.13.1",
  "log",
+ "serde",
+ "serde_json",
  "smallvec",
 ]
 

@@ -36,7 +36,6 @@
 use gpui::Window;
 
 use crate::ui::Theme;
-use logman_core::UiTheme;
 
 #[cfg(target_os = "windows")]
 mod platform {
@@ -51,7 +50,6 @@ mod platform {
     use windows::core::BOOL;
 
     use crate::ui::Theme;
-    use logman_core::UiTheme;
 
     /// Packs a theme color into the `0x00BBGGRR` `COLORREF` DWM expects.
     ///
@@ -95,7 +93,7 @@ mod platform {
     }
 
     /// Repaints the caption in the app's own colors.
-    pub fn apply(window: &Window, ui_theme: UiTheme, theme: &Theme) {
+    pub fn apply(window: &Window, theme: &Theme) {
         let Some(hwnd) = hwnd(window) else {
             return;
         };
@@ -105,7 +103,7 @@ mod platform {
         // Windows 11 the explicit colors below win outright — measured — so
         // gpui re-asserting this attribute from the *system* theme when the
         // desktop switches light/dark cannot undo the caption there.
-        let dark: BOOL = matches!(ui_theme, UiTheme::Dark).into();
+        let dark: BOOL = theme.dark.into();
         set_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE.0 as u32, &dark);
         // Windows 11 (build 22000) and up. DWM picks the caption glyph color
         // from the luminance of the caption color, so these two cover the
@@ -125,8 +123,6 @@ mod platform {
     use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    use logman_core::UiTheme;
 
     type Id = *mut Object;
 
@@ -149,23 +145,40 @@ mod platform {
 
     /// Pins the window's appearance to the app theme.
     ///
-    /// `theme` is deliberately absent: the caption's colors are AppKit's to
-    /// choose, and it chooses them well once told which side of light/dark the
-    /// window is on. Without this the appearance is inherited from the system.
-    pub fn apply(window: &Window, ui_theme: UiTheme) {
+    /// Only the theme's darkness is wanted, not its colors: those are AppKit's
+    /// to choose, and it chooses them well once told which side of light/dark
+    /// the window is on. Without this the appearance is inherited from the
+    /// system.
+    pub fn apply(window: &Window, dark: bool) {
         let Some(ns_window) = ns_window(window) else {
             return;
         };
         unsafe {
-            let name = match ui_theme {
-                UiTheme::Dark => NSAppearanceNameDarkAqua,
-                UiTheme::Light => NSAppearanceNameAqua,
+            let name = if dark {
+                NSAppearanceNameDarkAqua
+            } else {
+                NSAppearanceNameAqua
             };
             let appearance: Id = msg_send![class!(NSAppearance), appearanceNamed: name];
             if appearance.is_null() {
                 return;
             }
-            let _: () = msg_send![ns_window, setAppearance: appearance];
+            // Scheduled on the run loop rather than sent directly:
+            // `-setAppearance:` synchronously delivers
+            // `viewDidChangeEffectiveAppearance`, which gpui's view hooks to
+            // re-enter the app — and this function is always called from
+            // inside a gpui update, where that re-entry finds the App borrow
+            // already taken and the appearance observers are dropped with a
+            // "RefCell already borrowed" error in the log. A zero delay runs
+            // it on the next run-loop turn, after the update has released the
+            // borrow. The receiver and argument are retained by the
+            // scheduling, so a window closed in between stays sound.
+            let _: () = msg_send![
+                ns_window,
+                performSelector: sel!(setAppearance:)
+                withObject: appearance
+                afterDelay: 0.0f64
+            ];
         }
     }
 
@@ -179,27 +192,27 @@ mod platform {
     }
 }
 
-/// Repaints the window caption to match `ui_theme` / `theme`.
+/// Repaints the window caption to match `theme`.
 ///
 /// A no-op on Linux, whose windows here have no separately themed caption to
 /// correct.
 #[cfg(target_os = "windows")]
-pub fn apply_caption_theme(window: &Window, ui_theme: UiTheme, theme: &Theme) {
-    platform::apply(window, ui_theme, theme);
+pub fn apply_caption_theme(window: &Window, theme: &Theme) {
+    platform::apply(window, theme);
 }
 
-/// Repaints the window caption to match `ui_theme` / `theme`.
+/// Repaints the window caption to match `theme`.
 ///
 /// A no-op on Linux, whose windows here have no separately themed caption to
 /// correct.
 #[cfg(target_os = "macos")]
-pub fn apply_caption_theme(window: &Window, ui_theme: UiTheme, _theme: &Theme) {
-    platform::apply(window, ui_theme);
+pub fn apply_caption_theme(window: &Window, theme: &Theme) {
+    platform::apply(window, theme.dark);
 }
 
-/// Repaints the window caption to match `ui_theme` / `theme`.
+/// Repaints the window caption to match `theme`.
 ///
 /// A no-op on Linux, whose windows here have no separately themed caption to
 /// correct.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub fn apply_caption_theme(_window: &Window, _ui_theme: UiTheme, _theme: &Theme) {}
+pub fn apply_caption_theme(_window: &Window, _theme: &Theme) {}

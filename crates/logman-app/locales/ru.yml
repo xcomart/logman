@@ -106,8 +106,6 @@ settings:
     terminal: Терминал
     connection: Новые подключения
   ui_theme: Тема интерфейса
-  theme_dark: Тёмная
-  theme_light: Светлая
   titlebar: Заголовок окна
   titlebar_custom: Пользовательский
   titlebar_system: Системный
@@ -130,6 +128,53 @@ settings:
   keepalive_hint: секунд (0 — отключено)
   timeout: Таймаут подключения
   timeout_hint: секунд
+  manage:
+    duplicate: Дублировать
+    edit: Изменить
+    delete: Удалить
+    import: Импорт…
+    export: Экспорт…
+    import_select: Импортировать
+    import_failed: Ни один из выбранных файлов прочитать не удалось.
+    import_skipped: "Пропущено файлов: %{count}."
+    delete_theme_confirm: "Удалить тему %{name}?"
+    delete_scheme_confirm: "Удалить цветовую схему %{name}?"
+    copy_name: "%{name} — копия"
+    write_failed: "Не удалось записать файл: %{error}"
+    delete_failed: "Не удалось удалить файл: %{error}"
+  editor:
+    theme_title: Изменение темы интерфейса
+    scheme_title: Изменение цветовой схемы
+    name: Название
+    dark: Тёмная палитра
+    invalid: "Каждый цвет записывается как #RRGGBB."
+    slot:
+      background: Фон
+      surface: Поверхность
+      surface_hover: Поверхность под курсором
+      surface_active: Поверхность, активная
+      border: Границы
+      text: Текст
+      text_muted: Текст, приглушённый
+      accent: Акцент
+      danger: Опасность
+      success: Успех
+      overlay: Затемнение (с альфой)
+    term:
+      foreground: Текст
+      background: Фон
+      cursor: Курсор
+      selection: Выделение
+      ansi: Цвета ANSI
+      black: Чёрный
+      red: Красный
+      green: Зелёный
+      yellow: Жёлтый
+      blue: Синий
+      magenta: Пурпурный
+      cyan: Голубой
+      white: Белый
+      bright: "%{name} (яркий)"
 
 connection:
   title_new: Новое подключение

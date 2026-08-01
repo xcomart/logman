@@ -106,8 +106,6 @@ settings:
     terminal: Terminal
     connection: Nouvelles connexions
   ui_theme: Thème de l'interface
-  theme_dark: Sombre
-  theme_light: Clair
   titlebar: Barre de titre
   titlebar_custom: Personnalisée
   titlebar_system: Système
@@ -130,6 +128,53 @@ settings:
   keepalive_hint: secondes (0 désactive)
   timeout: Délai de connexion
   timeout_hint: secondes
+  manage:
+    duplicate: Dupliquer
+    edit: Modifier
+    delete: Supprimer
+    import: Importer…
+    export: Exporter…
+    import_select: Importer
+    import_failed: Aucun des fichiers choisis n'a pu être lu.
+    import_skipped: "%{count} fichiers ont été ignorés."
+    delete_theme_confirm: "Supprimer le thème %{name} ?"
+    delete_scheme_confirm: "Supprimer la palette %{name} ?"
+    copy_name: "%{name} copie"
+    write_failed: "Impossible d'écrire le fichier : %{error}"
+    delete_failed: "Impossible de supprimer le fichier : %{error}"
+  editor:
+    theme_title: Modifier le thème de l'interface
+    scheme_title: Modifier la palette de couleurs
+    name: Nom
+    dark: Palette sombre
+    invalid: "Chaque couleur doit s'écrire #RRGGBB."
+    slot:
+      background: Arrière-plan
+      surface: Surface
+      surface_hover: Surface, survolée
+      surface_active: Surface, active
+      border: Bordure
+      text: Texte
+      text_muted: Texte, atténué
+      accent: Accent
+      danger: Danger
+      success: Succès
+      overlay: Voile (avec alpha)
+    term:
+      foreground: Premier plan
+      background: Arrière-plan
+      cursor: Curseur
+      selection: Sélection
+      ansi: Couleurs ANSI
+      black: Noir
+      red: Rouge
+      green: Vert
+      yellow: Jaune
+      blue: Bleu
+      magenta: Magenta
+      cyan: Cyan
+      white: Blanc
+      bright: "%{name} clair"
 
 connection:
   title_new: Nouvelle connexion

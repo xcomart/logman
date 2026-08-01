@@ -200,8 +200,6 @@ settings:
     terminal: Terminal
     connection: New connections
   ui_theme: UI theme
-  theme_dark: Dark
-  theme_light: Light
   # Who draws the window's title bar. "Custom" is logman's own, merged into the
   # toolbar; "System" is the caption the operating system draws. Applied to the
   # open window as soon as the settings are saved.
@@ -228,6 +226,76 @@ settings:
   keepalive_hint: seconds (0 disables)
   timeout: Connect timeout
   timeout_hint: seconds
+  # The row of buttons under each of the two color pickers. The same five
+  # words serve both, since a UI theme and a terminal scheme are managed the
+  # same way; only the delete question has to say which of the two it means.
+  # `%{error}` is the underlying failure and stays in English, as elsewhere.
+  manage:
+    duplicate: Duplicate
+    edit: Edit
+    delete: Delete
+    # Both open a platform file dialog, hence the ellipsis.
+    import: Import…
+    export: Export…
+    # Confirmation button of that file dialog.
+    import_select: Import
+    # Every file picked turned out not to be a theme or scheme file.
+    import_failed: None of the chosen files could be read.
+    # Some of them were, some were not. Only the ones that failed are counted;
+    # the ones that worked are already visible in the picker.
+    import_skipped: "%{count} files were skipped."
+    # The question asked before a file is removed. Two keys rather than one
+    # with a noun in it: naming the kind is what makes the question readable,
+    # and no language builds that sentence the same way.
+    delete_theme_confirm: "Delete the theme %{name}?"
+    delete_scheme_confirm: "Delete the color scheme %{name}?"
+    # The name given to the copy that "Duplicate" makes.
+    copy_name: "%{name} copy"
+    write_failed: "Could not write the file: %{error}"
+    delete_failed: "Could not remove the file: %{error}"
+  # The editor that opens over the settings form for one theme or one scheme.
+  editor:
+    theme_title: Edit UI theme
+    scheme_title: Edit color scheme
+    name: Name
+    dark: Dark palette
+    # Shown when a field holds something that is not a color. Every field is
+    # outlined in the danger color at the same time, so this only has to say
+    # what a color looks like.
+    invalid: "Every color has to be written #RRGGBB."
+    # The eleven slots of a UI theme, in the order the editor lists them.
+    slot:
+      background: Background
+      surface: Surface
+      surface_hover: Surface, hovered
+      surface_active: Surface, active
+      border: Border
+      text: Text
+      text_muted: Text, muted
+      accent: Accent
+      danger: Danger
+      success: Success
+      # The only slot that may carry an alpha channel, hence the wording.
+      overlay: Overlay (with alpha)
+    # The four roles of a terminal palette, and the sixteen ANSI colors.
+    term:
+      foreground: Foreground
+      background: Background
+      cursor: Cursor
+      selection: Selection
+      ansi: ANSI colors
+      black: Black
+      red: Red
+      green: Green
+      yellow: Yellow
+      blue: Blue
+      magenta: Magenta
+      cyan: Cyan
+      white: White
+      # The bright half of the palette, built from the eight names above. A
+      # pattern rather than eight more keys, because languages disagree about
+      # where the qualifier goes.
+      bright: "Bright %{name}"
 
 # The connection dialog: the saved-profile column, the form, and the messages
 # the dialog reports back in.

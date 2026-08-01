@@ -11,7 +11,8 @@
 //!   produced by [`TerminalModel::snapshot`].
 //! * [`TerminalTheme`] resolves the abstract cell colors into RGB, and ships a
 //!   registry of built-in schemes selectable by id ([`TerminalTheme::builtin`],
-//!   [`TerminalTheme::by_name`]).
+//!   [`TerminalTheme::by_name`]) that the embedder can extend with schemes read
+//!   from Windows Terminal-compatible [`SchemeFile`]s.
 //! * [`encode_key`] / [`encode_paste`] encode user input.
 //! * [`CwdTracker`] watches the same byte stream for the `OSC 7` / `OSC 1337`
 //!   sequences that tell us which directory the remote shell is in.
@@ -38,4 +39,4 @@ pub use model::TerminalModel;
 pub use snapshot::{
     CursorPos, RunFlags, ScrollPosition, StyledRun, TerminalLine, TerminalSnapshot,
 };
-pub use theme::{Rgb, SchemeInfo, TerminalTheme};
+pub use theme::{CustomScheme, Rgb, SchemeEntry, SchemeFile, SchemeInfo, TerminalTheme};

@@ -34,10 +34,12 @@ pub mod secrets;
 pub mod settings;
 
 pub use known_hosts::{HostKeyStatus, KnownHosts};
-pub use paths::{config_dir, config_file, known_hosts_file, settings_file};
+pub use paths::{
+    config_dir, config_file, known_hosts_file, schemes_dir, settings_file, ui_themes_dir,
+};
 pub use profile::{AuthMethod, ProfileStore, SessionOverrides, SessionProfile};
 pub use secrets::{SecretStore, init as init_secrets};
 pub use settings::{
-    AppSettings, ConnectionSettings, EffectiveTerminal, TerminalSettings, TitlebarStyle, UiTheme,
+    AppSettings, ConnectionSettings, EffectiveTerminal, TerminalSettings, TitlebarStyle,
     WindowSettings,
 };

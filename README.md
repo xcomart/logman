@@ -234,11 +234,10 @@ keychain the application still runs; it just asks for the secret every time.
 settings dialog: interface language (eight are built in; the default follows
 the system locale), UI theme, title bar style — logman's own tab-strip title
 bar or the system caption, swapped on the open window as soon as the change is
-saved — terminal color scheme (One Dark, One Light,
-Solarized Dark/Light, Gruvbox Dark, Dracula — each shown with a live
-preview), font family — picked from the fonts installed on the machine — and
-size, scrollback depth, `TERM`, copy-on-select, window background opacity and
-blur, and the defaults applied to new connections. Everything lands in `settings.json` next to the profiles, is
+saved — terminal color scheme, font family — picked from the fonts installed
+on the machine — and size, scrollback depth, `TERM`, copy-on-select, window
+background opacity and blur, and the defaults applied to new connections.
+Everything lands in `settings.json` next to the profiles, is
 safe to edit by hand, and out-of-range values are clamped on load rather
 than breaking the app.
 
@@ -249,6 +248,43 @@ sessions immediately; a changed `TERM` takes effect on the next reconnect,
 since it has already been sent to the server; a changed scrollback applies to
 sessions opened afterwards, since resizing a live terminal's scrollback would
 rebuild the grid and clear the screen.
+
+### Themes and color schemes
+
+Two palettes, picked independently: the **UI theme** colors the chrome —
+window, tab strip, dialogs — and the **color scheme** colors the terminal
+grid. Six of each ship with logman under matching names, so choosing
+"Dracula" in both places means the same word twice: One Dark, One Light,
+Solarized Dark, Solarized Light, Gruvbox Dark and Dracula. Every card in
+either picker shows a live preview of the palette it stands for.
+
+Beyond the six, both are files. A UI theme is a `*.json` file in the `themes`
+directory next to `settings.json`, and a color scheme one in `schemes`; the
+file's name — `tokyo-night.json` — is the id it is selected by, and its `name`
+key is what the picker shows. **Scheme files are Windows Terminal's format**,
+so the thousands of palettes published for it work unchanged, `purple` for
+magenta and all. Both formats are read forgivingly: unknown keys are ignored,
+a color that cannot be parsed falls back to the built-in one for that slot,
+and one broken file never stops the others — or the app — from loading.
+
+Nothing has to be edited by hand, though. Under each picker sit five buttons:
+
+- **Duplicate** copies the selected palette — a built-in one included — into a
+  file of its own and opens it for editing. This is how a theme of your own
+  usually starts.
+- **Edit** opens a palette you own: a name, every color slot as a hex field
+  with a swatch beside it, and a live preview that follows your typing. A
+  value that is not a color outlines its field in red and holds Save back.
+  The id never changes with the name, so renaming a theme cannot orphan the
+  setting or the profile override that selected it.
+- **Delete** removes the file, after asking.
+- **Import** reads `*.json` files from anywhere on the disk into the right
+  directory, several at once; a file that is not a palette is skipped.
+- **Export** writes the selected palette out — again, built-in ones included —
+  which is the easiest way to get a starting point to edit elsewhere or share.
+
+Saving in the editor takes effect at once: a theme already in use repaints the
+window, and a scheme already in use repaints every open session.
 
 ### Host key policy
 
