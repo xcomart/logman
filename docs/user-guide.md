@@ -701,8 +701,8 @@ that would be refused is left out rather than shown doing nothing.
 
 | Platform | Directory |
 | --- | --- |
-| Windows | `%APPDATA%\logman\logman\config\` |
-| macOS | `~/Library/Application Support/dev.logman.logman/` |
+| Windows | `%APPDATA%\aihouse\logman\config\` |
+| macOS | `~/Library/Application Support/com.aihouse.logman/` |
 | Linux | `~/.config/logman/` |
 
 | File | Contents |
@@ -721,7 +721,7 @@ is something in them.
 
 **Passwords and key passphrases are never written to any of those files.** They
 go to the Windows Credential Manager, the macOS Keychain, or the freedesktop
-Secret Service, under the service name `dev.logman.logman` with the profile's
+Secret Service, under the service name `com.aihouse.logman` with the profile's
 identifier as the account — and only when "Remember … in the system keychain" is
 ticked.
 

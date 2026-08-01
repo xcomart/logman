@@ -106,7 +106,7 @@ jobs:
           staging="logman-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$staging/icons"
           cp "target/${{ matrix.target }}/release/logman" "$staging/"
-          cp README.md packaging/linux/logman.desktop "$staging/"
+          cp README.md packaging/linux/com.aihouse.logman.desktop "$staging/"
           install -m755 packaging/linux/install.sh "$staging/install.sh"
           cp assets/icon-128.png "$staging/icons/logman-128.png"
           cp assets/icon-256.png "$staging/icons/logman-256.png"
