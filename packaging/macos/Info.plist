@@ -8,7 +8,7 @@
     <key>CFBundleDisplayName</key>
     <string>logman</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.logman.logman</string>
+    <string>com.aihouse.logman</string>
     <key>CFBundleExecutable</key>
     <string>logman</string>
     <key>CFBundleIconFile</key>

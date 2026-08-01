@@ -2381,8 +2381,8 @@ fn main() {
                         .then_some(TRAFFIC_LIGHT_ORIGIN),
                 }),
                 // Wayland compositors and X11 docks match this against
-                // logman.desktop to pick up the application icon.
-                app_id: Some("logman".into()),
+                // com.aihouse.logman.desktop to pick up the application icon.
+                app_id: Some("com.aihouse.logman".into()),
                 // A translucent or blurred window needs the platform surface to
                 // permit alpha; the terminal view then tints its background.
                 window_background: window_appearance(&settings.window),

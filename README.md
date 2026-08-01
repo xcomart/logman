@@ -217,8 +217,8 @@ Select text by dragging across the grid; scroll back with the mouse wheel.
 
 | | |
 | --- | --- |
-| Windows | `%APPDATA%\logman\logman\config\` |
-| macOS | `~/Library/Application Support/dev.logman.logman/` |
+| Windows | `%APPDATA%\aihouse\logman\config\` |
+| macOS | `~/Library/Application Support/com.aihouse.logman/` |
 | Linux | `~/.config/logman/` |
 
 `profiles.json` holds saved connections and `known_hosts` the trusted host key

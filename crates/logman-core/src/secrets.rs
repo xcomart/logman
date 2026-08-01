@@ -1,7 +1,7 @@
 //! Storage of connection secrets in the operating system keychain.
 //!
 //! Secrets are keyed by the [`SessionProfile`](crate::SessionProfile) identifier
-//! inside the `dev.logman.logman` service namespace, so the profile database on
+//! inside the `com.aihouse.logman` service namespace, so the profile database on
 //! disk never contains a password.
 //!
 //! The backing store is the platform default provided by `keyring` 4.x: the
@@ -17,7 +17,7 @@ use keyring::{Entry, Error as KeyringError};
 use uuid::Uuid;
 
 /// Service namespace used for every credential logman stores.
-const SERVICE: &str = "dev.logman.logman";
+const SERVICE: &str = "com.aihouse.logman";
 
 /// Account name used by [`init`] to force the credential store to load.
 ///
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn service_namespace_matches_the_project_id() {
-        assert_eq!(SERVICE, "dev.logman.logman");
+        assert_eq!(SERVICE, "com.aihouse.logman");
     }
 
     #[test]

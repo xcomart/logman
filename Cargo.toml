@@ -27,7 +27,7 @@ version = "0.2.4"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["logman contributors"]
-repository = "https://github.com/logman/logman"
+repository = "https://github.com/xcomart/logman"
 
 [workspace.dependencies]
 # --- shared utilities ---

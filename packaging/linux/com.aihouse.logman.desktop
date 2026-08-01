@@ -6,4 +6,4 @@ Exec=logman
 Icon=logman
 Terminal=false
 Categories=Network;TerminalEmulator;
-StartupWMClass=logman
+StartupWMClass=com.aihouse.logman

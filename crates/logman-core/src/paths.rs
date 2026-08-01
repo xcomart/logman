@@ -1,11 +1,11 @@
 //! Platform-specific locations of the files logman persists.
 //!
 //! Every path is derived from a single [`directories::ProjectDirs`] instance
-//! built from the `dev.logman.logman` triple, so the whole application agrees on
+//! built from the `com.aihouse.logman` triple, so the whole application agrees on
 //! where its configuration lives:
 //!
-//! * Windows: `%APPDATA%\logman\logman\config`
-//! * macOS: `~/Library/Application Support/dev.logman.logman`
+//! * Windows: `%APPDATA%\aihouse\logman\config`
+//! * macOS: `~/Library/Application Support/com.aihouse.logman`
 //! * Linux: `~/.config/logman`
 //!
 //! Most of what logman persists is a single file in that directory —
@@ -53,7 +53,7 @@ pub fn strip_bom(bytes: &[u8]) -> &[u8] {
 
 /// Resolve the project directories for logman.
 fn project_dirs() -> Result<ProjectDirs> {
-    ProjectDirs::from("dev", "logman", "logman")
+    ProjectDirs::from("com", "aihouse", "logman")
         .context("could not determine a home directory for the current user")
 }
 
