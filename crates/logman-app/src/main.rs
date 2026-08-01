@@ -1857,6 +1857,11 @@ impl Workspace {
             .gap(px(14.))
             .h(px(24.))
             .px(px(10.))
+            // The bar is inert, so a press on it must not move the keyboard.
+            // Without this the workspace root's `track_focus` would claim the
+            // click, and the accent frame would jump to the active pane even
+            // though no pane received focus.
+            .on_any_mouse_down(|_, window, _cx| window.prevent_default())
             .bg(theme.surface)
             .border_t_1()
             .border_color(theme.border)
