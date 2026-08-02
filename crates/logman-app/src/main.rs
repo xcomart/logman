@@ -497,6 +497,15 @@ impl Workspace {
             self.titlebar = settings.window.titlebar;
             let custom = self.titlebar == TitlebarStyle::Custom;
             window.set_titlebar_transparent(custom, custom.then_some(TRAFFIC_LIGHT_ORIGIN));
+            // The Linux counterpart of the call above, which only the Windows
+            // and macOS backends implement: swap the compositor's frame for
+            // client-side decorations (or back) on the live window.
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            window.request_decorations(if custom {
+                gpui::WindowDecorations::Client
+            } else {
+                gpui::WindowDecorations::Server
+            });
         }
         cx.refresh_windows();
         window.set_background_appearance(window_appearance(&settings.window));
@@ -2037,13 +2046,29 @@ impl Render for Workspace {
             .is_open()
             .then(|| div().absolute().inset_0().child(self.about.clone()));
 
+        // With client-side decorations the compositor stops drawing the drop
+        // shadow along with the frame, so the window has to bring its own:
+        // the surface grows a transparent band all round, the content is
+        // inset by it, and the shadow is painted into it. The inset call
+        // keeps `_GTK_FRAME_EXTENTS` in step so the compositor treats the
+        // content edge, not the surface edge, as the window.
+        let tiling = client_tiling(window);
+        if tiling.is_some() {
+            window.set_client_inset(px(SHADOW_BAND));
+        } else {
+            // Clears the extents a client-side frame may have left behind
+            // when the setting switches back to the system title bar on a
+            // live window; a no-op under decorations that never set any.
+            window.set_client_inset(px(0.));
+        }
+
         // No background fill here on purpose. The three bands below — toolbar,
         // body and status bar — cover the window between them, and each paints
         // its own. A fill at this level would sit *under* the translucent
         // terminal and empty-state fills and compose back to opaque, which is
         // exactly what made `window.background_opacity` and `background_blur`
         // look like they did nothing.
-        div()
+        let content = div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .relative()
@@ -2093,7 +2118,45 @@ impl Render for Workspace {
             .children(tab_context)
             .children(dialog)
             .children(settings)
-            .children(about)
+            .children(about);
+
+        let Some(tiling) = tiling else {
+            // A server-decorated window: the compositor frames and shadows
+            // it, and the content is the whole surface.
+            return content.into_any_element();
+        };
+
+        div()
+            .size_full()
+            .relative()
+            .bg(gpui::transparent_black())
+            .when(!tiling.top, |outer| outer.pt(px(SHADOW_BAND)))
+            .when(!tiling.bottom, |outer| outer.pb(px(SHADOW_BAND)))
+            .when(!tiling.left, |outer| outer.pl(px(SHADOW_BAND)))
+            .when(!tiling.right, |outer| outer.pr(px(SHADOW_BAND)))
+            .child(
+                content
+                    // A hairline where the frame's own outline used to be,
+                    // per untiled edge; a tiled edge meets the neighbour
+                    // flush, the way the compositor would have drawn it.
+                    .border_color(theme.border)
+                    .when(!tiling.top, |content| content.border_t_1())
+                    .when(!tiling.bottom, |content| content.border_b_1())
+                    .when(!tiling.left, |content| content.border_l_1())
+                    .when(!tiling.right, |content| content.border_r_1())
+                    .when(!tiling.is_tiled(), |content| {
+                        content.shadow(vec![gpui::BoxShadow {
+                            color: gpui::hsla(0., 0., 0., 0.35),
+                            blur_radius: px(SHADOW_BAND / 2.),
+                            spread_radius: px(0.),
+                            offset: gpui::point(px(0.), px(2.)),
+                        }])
+                    }),
+            )
+            // Last on purpose: the window border outranks whatever it
+            // crosses, dialogs included, the way a compositor frame would.
+            .children(render_resize_edges(tiling))
+            .into_any_element()
     }
 }
 
@@ -2119,13 +2182,11 @@ fn draws_own_titlebar(style: TitlebarStyle, _window: &Window) -> bool {
 
 /// Whether the toolbar has to stand in for the window's title bar.
 ///
-/// Linux is not the configured style alone. `appears_transparent` means nothing
-/// to the X11 and Wayland backends: the caption stays the compositor's until
-/// the window asks for client-side decorations, and asking for those also makes
-/// the resize borders and the drop shadow the app's to draw. logman does not
-/// ask yet, so what the window actually ended up with is what decides here —
-/// and the custom style is, for now, a no-op on Linux rather than a second row
-/// of buttons under the compositor's own.
+/// Linux is not the configured style alone. The custom style makes the window
+/// ask for client-side decorations, but the ask can be declined — gpui falls
+/// back to server decorations when no compositor is running — so what the
+/// window actually ended up with is what decides here. Deciding from the
+/// style alone would draw a second caption under the compositor's own.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn draws_own_titlebar(style: TitlebarStyle, window: &Window) -> bool {
     style == TitlebarStyle::Custom
@@ -2186,6 +2247,176 @@ fn titlebar_gestures(row: Stateful<Div>) -> Stateful<Div> {
     .on_mouse_down(MouseButton::Right, |event, window, _cx| {
         window.show_window_menu(event.position);
     })
+}
+
+/// Width of the transparent band around a self-decorated window.
+///
+/// The band carries the drop shadow the compositor no longer draws once the
+/// window asks for client-side decorations, and doubles as the resize grip.
+/// It is part of the window's surface but not of the window as the user
+/// understands it: [`Window::set_client_inset`] publishes the visible bounds
+/// through `_GTK_FRAME_EXTENTS`, so the compositor snaps, maximises and
+/// stacks by the visible edge, exactly as it does for GTK's frames.
+const SHADOW_BAND: f32 = 12.;
+
+/// Edge length of the corner squares, where the resize goes diagonal.
+const RESIZE_CORNER: f32 = 24.;
+
+/// The tiling state of a window that draws its own frame, `None` under a
+/// server-side one.
+///
+/// Always `None` here: Windows keeps resizing and framing the window through
+/// the caption hit test even under a custom title bar, and AppKit never gives
+/// the frame up at all — neither window ever carries the shadow band.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn client_tiling(_window: &Window) -> Option<gpui::Tiling> {
+    None
+}
+
+/// The tiling state of a window that draws its own frame, `None` under a
+/// server-side one.
+///
+/// `Some` exactly when the compositor granted client-side decorations, with
+/// the edges that currently touch a screen or neighbour edge marked tiled —
+/// those edges get no band, no shadow and no resize grip. Fullscreen counts
+/// as tiled all round.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn client_tiling(window: &Window) -> Option<gpui::Tiling> {
+    match window.window_decorations() {
+        gpui::Decorations::Client { tiling } => Some(tiling),
+        gpui::Decorations::Server => None,
+    }
+}
+
+/// The resize handles the compositor's frame would have provided.
+///
+/// Asking for client-side decorations takes the frame away, resize borders
+/// included, so the shadow band has to start the resize itself — the
+/// compositor takes over once told, exactly as it does for the title-bar
+/// drag. The strips cover the band, the corner squares reach past it into
+/// the window, and every tiled edge goes without: a maximised or snapped
+/// window has no border to drag there.
+fn render_resize_edges(tiling: gpui::Tiling) -> Vec<AnyElement> {
+    use gpui::{CursorStyle, ResizeEdge};
+
+    let strip = px(SHADOW_BAND);
+    let corner = px(RESIZE_CORNER);
+    // A strip stops short of a corner square only where that square exists;
+    // against a tiled perpendicular edge it runs to the end of the band.
+    let inset = |tiled: bool| if tiled { px(0.) } else { corner };
+    let handle = |id: &'static str, cursor: CursorStyle, edge: ResizeEdge| {
+        div()
+            .id(id)
+            .occlude()
+            .absolute()
+            .cursor(cursor)
+            .on_mouse_down(MouseButton::Left, move |_, window, _cx| {
+                window.start_window_resize(edge);
+            })
+    };
+
+    let mut handles: Vec<AnyElement> = Vec::new();
+    if !tiling.top {
+        handles.push(
+            handle("resize-top", CursorStyle::ResizeUpDown, ResizeEdge::Top)
+                .top_0()
+                .left(inset(tiling.left))
+                .right(inset(tiling.right))
+                .h(strip)
+                .into_any_element(),
+        );
+    }
+    if !tiling.bottom {
+        handles.push(
+            handle(
+                "resize-bottom",
+                CursorStyle::ResizeUpDown,
+                ResizeEdge::Bottom,
+            )
+            .bottom_0()
+            .left(inset(tiling.left))
+            .right(inset(tiling.right))
+            .h(strip)
+            .into_any_element(),
+        );
+    }
+    if !tiling.left {
+        handles.push(
+            handle("resize-left", CursorStyle::ResizeLeftRight, ResizeEdge::Left)
+                .left_0()
+                .top(inset(tiling.top))
+                .bottom(inset(tiling.bottom))
+                .w(strip)
+                .into_any_element(),
+        );
+    }
+    if !tiling.right {
+        handles.push(
+            handle(
+                "resize-right",
+                CursorStyle::ResizeLeftRight,
+                ResizeEdge::Right,
+            )
+            .right_0()
+            .top(inset(tiling.top))
+            .bottom(inset(tiling.bottom))
+            .w(strip)
+            .into_any_element(),
+        );
+    }
+    if !tiling.top && !tiling.left {
+        handles.push(
+            handle(
+                "resize-top-left",
+                CursorStyle::ResizeUpLeftDownRight,
+                ResizeEdge::TopLeft,
+            )
+            .top_0()
+            .left_0()
+            .size(corner)
+            .into_any_element(),
+        );
+    }
+    if !tiling.top && !tiling.right {
+        handles.push(
+            handle(
+                "resize-top-right",
+                CursorStyle::ResizeUpRightDownLeft,
+                ResizeEdge::TopRight,
+            )
+            .top_0()
+            .right_0()
+            .size(corner)
+            .into_any_element(),
+        );
+    }
+    if !tiling.bottom && !tiling.left {
+        handles.push(
+            handle(
+                "resize-bottom-left",
+                CursorStyle::ResizeUpRightDownLeft,
+                ResizeEdge::BottomLeft,
+            )
+            .bottom_0()
+            .left_0()
+            .size(corner)
+            .into_any_element(),
+        );
+    }
+    if !tiling.bottom && !tiling.right {
+        handles.push(
+            handle(
+                "resize-bottom-right",
+                CursorStyle::ResizeUpLeftDownRight,
+                ResizeEdge::BottomRight,
+            )
+            .bottom_0()
+            .right_0()
+            .size(corner)
+            .into_any_element(),
+        );
+    }
+    handles
 }
 
 /// Maps the window settings onto a gpui background appearance.
@@ -2380,6 +2611,14 @@ fn main() {
                     traffic_light_position: (titlebar == TitlebarStyle::Custom)
                         .then_some(TRAFFIC_LIGHT_ORIGIN),
                 }),
+                // Only the Linux backends read this. `appears_transparent`
+                // above means nothing to X11 and Wayland: the caption stays
+                // the compositor's until the window asks for client-side
+                // decorations outright. gpui falls back to server decorations
+                // on its own when no compositor is present, and
+                // [`draws_own_titlebar`] follows what the window actually got.
+                window_decorations: (titlebar == TitlebarStyle::Custom)
+                    .then_some(gpui::WindowDecorations::Client),
                 // Wayland compositors and X11 docks match this against
                 // com.aihouse.logman.desktop to pick up the application icon.
                 app_id: Some("com.aihouse.logman".into()),

@@ -17,8 +17,22 @@ exclude = ["vendor/gpui"]
 #   * `platform/windows/platform.rs` — translate in the loop, on the real MSG.
 #   * `platform/windows/events.rs`   — drop the in-procedure translations.
 #
+# Two more patches, in `platform/linux/x11/` (also marked `LOGMAN PATCH`),
+# for the same re-entrancy disease in the X11 backend:
+#   * `client.rs` — the WM_DELETE_WINDOW close callback ran while the client
+#     RefCell was held, so an app that quits from its window-closed observer
+#     — as this one does — re-entered the borrow and panicked on every close
+#     of the last window.
+#   * `window.rs` — `request_decorations` invoked the appearance-changed
+#     callback synchronously while `handle_input` held the window callbacks
+#     RefCell, so flipping the title-bar setting from its dialog's save
+#     button crashed the app; the callback now runs on the next loop turn.
+#   * `window.rs` — `is_transparent` ignored client-side decorations, unlike
+#     its Wayland counterpart, so the transparent shadow band around a
+#     self-decorated window composited as solid black.
+#
 # crates.io has no newer gpui (0.2.2 is current), so vendoring is the only
-# route. Delete this patch and `vendor/gpui` once a release carries the fix.
+# route. Delete these patches and `vendor/gpui` once a release carries them.
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }
 
