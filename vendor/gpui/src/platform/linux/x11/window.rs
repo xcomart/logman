@@ -81,6 +81,7 @@ x11rb::atom_manager! {
         _GTK_FRAME_EXTENTS,
         _GTK_EDGE_CONSTRAINTS,
         _NET_CLIENT_LIST_STACKING,
+        _KDE_NET_WM_BLUR_BEHIND_REGION,
     }
 }
 
@@ -1078,6 +1079,46 @@ impl X11WindowStatePtr {
         bounds.map(|b| b.scale(scale_factor))
     }
 
+    /// LOGMAN PATCH: keep KWin's blur-behind region in step with the window.
+    ///
+    /// On X11 KWin blurs whatever `_KDE_NET_WM_BLUR_BEHIND_REGION` covers —
+    /// the Wayland backend's `org_kde_kwin_blur` has no X11 counterpart in
+    /// upstream gpui, so a `Blurred` background appearance did nothing here.
+    /// The region is the surface minus the client-side shadow band
+    /// (`last_insets`), in device pixels; blurring the whole surface would
+    /// drag the blur out under the transparent shadow. Callers re-run this
+    /// whenever any input changes: the appearance, the insets, or the size.
+    fn update_blur_region(&self, state: &X11WindowState) {
+        if state.background_appearance == WindowBackgroundAppearance::Blurred {
+            let size = state.content_size();
+            let [left, right, top, bottom] = state.last_insets;
+            let region = [
+                left,
+                top,
+                (size.width.0 as u32).saturating_sub(left + right),
+                (size.height.0 as u32).saturating_sub(top + bottom),
+            ];
+            check_reply(
+                || "X11 ChangeProperty for _KDE_NET_WM_BLUR_BEHIND_REGION failed.",
+                self.xcb.change_property32(
+                    xproto::PropMode::REPLACE,
+                    self.x_window,
+                    state.atoms._KDE_NET_WM_BLUR_BEHIND_REGION,
+                    xproto::AtomEnum::CARDINAL,
+                    &region,
+                ),
+            )
+            .log_err();
+        } else {
+            check_reply(
+                || "X11 DeleteProperty for _KDE_NET_WM_BLUR_BEHIND_REGION failed.",
+                self.xcb
+                    .delete_property(self.x_window, state.atoms._KDE_NET_WM_BLUR_BEHIND_REGION),
+            )
+            .log_err();
+        }
+    }
+
     pub fn set_bounds(&self, bounds: Bounds<i32>) -> anyhow::Result<()> {
         let mut resize_args = None;
         let is_resize;
@@ -1103,6 +1144,10 @@ impl X11WindowStatePtr {
                     DevicePixels(gpu_size.height as i32),
                 ));
                 resize_args = Some((state.content_size(), state.scale_factor));
+                // LOGMAN PATCH: see `update_blur_region`.
+                if is_resize {
+                    self.update_blur_region(&state);
+                }
             }
             if let Some(value) = state.last_sync_counter.take() {
                 check_reply(
@@ -1388,6 +1433,8 @@ impl PlatformWindow for X11Window {
         state.background_appearance = background_appearance;
         let transparent = state.is_transparent();
         state.renderer.update_transparency(transparent);
+        // LOGMAN PATCH: see `update_blur_region`.
+        self.0.update_blur_region(&state);
     }
 
     fn minimize(&self) {
@@ -1604,6 +1651,8 @@ impl PlatformWindow for X11Window {
                 ),
             )
             .log_err();
+            // LOGMAN PATCH: see `update_blur_region`.
+            self.0.update_blur_region(&state);
         }
     }
 
