@@ -764,11 +764,21 @@ impl X11Client {
                 let mut state = self.0.borrow_mut();
 
                 if atom == state.atoms.WM_DELETE_WINDOW {
+                    // LOGMAN PATCH: release the client borrow before the close
+                    // callbacks run. Both `should_close` and `close` re-enter
+                    // the app, and an app that quits from its window-closed
+                    // observer immediately calls back into this same RefCell
+                    // (`Platform::quit` → `with_common`), which panicked with
+                    // "RefCell already borrowed". A WM_DELETE_WINDOW message
+                    // is a WM_PROTOCOLS message, never an XdndEnter, so
+                    // returning early skips nothing below.
+                    drop(state);
                     // window "x" button clicked by user
                     if window.should_close() {
                         // Rest of the close logic is handled in drop_window()
                         window.close();
                     }
+                    return Some(());
                 } else if atom == state.atoms._NET_WM_SYNC_REQUEST {
                     window.state.borrow_mut().last_sync_counter =
                         Some(x11rb::protocol::sync::Int64 {

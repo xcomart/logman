@@ -277,7 +277,13 @@ pub struct X11WindowState {
 
 impl X11WindowState {
     fn is_transparent(&self) -> bool {
-        self.background_appearance != WindowBackgroundAppearance::Opaque
+        // LOGMAN PATCH: client-side decorations need the surface to keep its
+        // alpha channel — the drop-shadow band the app paints around the
+        // window is transparent — exactly as the Wayland backend already
+        // reckons in its own `is_transparent`. Without the first arm the
+        // renderer stays opaque and the band composites as solid black.
+        self.decorations == WindowDecorations::Client
+            || self.background_appearance != WindowBackgroundAppearance::Opaque
     }
 }
 
@@ -1650,11 +1656,25 @@ impl PlatformWindow for X11Window {
             }
         }
 
+        // LOGMAN PATCH: run the appearance-changed callback on the next
+        // run-loop turn, not synchronously. `request_decorations` is called
+        // from inside app updates — logman flips decorations when its
+        // title-bar setting is saved — and the save lands via a mouse click,
+        // which `handle_input` above dispatches while holding
+        // `self.0.callbacks` borrowed; borrowing it again here panicked with
+        // "RefCell already borrowed". The callback also re-enters the app
+        // (`handle.update`), which the deferral makes safe at the same time.
+        let executor = state.executor.clone();
         drop(state);
-        let mut callbacks = self.0.callbacks.borrow_mut();
-        if let Some(appearance_changed) = callbacks.appearance_changed.as_mut() {
-            appearance_changed();
-        }
+        let this_ptr = self.0.clone();
+        executor
+            .spawn(async move {
+                let mut callbacks = this_ptr.callbacks.borrow_mut();
+                if let Some(appearance_changed) = callbacks.appearance_changed.as_mut() {
+                    appearance_changed();
+                }
+            })
+            .detach();
     }
 
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
