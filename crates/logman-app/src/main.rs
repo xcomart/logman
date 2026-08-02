@@ -2342,12 +2342,16 @@ fn render_resize_edges(tiling: gpui::Tiling) -> Vec<AnyElement> {
     }
     if !tiling.left {
         handles.push(
-            handle("resize-left", CursorStyle::ResizeLeftRight, ResizeEdge::Left)
-                .left_0()
-                .top(inset(tiling.top))
-                .bottom(inset(tiling.bottom))
-                .w(strip)
-                .into_any_element(),
+            handle(
+                "resize-left",
+                CursorStyle::ResizeLeftRight,
+                ResizeEdge::Left,
+            )
+            .left_0()
+            .top(inset(tiling.top))
+            .bottom(inset(tiling.bottom))
+            .w(strip)
+            .into_any_element(),
         );
     }
     if !tiling.right {
