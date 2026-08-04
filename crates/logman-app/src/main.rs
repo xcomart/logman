@@ -20,6 +20,7 @@ mod app_settings;
 mod caption;
 mod connection;
 mod file_panel;
+mod files;
 mod i18n;
 mod icons;
 // The pane tree is written as a self-contained data structure with its own
@@ -1056,7 +1057,11 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Shows or hides the remote file panel.
+    /// Shows or hides the file panel.
+    ///
+    /// One command whichever session is active: a remote one browses the server
+    /// over SFTP and a local one browses this computer, so there is always a
+    /// filesystem behind the panel and never a reason to refuse to open it.
     fn toggle_file_panel(&mut self, cx: &mut Context<Self>) {
         self.panel_open = !self.panel_open;
         cx.notify();
@@ -1294,8 +1299,9 @@ impl Workspace {
         let theme = theme(cx);
         let custom = draws_own_titlebar(self.titlebar, window);
         let menu = (!cfg!(target_os = "macos")).then(|| self.render_app_menu(cx));
-        // Nothing to browse without a session, so the toggle goes with the
-        // panel it would open.
+        // Nothing to browse without a session, so the toggle goes with the panel
+        // it would open. A session of either kind has a filesystem behind it —
+        // the server's, or this computer's — so nothing finer is asked here.
         let toggle = (!self.tabs.is_empty()).then(|| {
             let open = self.panel_open;
             let hover = theme.surface_hover;

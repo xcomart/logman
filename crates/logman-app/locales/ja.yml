@@ -39,10 +39,10 @@ tab:
 
 files:
   title: リモートファイル
-  toggle: リモートファイルパネル
-  tip_toggle: "リモートファイル (%{shortcut})"
+  toggle: ファイルパネル
+  tip_toggle: "ファイル (%{shortcut})"
   mac:
-    toggle: リモートファイルパネル
+    toggle: ファイルパネル
   no_session: 開いているセッションがありません。
   not_connected: セッションが接続されるとリモートファイルが表示されます。
   loading: 読み込み中…
@@ -88,6 +88,23 @@ files:
   created: "%{name} を作成しました。"
   invalid_name: この名前は使用できません。
   failed: "リモートファイル: %{error}"
+  local:
+    title: ローカルファイル
+    not_connected: シェルが起動するとファイルが表示されます。
+    select_copy_in: ここにコピー
+    select_copy_in_folder: フォルダーをここにコピー
+    menu_copy_out: 別のフォルダーにコピー…
+    menu_copy_in: ファイルをここにコピー…
+    menu_copy_in_folder: フォルダーをここにコピー…
+    tip_copy_in: ファイルをここにコピー
+    tip_copy_in_folder: フォルダーをここにコピー
+    tip_copy_out: 別のフォルダーにコピー
+    copying: "%{name} をコピー中… %{percent}%"
+    copied: "%{name} をコピーしました。"
+    copied_many: "%{count} 個のファイルをコピーしました。"
+    copied_tree: "%{folders} 個のフォルダーに %{files} 個のファイルをコピーしました。"
+    nothing_to_copy: コピーできるものを読み取れませんでした。
+    failed: "ローカルファイル: %{error}"
 
 empty:
   hint: "%{shortcut} を押してホストに接続します。"

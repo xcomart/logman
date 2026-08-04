@@ -45,8 +45,9 @@ logman-term.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
-# Only for the remote file panel's save dialog, which opens in the user's home
-# directory; the configuration paths themselves live in `logman-core`.
+# Only for the file panel: the save dialog opens in the user's home directory,
+# and a local session's browsing starts there. The configuration paths
+# themselves live in `logman-core`.
 directories.workspace = true
 russh.workspace = true
 log.workspace = true

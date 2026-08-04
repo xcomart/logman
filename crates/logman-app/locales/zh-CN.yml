@@ -39,10 +39,10 @@ tab:
 
 files:
   title: 远程文件
-  toggle: 远程文件面板
-  tip_toggle: "远程文件 (%{shortcut})"
+  toggle: 文件面板
+  tip_toggle: "文件 (%{shortcut})"
   mac:
-    toggle: 远程文件面板
+    toggle: 文件面板
   no_session: 没有打开的会话。
   not_connected: 会话连接后将显示远程文件。
   loading: 正在加载…
@@ -88,6 +88,23 @@ files:
   created: "已创建 %{name}。"
   invalid_name: 无法使用该名称。
   failed: "远程文件：%{error}"
+  local:
+    title: 本地文件
+    not_connected: Shell 启动后将显示文件。
+    select_copy_in: 复制到此处
+    select_copy_in_folder: 将文件夹复制到此处
+    menu_copy_out: 复制到…
+    menu_copy_in: 将文件复制到此处…
+    menu_copy_in_folder: 将文件夹复制到此处…
+    tip_copy_in: 将文件复制到此处
+    tip_copy_in_folder: 将文件夹复制到此处
+    tip_copy_out: 复制到其他文件夹
+    copying: "正在复制 %{name}… %{percent}%"
+    copied: "已复制 %{name}。"
+    copied_many: "已复制 %{count} 个文件。"
+    copied_tree: "已复制 %{folders} 个文件夹中的 %{files} 个文件。"
+    nothing_to_copy: 没有读取到可复制的内容。
+    failed: "本地文件：%{error}"
 
 empty:
   hint: "按 %{shortcut} 连接到主机。"

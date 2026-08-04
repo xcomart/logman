@@ -68,26 +68,34 @@ tab:
   tip_list: All tabs
   tip_new: "New session (%{shortcut})"
 
-# The remote file panel: the SFTP browser to the left of the terminal.
+# The file panel: the browser to the left of the terminal. Over an SSH session
+# it browses the server through SFTP; over a session running a shell on this
+# computer it browses this computer, and the keys below are worded for the
+# former. The `local:` block near the end holds the twins of the ones that
+# would be wrong for the latter — see the comment there.
 #
 # `%{name}` is a file name, `%{path}` a local path and `%{error}` the sentence
-# the SFTP layer produced; all three are values rather than words and stay as
-# they are. Only the sentence framing `%{error}` is translated, the same policy
-# the connection and session messages follow. `%{percent}`, `%{count}`,
+# the filesystem layer produced; all three are values rather than words and stay
+# as they are. Only the sentence framing `%{error}` is translated, the same
+# policy the connection and session messages follow. `%{percent}`, `%{count}`,
 # `%{files}` and `%{folders}` are plain numbers.
 files:
   title: Remote files
   # The row of the in-app dropdown menu that shows and hides the panel, and its
   # macOS menu bar counterpart. They differ only in capitalisation in English,
   # like the `menu` pair above.
-  toggle: Remote files
+  #
+  # Deliberately neutral, unlike `title`: there is one panel and one command
+  # for it whichever session happens to be active, so this names the panel
+  # rather than what is currently in it. The same goes for the two keys below.
+  toggle: Files
   # Hover label of the toolbar button that shows and hides the panel. It
   # carries the shortcut because the dropdown row for the same command does,
   # and on macOS — where there is no in-app menu — the tooltip is the only
   # place the binding can be read at all.
-  tip_toggle: "Remote files (%{shortcut})"
+  tip_toggle: "Files (%{shortcut})"
   mac:
-    toggle: Remote Files
+    toggle: Files
   no_session: No session is open.
   not_connected: The remote files appear once the session is connected.
   loading: Loading…
@@ -177,6 +185,47 @@ files:
   # directory entirely. Shared by both fields, since it is the same refusal.
   invalid_name: That name cannot be used.
   failed: "Remote files: %{error}"
+  # Twins of the keys above, for a session whose filesystem is this computer's
+  # own. Only the keys whose English says remote, server, upload or download
+  # have one; everything else — `loading`, `empty`, the delete question, the
+  # naming fields, `transfer_busy` — describes the same act on either side and
+  # is shared, so a translation writes it once.
+  #
+  # The vocabulary is copying, not transferring: putting a file into a
+  # directory on the disk it is already on is not an upload, and calling it one
+  # would have the panel misdescribe the machine the user is sitting at.
+  #
+  # Three download-side keys are deliberately *not* twinned. `select_download_
+  # folder` ("Save"), `downloaded` and `downloaded_tree` ("Saved to %{path}.")
+  # say what happened without saying where the bytes came from, and are already
+  # true of a copy out of either kind of filesystem.
+  local:
+    title: Local files
+    # The shell, not a connection: there is no host to reach, so nothing here
+    # can be waiting to connect.
+    not_connected: The files appear once the shell has started.
+    # Confirmation buttons of the two platform pickers, as above.
+    select_copy_in: Copy files here
+    select_copy_in_folder: Copy folder here
+    # Rows of the menu a right-click opens, ellipsis included: each of them
+    # still asks something before it acts.
+    menu_copy_out: Copy to…
+    menu_copy_in: Copy files here…
+    menu_copy_in_folder: Copy folder here…
+    # Hover labels of the toolbar buttons: the name of the command, and no
+    # ellipsis, exactly as with the `tip_` keys above.
+    tip_copy_in: Copy files here
+    tip_copy_in_folder: Copy folder here
+    tip_copy_out: Copy to another folder
+    # One line for both directions. Copying a file into the listed directory
+    # and copying one out of it are the same act when both ends are this
+    # computer, and nothing in the sentence would tell them apart.
+    copying: "Copying %{name}… %{percent}%"
+    copied: "Copied %{name}."
+    copied_many: "Copied %{count} files."
+    copied_tree: "Copied %{files} files in %{folders} folders."
+    nothing_to_copy: Nothing could be read to copy.
+    failed: "Local files: %{error}"
 
 # The placeholder shown while no session is open.
 empty:
