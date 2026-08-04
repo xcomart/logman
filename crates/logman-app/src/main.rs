@@ -52,7 +52,7 @@ use gpui::{
     AnyElement, App, Application, Bounds, Context, Div, DragMoveEvent, ElementId, Entity, EntityId,
     FocusHandle, Focusable, KeyBinding, Menu, MenuItem, MouseButton, MouseUpEvent, Pixels, Point,
     ScrollHandle, SharedString, Stateful, Subscription, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, div, img,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, div,
     prelude::*, px, relative, size,
 };
 use logman_core::{SessionProfile, TitlebarStyle, WindowSettings};
@@ -1394,27 +1394,19 @@ impl Workspace {
         // it in two places at once.
         //
         // Windows and the GTK/KDE captions set an application icon beside the
-        // title and macOS does not, so the icon follows that split. It is a
-        // colour image, so `img` rather than `svg`: the latter keeps only an
-        // icon's coverage and would paint the mark as one flat tint.
+        // title and macOS does not, so the mark follows that split.
         //
         // Nothing here is interactive, and — unlike every control in this row —
         // nothing here occludes either. The name and the mark are part of the
         // *empty* title bar as far as the window is concerned, so a press on
         // them has to reach the drag area underneath and move the window.
         let title = custom.then(|| {
-            // `Resource::Embedded` spelled out rather than left to `img`'s
-            // `From<&str>`: that conversion asks the http `Uri` parser first,
-            // and a bare file name parses as a valid relative URI — the icon
-            // would be "fetched" instead of read from the asset source, and
-            // the fetch can only fail.
-            let icon = (!cfg!(target_os = "macos")).then(|| {
-                img(gpui::ImageSource::Resource(gpui::Resource::Embedded(
-                    icons::APP_ICON.into(),
-                )))
-                .size(px(16.))
-                .flex_none()
-            });
+            // Tinted like the other icons of the row rather than painted in the
+            // shipped icon's own colours: that icon draws its mark on a dark
+            // tile, which a dark theme's title bar swallowed whole. See
+            // [`icons::LOGO`].
+            let icon =
+                (!cfg!(target_os = "macos")).then(|| icons::icon(icons::LOGO, px(16.), theme.icon));
             div()
                 .flex()
                 .flex_row()
