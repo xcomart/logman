@@ -1,20 +1,27 @@
 //! Connection dialog: saved profiles and the form used to open a session.
 //!
-//! The dialog is the only place in the application that touches
-//! [`ProfileStore`] and [`SecretStore`]: by the time it emits
-//! [`ConnectionDialogEvent::Connect`] the profile is on disk, the secret is in
-//! the OS keychain (when the user asked for that), and the credentials have
-//! been resolved into a ready-to-use [`SshAuth`].
+//! This module is the only place in the application that touches
+//! [`ProfileStore`] and [`SecretStore`], and every credential the shell ever
+//! connects with is resolved here, by one of two entry points:
+//!
+//! * [`ConnectionDialog`] turns what the user typed into a ready-to-use
+//!   [`SshAuth`]. By the time it emits [`ConnectionDialogEvent::Connect`] the
+//!   profile is on disk and the secret is in the OS keychain, when the user
+//!   asked for that.
+//! * [`saved_credentials`] answers the question the dialog cannot: for a
+//!   profile the user merely clicked, is everything a connection needs already
+//!   stored? When it is, the shell opens the session and the dialog never
+//!   appears.
 //!
 //! # Handling of secrets
 //!
-//! Passwords and key passphrases live only in the masked [`TextInput`]s and in
-//! the [`SshAuth`] handed to the caller. They are never logged, never rendered
-//! unmasked, and never included in a status message. [`ConnectionDialog`]
-//! deliberately does not implement `Debug` so that a stray `{:?}` cannot leak
-//! them either.
+//! Passwords and key passphrases live only in the masked [`TextInput`]s, in the
+//! keychain, and in the [`SshAuth`] handed to the caller. They are never
+//! logged, never rendered unmasked, and never included in a status message.
+//! [`ConnectionDialog`] deliberately does not implement `Debug` so that a stray
+//! `{:?}` cannot leak them either, and [`SshAuth`]'s own `Debug` redacts them.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Once;
 
 use gpui::{
@@ -1862,4 +1869,291 @@ fn browse_for_key(dialog: Entity<ConnectionDialog>, cx: &mut App) {
             .ok();
     })
     .detach();
+}
+
+/// Credentials for `profile` that need nothing from the user, if there are any.
+///
+/// This is what lets a click on a saved profile open a session directly rather
+/// than a dialog pre-filled with a profile the user already finished filling in
+/// once. `None` means "ask": the caller should fall back to opening the dialog
+/// on this profile.
+///
+/// `None` is also the answer whenever anything is uncertain — an unreadable
+/// keychain, a missing key file, an encrypted key with no remembered
+/// passphrase. Erring that way costs the user only the dialog they used to get
+/// anyway, whereas erring the other way strands them in a session tab that
+/// failed to authenticate and offers nowhere to type the missing secret in.
+///
+/// Runs on the UI thread and blocks it: reading the keychain is a synchronous
+/// platform call, and a key profile also reads and parses the key file. Both
+/// are what the dialog's own Connect button already does on click, so the cost
+/// is not new — it has only moved one click earlier.
+pub fn saved_credentials(profile: &SessionProfile) -> Option<SshAuth> {
+    // A secret is only ever written for a profile that asked for one, so an
+    // unticked `save_secret` means there is nothing to look up — and asking
+    // anyway would raise the platform's keychain-unlock prompt for nothing.
+    let stored = profile
+        .save_secret
+        .then(|| stored_secret(profile.id))
+        .flatten();
+
+    match decide_credentials(&profile.auth, stored, key_opens_unlocked) {
+        Credentials::Ready(auth) => Some(auth),
+        Credentials::Ask => None,
+    }
+}
+
+/// Whether a profile can be connected without asking the user anything.
+///
+/// A named decision rather than an `Option<SshAuth>` so that the two outcomes
+/// read as what they are at the point they are made: [`Credentials::Ask`] is
+/// not "there are no credentials", it is "the dialog has to open".
+#[derive(Debug)]
+enum Credentials {
+    /// Everything the transport needs is already known; connect straight away.
+    Ready(SshAuth),
+    /// Something is missing, unreadable or locked: open the dialog.
+    Ask,
+}
+
+/// Decide whether what is known about a profile is enough to connect with.
+///
+/// Split out from [`saved_credentials`] so the policy can be exercised without
+/// a keychain, a filesystem or a real key to parse. `stored_secret` is the
+/// profile's remembered password or passphrase, already reduced to `None` when
+/// it is absent, empty or unreadable; `key_opens_unlocked` is consulted only in
+/// the single case that needs it, so a passphrase that is already known never
+/// pays for a key parse.
+fn decide_credentials<F>(
+    method: &AuthMethod,
+    stored_secret: Option<String>,
+    key_opens_unlocked: F,
+) -> Credentials
+where
+    F: FnOnce(&Path) -> bool,
+{
+    match method {
+        // Password authentication has no unauthenticated form to fall back on:
+        // without the password there is simply nothing to attempt.
+        AuthMethod::Password => match stored_secret {
+            Some(password) => Credentials::Ready(SshAuth::Password(password)),
+            None => Credentials::Ask,
+        },
+        AuthMethod::PublicKey { key_path } => {
+            if let Some(passphrase) = stored_secret {
+                return Credentials::Ready(SshAuth::PrivateKeyFile {
+                    path: key_path.clone(),
+                    passphrase: Some(passphrase),
+                });
+            }
+            // No remembered passphrase means one of two opposite things: either
+            // the key needs none and is ready to use, or it needs one that only
+            // the user can supply. The file itself is the only place that
+            // answer exists.
+            if key_opens_unlocked(key_path) {
+                Credentials::Ready(SshAuth::PrivateKeyFile {
+                    path: key_path.clone(),
+                    passphrase: None,
+                })
+            } else {
+                Credentials::Ask
+            }
+        }
+        // `logman-ssh` has no agent transport yet, so there is nothing to
+        // connect with; the dialog is where that is explained.
+        AuthMethod::Agent => Credentials::Ask,
+    }
+}
+
+/// The profile's remembered secret, or `None` when there is none to be had.
+///
+/// An empty entry counts as absent: it authenticates nothing, and connecting
+/// with it would only produce a failed session. A keychain that refuses to
+/// answer is treated the same way and logged, because the recovery — open the
+/// dialog, type the secret — is identical either way, and the reason belongs in
+/// the log rather than in the user's path. The error comes from the store's own
+/// failure to read and never carries the secret.
+fn stored_secret(id: Uuid) -> Option<String> {
+    match SecretStore::get(id) {
+        Ok(secret) => secret.filter(|secret| !secret.is_empty()),
+        Err(err) => {
+            log::warn!("no stored secret for {id}, so the dialog will ask: {err:#}");
+            None
+        }
+    }
+}
+
+/// Whether the private key at `path` can be read and decoded with no passphrase.
+///
+/// Whether an OpenSSH key is encrypted is not visible without decoding it,
+/// which is exactly what the session worker would do a moment later; doing it
+/// once here, on a file of at most a few kilobytes, is nothing next to opening
+/// the connection it decides. A key that cannot be read at all — moved,
+/// renamed, or no longer readable — answers `false` too, which routes the user
+/// to the dialog, where the path can be corrected.
+///
+/// No passphrase is passed in, so nothing secret can reach the log line.
+fn key_opens_unlocked(path: &Path) -> bool {
+    match russh::keys::load_secret_key(path, None) {
+        Ok(_) => true,
+        Err(err) => {
+            log::debug!("the key at {} needs the dialog: {err}", path.display());
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::fs;
+
+    use russh::keys::ssh_key::rand_core::{TryCryptoRng, TryRng};
+    use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey};
+
+    use super::*;
+
+    /// Panics if consulted: the passphrase-is-known paths must not touch disk.
+    fn never_probed(_: &Path) -> bool {
+        panic!("the key file was read even though the passphrase was known");
+    }
+
+    /// Deterministic stand-in for a system RNG, for building test keys only.
+    ///
+    /// `ssh_key` needs *an* RNG to generate a key and to salt the KDF of an
+    /// encrypted one. The tests do not care that the bytes are unpredictable,
+    /// only that they exist, so an xorshift generator keeps them free of a
+    /// randomness dependency and keeps their failures reproducible. It is
+    /// cryptographically worthless and confined to `#[cfg(test)]`.
+    struct TestRng(u64);
+
+    impl TryRng for TestRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+            Ok(self.try_next_u64()? as u32)
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            Ok(self.0)
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+            for chunk in dst.chunks_mut(8) {
+                let word = self.try_next_u64()?.to_le_bytes();
+                chunk.copy_from_slice(&word[..chunk.len()]);
+            }
+            Ok(())
+        }
+    }
+
+    impl TryCryptoRng for TestRng {}
+
+    /// The password of a [`Credentials::Ready`] password decision.
+    fn ready_password(credentials: Credentials) -> String {
+        match credentials {
+            Credentials::Ready(SshAuth::Password(password)) => password,
+            other => panic!("expected a ready password, got {other:?}"),
+        }
+    }
+
+    /// The passphrase of a [`Credentials::Ready`] key decision.
+    fn ready_passphrase(credentials: Credentials) -> Option<String> {
+        match credentials {
+            Credentials::Ready(SshAuth::PrivateKeyFile { passphrase, .. }) => passphrase,
+            other => panic!("expected a ready key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_remembered_password_connects_without_asking() {
+        let decision = decide_credentials(
+            &AuthMethod::Password,
+            Some("hunter2".to_owned()),
+            never_probed,
+        );
+        assert_eq!(ready_password(decision), "hunter2");
+    }
+
+    #[test]
+    fn a_password_profile_with_nothing_remembered_asks() {
+        // `None` is what both a profile that never asked to remember its
+        // password and one whose keychain entry is empty arrive as.
+        let decision = decide_credentials(&AuthMethod::Password, None, never_probed);
+        assert!(matches!(decision, Credentials::Ask));
+    }
+
+    #[test]
+    fn a_remembered_passphrase_connects_without_reading_the_key() {
+        let method = AuthMethod::PublicKey {
+            key_path: PathBuf::from("/home/me/.ssh/id_ed25519"),
+        };
+        let decision = decide_credentials(&method, Some("open sesame".to_owned()), never_probed);
+        assert_eq!(ready_passphrase(decision).as_deref(), Some("open sesame"));
+    }
+
+    #[test]
+    fn an_unencrypted_key_connects_with_no_passphrase_at_all() {
+        let method = AuthMethod::PublicKey {
+            key_path: PathBuf::from("/home/me/.ssh/id_ed25519"),
+        };
+        let decision = decide_credentials(&method, None, |_| true);
+        assert_eq!(ready_passphrase(decision), None);
+    }
+
+    #[test]
+    fn an_encrypted_key_with_no_remembered_passphrase_asks() {
+        // The case the whole probe exists for: connecting anyway would fail to
+        // load the key in a tab that cannot ask for the passphrase.
+        let method = AuthMethod::PublicKey {
+            key_path: PathBuf::from("/home/me/.ssh/id_ed25519"),
+        };
+        let decision = decide_credentials(&method, None, |_| false);
+        assert!(matches!(decision, Credentials::Ask));
+    }
+
+    #[test]
+    fn agent_authentication_always_asks() {
+        // Nothing can be remembered for a method the transport cannot perform.
+        let decision = decide_credentials(&AuthMethod::Agent, None, never_probed);
+        assert!(matches!(decision, Credentials::Ask));
+    }
+
+    #[test]
+    fn the_probe_tells_an_encrypted_key_from_a_plain_one() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut rng = TestRng(0x5eed_1eaf_c0ff_ee01);
+        let plain = PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("a generated key");
+
+        let plain_path = dir.path().join("id_ed25519");
+        fs::write(
+            &plain_path,
+            plain
+                .to_openssh(LineEnding::LF)
+                .expect("an OpenSSH key")
+                .as_bytes(),
+        )
+        .expect("the key file is written");
+        assert!(key_opens_unlocked(&plain_path));
+
+        let locked_path = dir.path().join("id_ed25519_locked");
+        let locked = plain
+            .encrypt(&mut rng, "open sesame")
+            .expect("an encrypted key");
+        fs::write(
+            &locked_path,
+            locked
+                .to_openssh(LineEnding::LF)
+                .expect("an OpenSSH key")
+                .as_bytes(),
+        )
+        .expect("the key file is written");
+        assert!(!key_opens_unlocked(&locked_path));
+
+        // A path with no key behind it is the third way the probe says no.
+        assert!(!key_opens_unlocked(&dir.path().join("absent")));
+    }
 }
