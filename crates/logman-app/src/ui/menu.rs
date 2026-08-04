@@ -432,7 +432,10 @@ impl RenderOnce for MenuButton {
                 as DismissHandler
         });
 
-        let tint = if open { theme.text } else { theme.text_muted };
+        // A trigger only ever wears a mark — an icon, or the hamburger glyph
+        // standing in for one — never a word, so its resting colour is the
+        // theme's icon tint rather than the muted text a label would take.
+        let tint = if open { theme.text } else { theme.icon };
         let hover_tint = theme.text;
         // An SVG takes its colour from its own `text_color`, which — unlike a
         // glyph's — does not inherit from the button, so the open and hover
