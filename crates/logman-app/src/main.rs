@@ -20,6 +20,7 @@ mod app_settings;
 mod caption;
 mod connection;
 mod file_panel;
+mod files;
 mod i18n;
 mod icons;
 // The pane tree is written as a self-contained data structure with its own
@@ -51,7 +52,7 @@ use gpui::{
     AnyElement, App, Application, Bounds, Context, Div, DragMoveEvent, ElementId, Entity, EntityId,
     FocusHandle, Focusable, KeyBinding, Menu, MenuItem, MouseButton, MouseUpEvent, Pixels, Point,
     ScrollHandle, SharedString, Stateful, Subscription, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, div, img,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, div,
     prelude::*, px, relative, size,
 };
 use logman_core::{SessionProfile, TitlebarStyle, WindowSettings};
@@ -386,6 +387,11 @@ impl Workspace {
                         dialog.update(cx, |dialog, cx| dialog.close(cx));
                         this.open_session(profile.clone(), auth.clone(), window, cx);
                     }
+                    #[cfg(unix)]
+                    ConnectionDialogEvent::ConnectLocal => {
+                        dialog.update(cx, |dialog, cx| dialog.close(cx));
+                        this.open_local_session(window, cx);
+                    }
                     ConnectionDialogEvent::Dismissed => {
                         dialog.update(cx, |dialog, cx| dialog.close(cx));
                         this.focus_active(window, cx);
@@ -530,6 +536,35 @@ impl Workspace {
     ) {
         log::info!("opening a session to {}", profile.label());
         let session = cx.new(|cx| Session::new(profile, auth, cx));
+        self.adopt_session(session, window, cx);
+    }
+
+    /// Opens a shell on this machine and makes its tab active.
+    ///
+    /// Takes nothing, because a local session is configured by nothing: the
+    /// shell is the user's login shell and everything else comes from the
+    /// global terminal settings.
+    #[cfg(unix)]
+    fn open_local_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session = cx.new(Session::new_local);
+        log::info!(
+            "opening a local session running {}",
+            session.read(cx).label()
+        );
+        self.adopt_session(session, window, cx);
+    }
+
+    /// Gives a freshly built session a view, a pane and a tab of its own, and
+    /// activates that tab.
+    ///
+    /// Everything past the constructor is identical for a remote and a local
+    /// session, which is the whole point of them being one type.
+    fn adopt_session(
+        &mut self,
+        session: Entity<Session>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let view = cx.new(|cx| TerminalView::new(session.clone(), window, cx));
         let leaf = self.new_pane(view, session, window, cx);
 
@@ -984,9 +1019,33 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Shows the connection dialog pre-filled from a saved profile.
-    fn open_profile(&mut self, profile: &SessionProfile, cx: &mut Context<Self>) {
+    /// Opens a saved profile, showing the connection dialog only if it has to.
+    ///
+    /// A profile the user already finished configuring — a remembered password,
+    /// or a key that needs no passphrase — carries everything the transport
+    /// needs, so presenting the dialog again would be one form to dismiss
+    /// before a session the user has already asked for. Those profiles connect
+    /// on the click.
+    ///
+    /// The dialog still opens, pre-filled, whenever anything would have to be
+    /// typed or corrected: a password that was never remembered, an encrypted
+    /// key with no stored passphrase, a key file that has gone missing, or the
+    /// agent method, which the transport does not implement.
+    ///
+    /// Deciding that reads the OS keychain, and possibly the key file,
+    /// synchronously on the UI thread — the same work the dialog's Connect
+    /// button does, one click earlier.
+    fn open_profile(
+        &mut self,
+        profile: &SessionProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_overlays(cx);
+        if let Some(auth) = connection::saved_credentials(profile) {
+            self.open_session(profile.clone(), auth, window, cx);
+            return;
+        }
         let id = profile.id;
         self.dialog
             .update(cx, |dialog, cx| dialog.open_profile(id, cx));
@@ -1007,7 +1066,11 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Shows or hides the remote file panel.
+    /// Shows or hides the file panel.
+    ///
+    /// One command whichever session is active: a remote one browses the server
+    /// over SFTP and a local one browses this computer, so there is always a
+    /// filesystem behind the panel and never a reason to refuse to open it.
     fn toggle_file_panel(&mut self, cx: &mut Context<Self>) {
         self.panel_open = !self.panel_open;
         cx.notify();
@@ -1245,8 +1308,9 @@ impl Workspace {
         let theme = theme(cx);
         let custom = draws_own_titlebar(self.titlebar, window);
         let menu = (!cfg!(target_os = "macos")).then(|| self.render_app_menu(cx));
-        // Nothing to browse without a session, so the toggle goes with the
-        // panel it would open.
+        // Nothing to browse without a session, so the toggle goes with the panel
+        // it would open. A session of either kind has a filesystem behind it —
+        // the server's, or this computer's — so nothing finer is asked here.
         let toggle = (!self.tabs.is_empty()).then(|| {
             let open = self.panel_open;
             let hover = theme.surface_hover;
@@ -1284,7 +1348,7 @@ impl Workspace {
                     icons::icon(
                         icons::PANEL,
                         px(16.),
-                        if open { theme.accent } else { theme.text_muted },
+                        if open { theme.accent } else { theme.icon },
                     )
                     .group_hover(PANEL_TOGGLE_GROUP, move |style| {
                         style.text_color(hover_text)
@@ -1330,27 +1394,19 @@ impl Workspace {
         // it in two places at once.
         //
         // Windows and the GTK/KDE captions set an application icon beside the
-        // title and macOS does not, so the icon follows that split. It is a
-        // colour image, so `img` rather than `svg`: the latter keeps only an
-        // icon's coverage and would paint the mark as one flat tint.
+        // title and macOS does not, so the mark follows that split.
         //
         // Nothing here is interactive, and — unlike every control in this row —
         // nothing here occludes either. The name and the mark are part of the
         // *empty* title bar as far as the window is concerned, so a press on
         // them has to reach the drag area underneath and move the window.
         let title = custom.then(|| {
-            // `Resource::Embedded` spelled out rather than left to `img`'s
-            // `From<&str>`: that conversion asks the http `Uri` parser first,
-            // and a bare file name parses as a valid relative URI — the icon
-            // would be "fetched" instead of read from the asset source, and
-            // the fetch can only fail.
-            let icon = (!cfg!(target_os = "macos")).then(|| {
-                img(gpui::ImageSource::Resource(gpui::Resource::Embedded(
-                    icons::APP_ICON.into(),
-                )))
-                .size(px(16.))
-                .flex_none()
-            });
+            // Tinted like the other icons of the row rather than painted in the
+            // shipped icon's own colours: that icon draws its mark on a dark
+            // tile, which a dark theme's title bar swallowed whole. See
+            // [`icons::LOGO`].
+            let icon =
+                (!cfg!(target_os = "macos")).then(|| icons::icon(icons::LOGO, px(16.), theme.icon));
             div()
                 .flex()
                 .flex_row()
@@ -1773,8 +1829,10 @@ impl Workspace {
                 Button::new(id, label)
                     .variant(ButtonVariant::Ghost)
                     .full_width(true)
-                    .on_click(move |_, _window, cx| {
-                        this.update(cx, |workspace, cx| workspace.open_profile(&profile, cx));
+                    .on_click(move |_, window, cx| {
+                        this.update(cx, |workspace, cx| {
+                            workspace.open_profile(&profile, window, cx)
+                        });
                     })
             });
 
@@ -1792,6 +1850,7 @@ impl Workspace {
                 .children(rows)
         });
 
+        let local = self.render_empty_local(cx);
         let shortcut = ts!("empty.hint", shortcut = format!("{SHORTCUT_MODIFIER}+T"));
 
         div()
@@ -1829,8 +1888,51 @@ impl Workspace {
                         }),
                 ),
             )
+            .children(local)
             .children(saved)
             .into_any_element()
+    }
+
+    /// The empty state's local terminal button, or nothing at all on a platform
+    /// without one.
+    ///
+    /// Sits between the button that opens the connection dialog and the saved
+    /// profiles, and unlike either of them it opens a session outright rather
+    /// than a dialog: a local shell has no host, no credentials and nothing to
+    /// save, so there is nothing for a dialog to ask. The shell's name rides
+    /// along after a separator, exactly as a profile row carries its
+    /// `user@host`, so the button says which shell the press will start.
+    fn render_empty_local(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        #[cfg(not(unix))]
+        {
+            let _ = cx;
+            None
+        }
+
+        #[cfg(unix)]
+        {
+            let this = cx.entity();
+            let label = format!(
+                "{}  ·  {}",
+                ts!("connection.local.name"),
+                logman_pty::login_shell_name()
+            );
+            Some(
+                div()
+                    .w(px(320.))
+                    .child(
+                        Button::new("empty-local-session", label)
+                            .variant(ButtonVariant::Secondary)
+                            .full_width(true)
+                            .on_click(move |_, window, cx| {
+                                this.update(cx, |workspace, cx| {
+                                    workspace.open_local_session(window, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element(),
+            )
+        }
     }
 
     /// Renders the bottom status bar.
@@ -1844,7 +1946,7 @@ impl Workspace {
                     let session = tab.active_view().read(cx).session().read(cx);
                     let (cols, rows) = session.terminal().size();
                     (
-                        session.profile().label().into(),
+                        session.label(),
                         session.status().summary(),
                         format!("{cols}x{rows}").into(),
                     )

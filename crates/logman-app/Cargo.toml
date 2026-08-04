@@ -23,6 +23,13 @@ winresource = "0.1"
 windows = { version = "0.61", features = ["Win32_Graphics_Dwm"] }
 raw-window-handle = "0.6"
 
+# The local-shell transport, behind `src/session.rs`'s local target. Unix-only
+# because a pty is: `logman-pty` compiles to nothing at all elsewhere, and the
+# feature is gated on `cfg(unix)` all the way up to the connection dialog, so a
+# Windows build simply has no local terminal in it.
+[target.'cfg(unix)'.dependencies]
+logman-pty.workspace = true
+
 # Used only by `src/caption.rs`, to pin the AppKit title bar to the app theme.
 # `objc` matches the 0.2 gpui already links on macOS, so the Objective-C runtime
 # shim is shared rather than duplicated; `raw-window-handle` is how gpui hands
@@ -38,8 +45,9 @@ logman-term.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
-# Only for the remote file panel's save dialog, which opens in the user's home
-# directory; the configuration paths themselves live in `logman-core`.
+# Only for the file panel: the save dialog opens in the user's home directory,
+# and a local session's browsing starts there. The configuration paths
+# themselves live in `logman-core`.
 directories.workspace = true
 russh.workspace = true
 log.workspace = true

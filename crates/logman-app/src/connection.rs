@@ -1,28 +1,37 @@
 //! Connection dialog: saved profiles and the form used to open a session.
 //!
-//! The dialog is the only place in the application that touches
-//! [`ProfileStore`] and [`SecretStore`]: by the time it emits
-//! [`ConnectionDialogEvent::Connect`] the profile is on disk, the secret is in
-//! the OS keychain (when the user asked for that), and the credentials have
-//! been resolved into a ready-to-use [`SshAuth`].
+//! This module is the only place in the application that touches
+//! [`ProfileStore`] and [`SecretStore`], and every credential the shell ever
+//! connects with is resolved here, by one of two entry points:
+//!
+//! * [`ConnectionDialog`] turns what the user typed into a ready-to-use
+//!   [`SshAuth`]. By the time it emits [`ConnectionDialogEvent::Connect`] the
+//!   profile is on disk and the secret is in the OS keychain, when the user
+//!   asked for that.
+//! * [`saved_credentials`] answers the question the dialog cannot: for a
+//!   profile the user merely clicked, is everything a connection needs already
+//!   stored? When it is, the shell opens the session and the dialog never
+//!   appears.
 //!
 //! # Handling of secrets
 //!
-//! Passwords and key passphrases live only in the masked [`TextInput`]s and in
-//! the [`SshAuth`] handed to the caller. They are never logged, never rendered
-//! unmasked, and never included in a status message. [`ConnectionDialog`]
-//! deliberately does not implement `Debug` so that a stray `{:?}` cannot leak
-//! them either.
+//! Passwords and key passphrases live only in the masked [`TextInput`]s, in the
+//! keychain, and in the [`SshAuth`] handed to the caller. They are never
+//! logged, never rendered unmasked, and never included in a status message.
+//! [`ConnectionDialog`] deliberately does not implement `Debug` so that a stray
+//! `{:?}` cannot leak them either, and [`SshAuth`]'s own `Debug` redacts them.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Once;
 
 use gpui::{
-    App, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    KeyBinding, KeyDownEvent, MouseButton, PathPromptOptions, Render, ScrollHandle, SharedString,
-    Window, actions, div, prelude::*, px,
+    AnyElement, App, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    IntoElement, KeyBinding, KeyDownEvent, MouseButton, PathPromptOptions, Render, ScrollHandle,
+    SharedString, Window, actions, div, prelude::*, px,
 };
 use logman_core::{AuthMethod, ProfileStore, SecretStore, SessionOverrides, SessionProfile};
+#[cfg(unix)]
+use logman_pty::login_shell_name;
 use logman_ssh::SshAuth;
 use uuid::Uuid;
 
@@ -153,6 +162,10 @@ pub enum ConnectionDialogEvent {
         /// Credentials resolved from the form and the OS keychain.
         auth: SshAuth,
     },
+    /// Open a shell on this machine. Carries nothing: a local session is not
+    /// saved, needs no credentials, and always runs the user's login shell.
+    #[cfg(unix)]
+    ConnectLocal,
     /// The dialog was dismissed without connecting.
     Dismissed,
 }
@@ -252,6 +265,20 @@ pub struct ConnectionDialog {
     /// Identifier of the profile the form was filled from, if any. Kept so that
     /// connecting updates the existing profile instead of duplicating it.
     editing: Option<Uuid>,
+    /// Whether the pinned "Local terminal" row is the current selection.
+    ///
+    /// Mutually exclusive with [`Self::editing`]: between them they are the
+    /// dialog's one selection, so every path that selects a profile clears this
+    /// through [`Self::clear_local_selection`].
+    #[cfg(unix)]
+    local_selected: bool,
+    /// Name of the user's login shell, resolved once when the dialog is built.
+    ///
+    /// Cached rather than looked up per frame: the lookup reads `$SHELL` and,
+    /// failing that, the passwd database, and neither can change under a
+    /// running application.
+    #[cfg(unix)]
+    local_shell: SharedString,
     /// Authentication method currently selected in the form.
     auth_kind: AuthKind,
     /// Whether the secret should be written to the OS keychain.
@@ -381,6 +408,10 @@ impl ConnectionDialog {
             open: false,
             store,
             editing: None,
+            #[cfg(unix)]
+            local_selected: false,
+            #[cfg(unix)]
+            local_shell: SharedString::from(login_shell_name()),
             auth_kind: AuthKind::Password,
             save_secret: false,
             status: None,
@@ -479,6 +510,9 @@ impl ConnectionDialog {
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         self.pending_focus = None;
+        // Belt and braces: every `open_*` resets the form anyway, but a closed
+        // dialog must not carry a selection that outlives the reason for it.
+        self.clear_local_selection();
         // A closed dialog has nothing to report; leaving the last message behind
         // would let it reappear for a moment the next time the dialog opens.
         self.status = None;
@@ -503,9 +537,50 @@ impl ConnectionDialog {
         }
     }
 
+    /// Whether the pinned local row is the current selection.
+    ///
+    /// Answers `false` where there is no local terminal at all, so the render
+    /// path can branch on it without a platform conditional of its own.
+    fn is_local_selected(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.local_selected
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// Drop the pinned local row from the selection.
+    ///
+    /// A no-op where there is no local terminal, which is what keeps the SSH
+    /// paths that call it free of platform conditionals.
+    fn clear_local_selection(&mut self) {
+        #[cfg(unix)]
+        {
+            self.local_selected = false;
+        }
+    }
+
+    /// Make the pinned local row the selection.
+    ///
+    /// The form is cleared rather than left standing: it holds whatever profile
+    /// was selected before, and the local panel takes its place on screen. No
+    /// field is focused afterwards because the panel has none — a pending focus
+    /// left over from `open_*` would land on an unpainted input.
+    #[cfg(unix)]
+    fn select_local(&mut self, cx: &mut Context<Self>) {
+        self.reset_form(cx);
+        self.local_selected = true;
+        self.pending_focus = None;
+        cx.notify();
+    }
+
     /// Clear every field and drop any selection.
     fn reset_form(&mut self, cx: &mut Context<Self>) {
         self.editing = None;
+        self.clear_local_selection();
         self.auth_kind = AuthKind::Password;
         self.save_secret = false;
         self.status = None;
@@ -593,6 +668,9 @@ impl ConnectionDialog {
 
         self.save_secret = profile.save_secret;
         self.editing = Some(profile.id);
+        // The single funnel through which a profile becomes the selection, so
+        // the single place the pinned local row has to be deselected.
+        self.clear_local_selection();
     }
 
     /// The per-session overrides described by the form.
@@ -751,6 +829,12 @@ impl ConnectionDialog {
 
     /// Whether the form holds enough information to open a session.
     fn can_connect(&self, cx: &App) -> bool {
+        // The pinned local row is always ready: there is no host to reach, no
+        // credential to check and no form to complete.
+        #[cfg(unix)]
+        if self.local_selected {
+            return true;
+        }
         if self.auth_kind == AuthKind::Agent {
             return false;
         }
@@ -802,6 +886,17 @@ impl ConnectionDialog {
     /// message strip and the dialog stays open so the user can read them, while
     /// the session opens behind it. A clean run closes the dialog.
     fn connect(&mut self, cx: &mut Context<Self>) {
+        // A local session is not a profile: nothing is written to disk, no
+        // keychain entry is touched, and there are no credentials to resolve.
+        // Returning before any of that is what keeps the pinned row from
+        // disturbing the saved profiles or the form's own state.
+        #[cfg(unix)]
+        if self.local_selected {
+            cx.emit(ConnectionDialogEvent::ConnectLocal);
+            self.close(cx);
+            return;
+        }
+
         if !self.can_connect(cx) {
             self.explain_incomplete(cx);
             return;
@@ -1097,6 +1192,11 @@ impl ConnectionDialog {
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.surface)
+                    // Pinned above everything the store holds, and separated by
+                    // a rule: it is not one of the saved profiles, it is always
+                    // there, and it scrolls away with them rather than staying
+                    // stuck to the top of a long list.
+                    .children(self.render_local_rows(cx))
                     .when(empty, |this| {
                         this.child(
                             div()
@@ -1107,6 +1207,137 @@ impl ConnectionDialog {
                         )
                     })
                     .children(rows),
+            )
+    }
+
+    /// The pinned "Local terminal" row and the rule under it, or nothing at all
+    /// on a platform with no local terminal.
+    ///
+    /// A list rather than an `Option` so that the rule is a sibling of the row
+    /// instead of being wrapped in a container that would break the list's own
+    /// spacing.
+    fn render_local_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        #[cfg(not(unix))]
+        {
+            let _ = cx;
+            Vec::new()
+        }
+
+        #[cfg(unix)]
+        {
+            let theme = theme(cx);
+            let this = cx.entity();
+            let selected = self.local_selected;
+
+            let row = div()
+                .id("connection-local")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .px(px(8.))
+                .py(px(6.))
+                .rounded_md()
+                .cursor_pointer()
+                .bg(if selected {
+                    theme.surface_active
+                } else {
+                    gpui::transparent_black()
+                })
+                .hover(move |style| {
+                    style.bg(if selected {
+                        theme.surface_active
+                    } else {
+                        theme.surface_hover
+                    })
+                })
+                // Selected on a single click, opened on a double one, exactly
+                // like a saved profile row.
+                .on_click(move |event, _window, cx| {
+                    let double = event.click_count() >= 2;
+                    this.update(cx, |dialog, cx| {
+                        dialog.select_local(cx);
+                        if double {
+                            dialog.connect(cx);
+                        }
+                    });
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_grow()
+                        .min_w_0()
+                        .gap(px(1.))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(13.))
+                                .text_color(theme.text)
+                                .child(ts!("connection.local.name")),
+                        )
+                        // The shell's name is a value, not a word: never
+                        // translated, and shown where a profile shows its
+                        // `user@host`.
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(theme.text_muted)
+                                .child(self.local_shell.clone()),
+                        ),
+                );
+
+            let rule = div()
+                .h(px(1.))
+                .flex_none()
+                .my(px(2.))
+                .mx(px(4.))
+                .bg(theme.border);
+
+            vec![row.into_any_element(), rule.into_any_element()]
+        }
+    }
+
+    /// The right-hand side of the dialog: the connection form, or the local
+    /// panel while the pinned row is selected.
+    fn render_target_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(unix)]
+        if self.local_selected {
+            return self.render_local_panel(cx).into_any_element();
+        }
+        self.render_form(cx).into_any_element()
+    }
+
+    /// What stands in for the form once the pinned local row is selected.
+    ///
+    /// Deliberately has no controls: a local session takes no configuration,
+    /// so the panel only says what pressing Connect will do.
+    #[cfg(unix)]
+    fn render_local_panel(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = theme(cx);
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_w_0()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .text_color(theme.text)
+                    .child(ts!("connection.local.title")),
+            )
+            .child(
+                div()
+                    .max_w(px(380.))
+                    .text_size(px(12.))
+                    .text_color(theme.text_muted)
+                    .child(ts!(
+                        "connection.local.hint",
+                        shell = self.local_shell.clone()
+                    )),
             )
     }
 
@@ -1434,7 +1665,12 @@ impl Render for ConnectionDialog {
 
         self.apply_pending_focus(window, cx);
 
-        let title = if self.editing.is_some() {
+        let local = self.is_local_selected();
+        let title = if local {
+            // Neither "New connection" nor "Connect": nothing is being
+            // connected to, and nothing is being created.
+            ts!("connection.local.name")
+        } else if self.editing.is_some() {
             ts!("connection.title_edit")
         } else {
             ts!("connection.title_new")
@@ -1465,9 +1701,11 @@ impl Render for ConnectionDialog {
                             .items_start()
                             .gap(px(16.))
                             .child(self.render_profile_list(cx))
-                            .child(self.render_form(cx)),
+                            .child(self.render_target_panel(cx)),
                     )
-                    .child(self.render_overrides(cx)),
+                    // A local session is never saved, so there is nothing for a
+                    // per-session override to be attached to.
+                    .children((!local).then(|| self.render_overrides(cx))),
             )
             .child(self.render_footer(cx));
 
@@ -1631,4 +1869,291 @@ fn browse_for_key(dialog: Entity<ConnectionDialog>, cx: &mut App) {
             .ok();
     })
     .detach();
+}
+
+/// Credentials for `profile` that need nothing from the user, if there are any.
+///
+/// This is what lets a click on a saved profile open a session directly rather
+/// than a dialog pre-filled with a profile the user already finished filling in
+/// once. `None` means "ask": the caller should fall back to opening the dialog
+/// on this profile.
+///
+/// `None` is also the answer whenever anything is uncertain — an unreadable
+/// keychain, a missing key file, an encrypted key with no remembered
+/// passphrase. Erring that way costs the user only the dialog they used to get
+/// anyway, whereas erring the other way strands them in a session tab that
+/// failed to authenticate and offers nowhere to type the missing secret in.
+///
+/// Runs on the UI thread and blocks it: reading the keychain is a synchronous
+/// platform call, and a key profile also reads and parses the key file. Both
+/// are what the dialog's own Connect button already does on click, so the cost
+/// is not new — it has only moved one click earlier.
+pub fn saved_credentials(profile: &SessionProfile) -> Option<SshAuth> {
+    // A secret is only ever written for a profile that asked for one, so an
+    // unticked `save_secret` means there is nothing to look up — and asking
+    // anyway would raise the platform's keychain-unlock prompt for nothing.
+    let stored = profile
+        .save_secret
+        .then(|| stored_secret(profile.id))
+        .flatten();
+
+    match decide_credentials(&profile.auth, stored, key_opens_unlocked) {
+        Credentials::Ready(auth) => Some(auth),
+        Credentials::Ask => None,
+    }
+}
+
+/// Whether a profile can be connected without asking the user anything.
+///
+/// A named decision rather than an `Option<SshAuth>` so that the two outcomes
+/// read as what they are at the point they are made: [`Credentials::Ask`] is
+/// not "there are no credentials", it is "the dialog has to open".
+#[derive(Debug)]
+enum Credentials {
+    /// Everything the transport needs is already known; connect straight away.
+    Ready(SshAuth),
+    /// Something is missing, unreadable or locked: open the dialog.
+    Ask,
+}
+
+/// Decide whether what is known about a profile is enough to connect with.
+///
+/// Split out from [`saved_credentials`] so the policy can be exercised without
+/// a keychain, a filesystem or a real key to parse. `stored_secret` is the
+/// profile's remembered password or passphrase, already reduced to `None` when
+/// it is absent, empty or unreadable; `key_opens_unlocked` is consulted only in
+/// the single case that needs it, so a passphrase that is already known never
+/// pays for a key parse.
+fn decide_credentials<F>(
+    method: &AuthMethod,
+    stored_secret: Option<String>,
+    key_opens_unlocked: F,
+) -> Credentials
+where
+    F: FnOnce(&Path) -> bool,
+{
+    match method {
+        // Password authentication has no unauthenticated form to fall back on:
+        // without the password there is simply nothing to attempt.
+        AuthMethod::Password => match stored_secret {
+            Some(password) => Credentials::Ready(SshAuth::Password(password)),
+            None => Credentials::Ask,
+        },
+        AuthMethod::PublicKey { key_path } => {
+            if let Some(passphrase) = stored_secret {
+                return Credentials::Ready(SshAuth::PrivateKeyFile {
+                    path: key_path.clone(),
+                    passphrase: Some(passphrase),
+                });
+            }
+            // No remembered passphrase means one of two opposite things: either
+            // the key needs none and is ready to use, or it needs one that only
+            // the user can supply. The file itself is the only place that
+            // answer exists.
+            if key_opens_unlocked(key_path) {
+                Credentials::Ready(SshAuth::PrivateKeyFile {
+                    path: key_path.clone(),
+                    passphrase: None,
+                })
+            } else {
+                Credentials::Ask
+            }
+        }
+        // `logman-ssh` has no agent transport yet, so there is nothing to
+        // connect with; the dialog is where that is explained.
+        AuthMethod::Agent => Credentials::Ask,
+    }
+}
+
+/// The profile's remembered secret, or `None` when there is none to be had.
+///
+/// An empty entry counts as absent: it authenticates nothing, and connecting
+/// with it would only produce a failed session. A keychain that refuses to
+/// answer is treated the same way and logged, because the recovery — open the
+/// dialog, type the secret — is identical either way, and the reason belongs in
+/// the log rather than in the user's path. The error comes from the store's own
+/// failure to read and never carries the secret.
+fn stored_secret(id: Uuid) -> Option<String> {
+    match SecretStore::get(id) {
+        Ok(secret) => secret.filter(|secret| !secret.is_empty()),
+        Err(err) => {
+            log::warn!("no stored secret for {id}, so the dialog will ask: {err:#}");
+            None
+        }
+    }
+}
+
+/// Whether the private key at `path` can be read and decoded with no passphrase.
+///
+/// Whether an OpenSSH key is encrypted is not visible without decoding it,
+/// which is exactly what the session worker would do a moment later; doing it
+/// once here, on a file of at most a few kilobytes, is nothing next to opening
+/// the connection it decides. A key that cannot be read at all — moved,
+/// renamed, or no longer readable — answers `false` too, which routes the user
+/// to the dialog, where the path can be corrected.
+///
+/// No passphrase is passed in, so nothing secret can reach the log line.
+fn key_opens_unlocked(path: &Path) -> bool {
+    match russh::keys::load_secret_key(path, None) {
+        Ok(_) => true,
+        Err(err) => {
+            log::debug!("the key at {} needs the dialog: {err}", path.display());
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::fs;
+
+    use russh::keys::ssh_key::rand_core::{TryCryptoRng, TryRng};
+    use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey};
+
+    use super::*;
+
+    /// Panics if consulted: the passphrase-is-known paths must not touch disk.
+    fn never_probed(_: &Path) -> bool {
+        panic!("the key file was read even though the passphrase was known");
+    }
+
+    /// Deterministic stand-in for a system RNG, for building test keys only.
+    ///
+    /// `ssh_key` needs *an* RNG to generate a key and to salt the KDF of an
+    /// encrypted one. The tests do not care that the bytes are unpredictable,
+    /// only that they exist, so an xorshift generator keeps them free of a
+    /// randomness dependency and keeps their failures reproducible. It is
+    /// cryptographically worthless and confined to `#[cfg(test)]`.
+    struct TestRng(u64);
+
+    impl TryRng for TestRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+            Ok(self.try_next_u64()? as u32)
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            Ok(self.0)
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+            for chunk in dst.chunks_mut(8) {
+                let word = self.try_next_u64()?.to_le_bytes();
+                chunk.copy_from_slice(&word[..chunk.len()]);
+            }
+            Ok(())
+        }
+    }
+
+    impl TryCryptoRng for TestRng {}
+
+    /// The password of a [`Credentials::Ready`] password decision.
+    fn ready_password(credentials: Credentials) -> String {
+        match credentials {
+            Credentials::Ready(SshAuth::Password(password)) => password,
+            other => panic!("expected a ready password, got {other:?}"),
+        }
+    }
+
+    /// The passphrase of a [`Credentials::Ready`] key decision.
+    fn ready_passphrase(credentials: Credentials) -> Option<String> {
+        match credentials {
+            Credentials::Ready(SshAuth::PrivateKeyFile { passphrase, .. }) => passphrase,
+            other => panic!("expected a ready key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_remembered_password_connects_without_asking() {
+        let decision = decide_credentials(
+            &AuthMethod::Password,
+            Some("hunter2".to_owned()),
+            never_probed,
+        );
+        assert_eq!(ready_password(decision), "hunter2");
+    }
+
+    #[test]
+    fn a_password_profile_with_nothing_remembered_asks() {
+        // `None` is what both a profile that never asked to remember its
+        // password and one whose keychain entry is empty arrive as.
+        let decision = decide_credentials(&AuthMethod::Password, None, never_probed);
+        assert!(matches!(decision, Credentials::Ask));
+    }
+
+    #[test]
+    fn a_remembered_passphrase_connects_without_reading_the_key() {
+        let method = AuthMethod::PublicKey {
+            key_path: PathBuf::from("/home/me/.ssh/id_ed25519"),
+        };
+        let decision = decide_credentials(&method, Some("open sesame".to_owned()), never_probed);
+        assert_eq!(ready_passphrase(decision).as_deref(), Some("open sesame"));
+    }
+
+    #[test]
+    fn an_unencrypted_key_connects_with_no_passphrase_at_all() {
+        let method = AuthMethod::PublicKey {
+            key_path: PathBuf::from("/home/me/.ssh/id_ed25519"),
+        };
+        let decision = decide_credentials(&method, None, |_| true);
+        assert_eq!(ready_passphrase(decision), None);
+    }
+
+    #[test]
+    fn an_encrypted_key_with_no_remembered_passphrase_asks() {
+        // The case the whole probe exists for: connecting anyway would fail to
+        // load the key in a tab that cannot ask for the passphrase.
+        let method = AuthMethod::PublicKey {
+            key_path: PathBuf::from("/home/me/.ssh/id_ed25519"),
+        };
+        let decision = decide_credentials(&method, None, |_| false);
+        assert!(matches!(decision, Credentials::Ask));
+    }
+
+    #[test]
+    fn agent_authentication_always_asks() {
+        // Nothing can be remembered for a method the transport cannot perform.
+        let decision = decide_credentials(&AuthMethod::Agent, None, never_probed);
+        assert!(matches!(decision, Credentials::Ask));
+    }
+
+    #[test]
+    fn the_probe_tells_an_encrypted_key_from_a_plain_one() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut rng = TestRng(0x5eed_1eaf_c0ff_ee01);
+        let plain = PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("a generated key");
+
+        let plain_path = dir.path().join("id_ed25519");
+        fs::write(
+            &plain_path,
+            plain
+                .to_openssh(LineEnding::LF)
+                .expect("an OpenSSH key")
+                .as_bytes(),
+        )
+        .expect("the key file is written");
+        assert!(key_opens_unlocked(&plain_path));
+
+        let locked_path = dir.path().join("id_ed25519_locked");
+        let locked = plain
+            .encrypt(&mut rng, "open sesame")
+            .expect("an encrypted key");
+        fs::write(
+            &locked_path,
+            locked
+                .to_openssh(LineEnding::LF)
+                .expect("an OpenSSH key")
+                .as_bytes(),
+        )
+        .expect("the key file is written");
+        assert!(!key_opens_unlocked(&locked_path));
+
+        // A path with no key behind it is the third way the probe says no.
+        assert!(!key_opens_unlocked(&dir.path().join("absent")));
+    }
 }

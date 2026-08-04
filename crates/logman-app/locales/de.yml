@@ -39,10 +39,10 @@ tab:
 
 files:
   title: Entfernte Dateien
-  toggle: Entfernte Dateien
-  tip_toggle: "Entfernte Dateien (%{shortcut})"
+  toggle: Dateien
+  tip_toggle: "Dateien (%{shortcut})"
   mac:
-    toggle: Entfernte Dateien
+    toggle: Dateien
   no_session: Keine Sitzung geöffnet.
   not_connected: Die entfernten Dateien erscheinen, sobald die Sitzung verbunden ist.
   loading: Wird geladen…
@@ -88,6 +88,23 @@ files:
   created: "%{name} wurde erstellt."
   invalid_name: Dieser Name kann nicht verwendet werden.
   failed: "Entfernte Dateien: %{error}"
+  local:
+    title: Lokale Dateien
+    not_connected: Die Dateien erscheinen, sobald die Shell gestartet ist.
+    select_copy_in: Dateien hierher kopieren
+    select_copy_in_folder: Ordner hierher kopieren
+    menu_copy_out: Kopieren nach…
+    menu_copy_in: Dateien hierher kopieren…
+    menu_copy_in_folder: Ordner hierher kopieren…
+    tip_copy_in: Dateien hierher kopieren
+    tip_copy_in_folder: Ordner hierher kopieren
+    tip_copy_out: In einen anderen Ordner kopieren
+    copying: "%{name} wird kopiert… %{percent} %"
+    copied: "%{name} wurde kopiert."
+    copied_many: "%{count} Dateien wurden kopiert."
+    copied_tree: "%{files} Dateien in %{folders} Ordnern wurden kopiert."
+    nothing_to_copy: Es konnte nichts zum Kopieren gelesen werden.
+    failed: "Lokale Dateien: %{error}"
 
 empty:
   hint: Drücken Sie %{shortcut}, um sich mit einem Host zu verbinden.
@@ -186,6 +203,10 @@ connection:
   select_file: Auswählen
   saved_profiles: Gespeicherte Profile
   empty_list: Noch keine gespeicherten Profile. Füllen Sie das Formular aus und verbinden Sie sich — die Verbindung wird automatisch gespeichert.
+  local:
+    name: Lokales Terminal
+    title: Shell auf diesem Computer
+    hint: "Öffnet %{shell}, Ihre Anmelde-Shell, in einem neuen Tab. Sie läuft auf diesem Computer, daher sind weder ein Host noch ein Passwort nötig."
   name: Name
   host: Host
   port: Port
@@ -237,10 +258,14 @@ session:
   disconnected: "Verbindung getrennt: %{reason}"
   failed: "%{kind}: %{message}"
   reconnect: Erneut verbinden
+  restart: Neu starten
   overlay:
     connecting: "Verbindung zu %{host} wird hergestellt..."
     disconnected: "Verbindung zu %{host} getrennt"
     failed: "Verbindung zu %{host} nicht möglich"
+    local_starting: "%{shell} wird gestartet..."
+    local_exited: "%{shell} wurde beendet"
+    local_failed: "%{shell} konnte nicht gestartet werden"
 
 about:
   title: Über logman

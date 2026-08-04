@@ -39,10 +39,10 @@ tab:
 
 files:
   title: リモートファイル
-  toggle: リモートファイルパネル
-  tip_toggle: "リモートファイル (%{shortcut})"
+  toggle: ファイルパネル
+  tip_toggle: "ファイル (%{shortcut})"
   mac:
-    toggle: リモートファイルパネル
+    toggle: ファイルパネル
   no_session: 開いているセッションがありません。
   not_connected: セッションが接続されるとリモートファイルが表示されます。
   loading: 読み込み中…
@@ -88,6 +88,23 @@ files:
   created: "%{name} を作成しました。"
   invalid_name: この名前は使用できません。
   failed: "リモートファイル: %{error}"
+  local:
+    title: ローカルファイル
+    not_connected: シェルが起動するとファイルが表示されます。
+    select_copy_in: ここにコピー
+    select_copy_in_folder: フォルダーをここにコピー
+    menu_copy_out: 別のフォルダーにコピー…
+    menu_copy_in: ファイルをここにコピー…
+    menu_copy_in_folder: フォルダーをここにコピー…
+    tip_copy_in: ファイルをここにコピー
+    tip_copy_in_folder: フォルダーをここにコピー
+    tip_copy_out: 別のフォルダーにコピー
+    copying: "%{name} をコピー中… %{percent}%"
+    copied: "%{name} をコピーしました。"
+    copied_many: "%{count} 個のファイルをコピーしました。"
+    copied_tree: "%{folders} 個のフォルダーに %{files} 個のファイルをコピーしました。"
+    nothing_to_copy: コピーできるものを読み取れませんでした。
+    failed: "ローカルファイル: %{error}"
 
 empty:
   hint: "%{shortcut} を押してホストに接続します。"
@@ -186,6 +203,10 @@ connection:
   select_file: 選択
   saved_profiles: 保存済みプロファイル
   empty_list: 保存済みプロファイルはまだありません。フォームに入力して接続すると、接続が自動的に保存されます。
+  local:
+    name: ローカルターミナル
+    title: このコンピューター上のシェル
+    hint: "ログインシェルである %{shell} を新しいタブで開きます。このコンピューター上で実行されるため、接続先のホストもパスワードも必要ありません。"
   name: 名前
   host: ホスト
   port: ポート
@@ -237,10 +258,14 @@ session:
   disconnected: "切断: %{reason}"
   failed: "%{kind}: %{message}"
   reconnect: 再接続
+  restart: 再起動
   overlay:
     connecting: "%{host} に接続しています..."
     disconnected: "%{host} から切断されました"
     failed: "%{host} に接続できませんでした"
+    local_starting: "%{shell} を起動しています..."
+    local_exited: "%{shell} が終了しました"
+    local_failed: "%{shell} を起動できませんでした"
 
 about:
   title: logman について

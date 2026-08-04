@@ -39,10 +39,10 @@ tab:
 
 files:
   title: Fichiers distants
-  toggle: Fichiers distants
-  tip_toggle: "Fichiers distants (%{shortcut})"
+  toggle: Fichiers
+  tip_toggle: "Fichiers (%{shortcut})"
   mac:
-    toggle: Fichiers Distants
+    toggle: Fichiers
   no_session: Aucune session ouverte.
   not_connected: Les fichiers distants apparaîtront une fois la session connectée.
   loading: Chargement…
@@ -88,6 +88,23 @@ files:
   created: "%{name} a été créé."
   invalid_name: Ce nom ne peut pas être utilisé.
   failed: "Fichiers distants : %{error}"
+  local:
+    title: Fichiers locaux
+    not_connected: Les fichiers apparaîtront une fois le shell démarré.
+    select_copy_in: Copier des fichiers ici
+    select_copy_in_folder: Copier un dossier ici
+    menu_copy_out: Copier vers…
+    menu_copy_in: Copier des fichiers ici…
+    menu_copy_in_folder: Copier un dossier ici…
+    tip_copy_in: Copier des fichiers ici
+    tip_copy_in_folder: Copier un dossier ici
+    tip_copy_out: Copier vers un autre dossier
+    copying: "Copie de %{name}… %{percent} %"
+    copied: "%{name} a été copié."
+    copied_many: "%{count} fichiers ont été copiés."
+    copied_tree: "%{files} fichiers dans %{folders} dossiers ont été copiés."
+    nothing_to_copy: Rien n'a pu être lu pour la copie.
+    failed: "Fichiers locaux : %{error}"
 
 empty:
   hint: Appuyez sur %{shortcut} pour vous connecter à un hôte.
@@ -186,6 +203,10 @@ connection:
   select_file: Sélectionner
   saved_profiles: Profils enregistrés
   empty_list: "Aucun profil enregistré pour l'instant. Remplissez le formulaire et connectez-vous : la connexion est enregistrée automatiquement."
+  local:
+    name: Terminal local
+    title: Shell sur cet ordinateur
+    hint: "Ouvre %{shell}, votre shell de connexion, dans un nouvel onglet. Il s'exécute sur cet ordinateur : ni hôte ni mot de passe ne sont nécessaires."
   name: Nom
   host: Hôte
   port: Port
@@ -237,10 +258,14 @@ session:
   disconnected: "déconnecté : %{reason}"
   failed: "%{kind} : %{message}"
   reconnect: Se reconnecter
+  restart: Redémarrer
   overlay:
     connecting: "Connexion à %{host}..."
     disconnected: "Déconnecté de %{host}"
     failed: "Impossible de se connecter à %{host}"
+    local_starting: "Démarrage de %{shell}..."
+    local_exited: "%{shell} s'est terminé"
+    local_failed: "Impossible de démarrer %{shell}"
 
 about:
   title: À propos de logman

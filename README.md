@@ -8,7 +8,7 @@
 A multi-platform GUI SSH terminal written in Rust, built on
 [gpui](https://gpui.rs) — the GPU-accelerated UI framework behind the Zed editor.
 
-![logman with two sessions in split panes and the remote files panel, in the One Dark theme](docs/screenshots/main-dark.png)
+![logman with two sessions in split panes and the files panel, in the One Dark theme](docs/screenshots/main-dark.png)
 
 <details>
 <summary>The settings dialog: language, theme, live scheme previews, installed fonts</summary>
@@ -24,12 +24,20 @@ A multi-platform GUI SSH terminal written in Rust, built on
   one shortcut, or pull an open tab in beside another, and work in both sessions
   at once, dragging the divider to give either as much room as it needs; a pane
   closes itself when its connection ends.
-- **A remote files panel**: an SFTP browser beside the terminal that follows the
-  shell's working directory, with a breadcrumb header whose every piece drops
-  down the directories beside it, drag-and-drop upload and download — whole
-  folders included, with a progress bar while they move — and a draggable edge.
+- **A files panel**: a browser beside the terminal that follows the shell's
+  working directory, with a breadcrumb header whose every piece drops down the
+  directories beside it, drag-and-drop upload and download — whole folders
+  included, with a progress bar while they move — and a draggable edge. Over an
+  SSH session it browses the server through SFTP; over a local one it browses
+  this computer.
+- **A local terminal too** (Linux and macOS): the connection dialog offers your
+  own login shell above the saved profiles, and it opens in a tab like any other
+  session — no host, no credentials, and splitting one starts the new shell in
+  the directory the first one is in.
 - **Password and private key authentication**, with secrets kept in the OS
-  keychain rather than on disk.
+  keychain rather than on disk. A profile whose credentials are already stored —
+  a remembered password, or a key that needs no passphrase — connects straight
+  from the empty-state list, without the dialog opening at all.
 - **A real terminal**, not a log view: `alacritty_terminal` drives the emulation,
   so colors, cursor addressing, alternate screen and full-screen programs behave
   the way they do in any other terminal.
@@ -126,12 +134,19 @@ last pane, and closing the last tab returns to the start screen. A session
 that *failed* to connect stays visible instead, with the error and a
 Reconnect button.
 
-### Remote files panel
+### Files panel
 
-The sidebar to the left of the terminal is an SFTP browser for the session in
-the focused pane. It rides on the same SSH connection over a channel of its
-own, so listing a directory or copying a file never holds up the shell — and
-the shell never holds up a transfer.
+The sidebar to the left of the terminal browses the filesystem of the session
+in the focused pane. For an SSH session that is the server: the panel rides on
+the same connection over an SFTP channel of its own, so listing a directory or
+copying a file never holds up the shell — and the shell never holds up a
+transfer. For a local session it is this computer, read straight off the disk
+on a background thread.
+
+Everything below works the same either way; only the wording changes, because
+putting a file into a directory on the disk it is already on is a copy rather
+than an upload. Deleting still asks first — locally that question is about your
+own files.
 
 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> (<kbd>Cmd</kbd>+<kbd>B</kbd> on
 macOS) shows and hides it, as does the panel button left of the tab strip. It
@@ -195,7 +210,7 @@ directory, at which point the panel follows again.
 | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> | Split right, with a new connection to the same host |
 | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> | Split below, with a new connection to the same host |
 | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | Move the active pane into its own tab |
-| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | Show or hide the remote files panel |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | Show or hide the files panel |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> | Copy the selection |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> | Paste |
 | <kbd>Esc</kbd> | Dismiss the connection dialog |
@@ -387,7 +402,7 @@ and no external server is needed.
 - <kbd>Ctrl</kbd>+<kbd>T</kbd>, <kbd>Ctrl</kbd>+<kbd>W</kbd> and the
   <kbd>Alt</kbd> pane shortcuts are taken by the application, so the remote
   shell never sees them.
-- **The remote files panel has no way to change permissions or ownership.**
+- **The files panel has no way to change permissions or ownership.**
   Transfers and deletes run one at a time per session and cannot be cancelled
   once started. The panel's edge can be dragged, but the width is session state
   and reverts to the default on the next start.

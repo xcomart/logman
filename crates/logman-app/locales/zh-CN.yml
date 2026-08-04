@@ -39,10 +39,10 @@ tab:
 
 files:
   title: 远程文件
-  toggle: 远程文件面板
-  tip_toggle: "远程文件 (%{shortcut})"
+  toggle: 文件面板
+  tip_toggle: "文件 (%{shortcut})"
   mac:
-    toggle: 远程文件面板
+    toggle: 文件面板
   no_session: 没有打开的会话。
   not_connected: 会话连接后将显示远程文件。
   loading: 正在加载…
@@ -88,6 +88,23 @@ files:
   created: "已创建 %{name}。"
   invalid_name: 无法使用该名称。
   failed: "远程文件：%{error}"
+  local:
+    title: 本地文件
+    not_connected: Shell 启动后将显示文件。
+    select_copy_in: 复制到此处
+    select_copy_in_folder: 将文件夹复制到此处
+    menu_copy_out: 复制到…
+    menu_copy_in: 将文件复制到此处…
+    menu_copy_in_folder: 将文件夹复制到此处…
+    tip_copy_in: 将文件复制到此处
+    tip_copy_in_folder: 将文件夹复制到此处
+    tip_copy_out: 复制到其他文件夹
+    copying: "正在复制 %{name}… %{percent}%"
+    copied: "已复制 %{name}。"
+    copied_many: "已复制 %{count} 个文件。"
+    copied_tree: "已复制 %{folders} 个文件夹中的 %{files} 个文件。"
+    nothing_to_copy: 没有读取到可复制的内容。
+    failed: "本地文件：%{error}"
 
 empty:
   hint: "按 %{shortcut} 连接到主机。"
@@ -186,6 +203,10 @@ connection:
   select_file: 选择
   saved_profiles: 已保存的配置
   empty_list: 还没有保存的配置。填写表单并连接后，连接会自动保存。
+  local:
+    name: 本地终端
+    title: 本机上的 Shell
+    hint: "在新标签页中打开登录 Shell %{shell}。它在本机上运行，因此既不需要主机地址，也不需要密码。"
   name: 名称
   host: 主机
   port: 端口
@@ -237,10 +258,14 @@ session:
   disconnected: "已断开：%{reason}"
   failed: "%{kind}：%{message}"
   reconnect: 重新连接
+  restart: 重新启动
   overlay:
     connecting: "正在连接 %{host}..."
     disconnected: "已与 %{host} 断开连接"
     failed: "无法连接到 %{host}"
+    local_starting: "正在启动 %{shell}..."
+    local_exited: "%{shell} 已退出"
+    local_failed: "无法启动 %{shell}"
 
 about:
   title: 关于 logman

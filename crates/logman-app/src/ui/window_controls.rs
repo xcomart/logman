@@ -27,7 +27,11 @@ const BUTTON_WIDTH: f32 = 46.;
 /// Edge length of the glyph inside a button.
 ///
 /// Half a toolbar icon: a caption glyph is meant to read as a hairline mark
-/// rather than as a control of its own.
+/// rather than as a control of its own. It is the smallest thing the app draws,
+/// which is why the four assets carry a heavier stroke than the rest of the set
+/// (see [`crate::icons::WINDOW_MINIMIZE`]) and why their resting tint is
+/// [`Theme::icon`](super::theme::Theme#structfield.icon) rather than the muted
+/// text of the label beside them.
 const GLYPH_SIZE: f32 = 12.;
 
 /// Hover fill of the close button.
@@ -132,7 +136,7 @@ impl RenderOnce for WindowControls {
                 // to the window procedure before the app sees a click.
                 .on_click(|_, window, _cx| window.minimize_window())
                 .child(
-                    glyph(self.icons.minimize.clone(), theme.text_muted)
+                    glyph(self.icons.minimize.clone(), theme.icon)
                         .group_hover(MINIMIZE_GROUP, move |style| style.text_color(theme.text)),
                 )
         });
@@ -147,7 +151,7 @@ impl RenderOnce for WindowControls {
                 .hover(|style| style.bg(theme.surface_hover))
                 .on_click(|_, window, _cx| window.zoom_window())
                 .child(
-                    glyph(path, theme.text_muted)
+                    glyph(path, theme.icon)
                         .group_hover(MAXIMIZE_GROUP, move |style| style.text_color(theme.text)),
                 )
         });
@@ -156,10 +160,9 @@ impl RenderOnce for WindowControls {
             .hover(|style| style.bg(rgb(CLOSE_HOVER)))
             .on_click(|_, window, _cx| window.remove_window())
             .child(
-                glyph(self.icons.close.clone(), theme.text_muted)
-                    .group_hover(CLOSE_GROUP, |style| {
-                        style.text_color(rgb(CLOSE_HOVER_GLYPH))
-                    }),
+                glyph(self.icons.close.clone(), theme.icon).group_hover(CLOSE_GROUP, |style| {
+                    style.text_color(rgb(CLOSE_HOVER_GLYPH))
+                }),
             );
 
         div()
