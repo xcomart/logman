@@ -3884,6 +3884,7 @@ dependencies = [
  "gpui",
  "log",
  "logman-core",
+ "logman-pty",
  "logman-ssh",
  "logman-term",
  "objc",
@@ -3915,6 +3916,18 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "uuid",
+]
+
+[[package]]
+name = "logman-pty"
+version = "0.2.5"
+dependencies = [
+ "alacritty_terminal",
+ "futures",
+ "libc",
+ "log",
+ "parking_lot",
+ "tempfile",
 ]
 
 [[package]]

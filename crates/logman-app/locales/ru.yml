@@ -186,6 +186,10 @@ connection:
   select_file: Выбрать
   saved_profiles: Сохранённые профили
   empty_list: "Сохранённых профилей пока нет. Заполните форму и подключитесь — подключение сохранится автоматически."
+  local:
+    name: Локальный терминал
+    title: Оболочка на этом компьютере
+    hint: "Открывает %{shell} — вашу командную оболочку — в новой вкладке. Она запускается на этом компьютере, поэтому не нужны ни хост, ни пароль."
   name: Имя
   host: Узел
   port: Порт
@@ -237,10 +241,14 @@ session:
   disconnected: "отключено: %{reason}"
   failed: "%{kind}: %{message}"
   reconnect: Переподключиться
+  restart: Перезапустить
   overlay:
     connecting: "Подключение к %{host}..."
     disconnected: "Отключено от %{host}"
     failed: "Не удалось подключиться к %{host}"
+    local_starting: "Запуск %{shell}..."
+    local_exited: "%{shell} завершилась"
+    local_failed: "Не удалось запустить %{shell}"
 
 about:
   title: О программе logman

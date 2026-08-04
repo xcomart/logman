@@ -386,6 +386,11 @@ impl Workspace {
                         dialog.update(cx, |dialog, cx| dialog.close(cx));
                         this.open_session(profile.clone(), auth.clone(), window, cx);
                     }
+                    #[cfg(unix)]
+                    ConnectionDialogEvent::ConnectLocal => {
+                        dialog.update(cx, |dialog, cx| dialog.close(cx));
+                        this.open_local_session(window, cx);
+                    }
                     ConnectionDialogEvent::Dismissed => {
                         dialog.update(cx, |dialog, cx| dialog.close(cx));
                         this.focus_active(window, cx);
@@ -530,6 +535,35 @@ impl Workspace {
     ) {
         log::info!("opening a session to {}", profile.label());
         let session = cx.new(|cx| Session::new(profile, auth, cx));
+        self.adopt_session(session, window, cx);
+    }
+
+    /// Opens a shell on this machine and makes its tab active.
+    ///
+    /// Takes nothing, because a local session is configured by nothing: the
+    /// shell is the user's login shell and everything else comes from the
+    /// global terminal settings.
+    #[cfg(unix)]
+    fn open_local_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session = cx.new(Session::new_local);
+        log::info!(
+            "opening a local session running {}",
+            session.read(cx).label()
+        );
+        self.adopt_session(session, window, cx);
+    }
+
+    /// Gives a freshly built session a view, a pane and a tab of its own, and
+    /// activates that tab.
+    ///
+    /// Everything past the constructor is identical for a remote and a local
+    /// session, which is the whole point of them being one type.
+    fn adopt_session(
+        &mut self,
+        session: Entity<Session>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let view = cx.new(|cx| TerminalView::new(session.clone(), window, cx));
         let leaf = self.new_pane(view, session, window, cx);
 
@@ -985,6 +1019,21 @@ impl Workspace {
     }
 
     /// Shows the connection dialog pre-filled from a saved profile.
+    ///
+    /// A profile the user already finished configuring — a remembered password,
+    /// or a key that needs no passphrase — carries everything the transport
+    /// needs, so presenting the dialog again would be one form to dismiss
+    /// before a session the user has already asked for. Those profiles connect
+    /// on the click.
+    ///
+    /// The dialog still opens, pre-filled, whenever anything would have to be
+    /// typed or corrected: a password that was never remembered, an encrypted
+    /// key with no stored passphrase, a key file that has gone missing, or the
+    /// agent method, which the transport does not implement.
+    ///
+    /// Deciding that reads the OS keychain, and possibly the key file,
+    /// synchronously on the UI thread — the same work the dialog's Connect
+    /// button does, one click earlier.
     fn open_profile(&mut self, profile: &SessionProfile, cx: &mut Context<Self>) {
         self.close_overlays(cx);
         let id = profile.id;
@@ -1792,6 +1841,7 @@ impl Workspace {
                 .children(rows)
         });
 
+        let local = self.render_empty_local(cx);
         let shortcut = ts!("empty.hint", shortcut = format!("{SHORTCUT_MODIFIER}+T"));
 
         div()
@@ -1829,8 +1879,51 @@ impl Workspace {
                         }),
                 ),
             )
+            .children(local)
             .children(saved)
             .into_any_element()
+    }
+
+    /// The empty state's local terminal button, or nothing at all on a platform
+    /// without one.
+    ///
+    /// Sits between the button that opens the connection dialog and the saved
+    /// profiles, and unlike either of them it opens a session outright rather
+    /// than a dialog: a local shell has no host, no credentials and nothing to
+    /// save, so there is nothing for a dialog to ask. The shell's name rides
+    /// along after a separator, exactly as a profile row carries its
+    /// `user@host`, so the button says which shell the press will start.
+    fn render_empty_local(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        #[cfg(not(unix))]
+        {
+            let _ = cx;
+            None
+        }
+
+        #[cfg(unix)]
+        {
+            let this = cx.entity();
+            let label = format!(
+                "{}  ·  {}",
+                ts!("connection.local.name"),
+                logman_pty::login_shell_name()
+            );
+            Some(
+                div()
+                    .w(px(320.))
+                    .child(
+                        Button::new("empty-local-session", label)
+                            .variant(ButtonVariant::Secondary)
+                            .full_width(true)
+                            .on_click(move |_, window, cx| {
+                                this.update(cx, |workspace, cx| {
+                                    workspace.open_local_session(window, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element(),
+            )
+        }
     }
 
     /// Renders the bottom status bar.
@@ -1844,7 +1937,7 @@ impl Workspace {
                     let session = tab.active_view().read(cx).session().read(cx);
                     let (cols, rows) = session.terminal().size();
                     (
-                        session.profile().label().into(),
+                        session.label(),
                         session.status().summary(),
                         format!("{cols}x{rows}").into(),
                     )

@@ -186,6 +186,10 @@ connection:
   select_file: 選択
   saved_profiles: 保存済みプロファイル
   empty_list: 保存済みプロファイルはまだありません。フォームに入力して接続すると、接続が自動的に保存されます。
+  local:
+    name: ローカルターミナル
+    title: このコンピューター上のシェル
+    hint: "ログインシェルである %{shell} を新しいタブで開きます。このコンピューター上で実行されるため、接続先のホストもパスワードも必要ありません。"
   name: 名前
   host: ホスト
   port: ポート
@@ -237,10 +241,14 @@ session:
   disconnected: "切断: %{reason}"
   failed: "%{kind}: %{message}"
   reconnect: 再接続
+  restart: 再起動
   overlay:
     connecting: "%{host} に接続しています..."
     disconnected: "%{host} から切断されました"
     failed: "%{host} に接続できませんでした"
+    local_starting: "%{shell} を起動しています..."
+    local_exited: "%{shell} が終了しました"
+    local_failed: "%{shell} を起動できませんでした"
 
 about:
   title: logman について

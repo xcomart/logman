@@ -186,6 +186,10 @@ connection:
   select_file: Seleccionar
   saved_profiles: Perfiles guardados
   empty_list: "Aún no hay perfiles guardados. Rellena el formulario y conéctate: la conexión se guarda automáticamente."
+  local:
+    name: Terminal local
+    title: Shell en este equipo
+    hint: "Abre %{shell}, tu shell de inicio de sesión, en una pestaña nueva. Se ejecuta en este equipo, así que no hace falta ningún host ni ninguna contraseña."
   name: Nombre
   host: Host
   port: Puerto
@@ -237,10 +241,14 @@ session:
   disconnected: "desconectado: %{reason}"
   failed: "%{kind}: %{message}"
   reconnect: Reconectar
+  restart: Reiniciar
   overlay:
     connecting: "Conectando con %{host}..."
     disconnected: "Desconectado de %{host}"
     failed: "No se pudo conectar con %{host}"
+    local_starting: "Iniciando %{shell}..."
+    local_exited: "%{shell} ha terminado"
+    local_failed: "No se pudo iniciar %{shell}"
 
 about:
   title: Acerca de logman
