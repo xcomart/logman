@@ -17,8 +17,9 @@ exclude = ["vendor/gpui"]
 #   * `platform/windows/platform.rs` — translate in the loop, on the real MSG.
 #   * `platform/windows/events.rs`   — drop the in-procedure translations.
 #
-# Two more patches, in `platform/linux/x11/` (also marked `LOGMAN PATCH`),
-# for the same re-entrancy disease in the X11 backend:
+# More patches, in `platform/linux/x11/` (also marked `LOGMAN PATCH`), two of
+# them for the same re-entrancy disease in the X11 backend and two for what the
+# X11 window never told the compositor:
 #   * `client.rs` — the WM_DELETE_WINDOW close callback ran while the client
 #     RefCell was held, so an app that quits from its window-closed observer
 #     — as this one does — re-entered the borrow and panicked on every close
@@ -30,6 +31,10 @@ exclude = ["vendor/gpui"]
 #   * `window.rs` — `is_transparent` ignored client-side decorations, unlike
 #     its Wayland counterpart, so the transparent shadow band around a
 #     self-decorated window composited as solid black.
+#   * `window.rs` — the X11 backend has no counterpart to the Wayland one's
+#     `org_kde_kwin_blur`, so a blurred background appearance did nothing on
+#     KDE X11; `update_blur_region` now keeps KWin's
+#     `_KDE_NET_WM_BLUR_BEHIND_REGION` in step with the window.
 #
 # crates.io has no newer gpui (0.2.2 is current), so vendoring is the only
 # route. Delete these patches and `vendor/gpui` once a release carries them.

@@ -1088,13 +1088,21 @@ impl X11WindowStatePtr {
     /// (`last_insets`), in device pixels; blurring the whole surface would
     /// drag the blur out under the transparent shadow. Callers re-run this
     /// whenever any input changes: the appearance, the insets, or the size.
+    ///
+    /// The origin stays at zero on purpose. KWin reads the property in
+    /// *contents* coordinates: it translates whatever it finds by the top left
+    /// of the window's contents rect, which for a client-side decorated window
+    /// is exactly the `_GTK_FRAME_EXTENTS` band this function already subtracts
+    /// from the size. Offsetting the origin by the insets as well counted the
+    /// shadow twice and left an unblurred strip, one inset wide, down the left
+    /// edge and along the top of the window.
     fn update_blur_region(&self, state: &X11WindowState) {
         if state.background_appearance == WindowBackgroundAppearance::Blurred {
             let size = state.content_size();
             let [left, right, top, bottom] = state.last_insets;
             let region = [
-                left,
-                top,
+                0,
+                0,
                 (size.width.0 as u32).saturating_sub(left + right),
                 (size.height.0 as u32).saturating_sub(top + bottom),
             ];
