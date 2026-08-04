@@ -1019,7 +1019,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Shows the connection dialog pre-filled from a saved profile.
+    /// Opens a saved profile, showing the connection dialog only if it has to.
     ///
     /// A profile the user already finished configuring — a remembered password,
     /// or a key that needs no passphrase — carries everything the transport
@@ -1035,8 +1035,17 @@ impl Workspace {
     /// Deciding that reads the OS keychain, and possibly the key file,
     /// synchronously on the UI thread — the same work the dialog's Connect
     /// button does, one click earlier.
-    fn open_profile(&mut self, profile: &SessionProfile, cx: &mut Context<Self>) {
+    fn open_profile(
+        &mut self,
+        profile: &SessionProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_overlays(cx);
+        if let Some(auth) = connection::saved_credentials(profile) {
+            self.open_session(profile.clone(), auth, window, cx);
+            return;
+        }
         let id = profile.id;
         self.dialog
             .update(cx, |dialog, cx| dialog.open_profile(id, cx));
@@ -1828,8 +1837,10 @@ impl Workspace {
                 Button::new(id, label)
                     .variant(ButtonVariant::Ghost)
                     .full_width(true)
-                    .on_click(move |_, _window, cx| {
-                        this.update(cx, |workspace, cx| workspace.open_profile(&profile, cx));
+                    .on_click(move |_, window, cx| {
+                        this.update(cx, |workspace, cx| {
+                            workspace.open_profile(&profile, window, cx)
+                        });
                     })
             });
 

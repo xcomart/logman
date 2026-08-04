@@ -35,7 +35,9 @@ A multi-platform GUI SSH terminal written in Rust, built on
   session — no host, no credentials, and splitting one starts the new shell in
   the directory the first one is in.
 - **Password and private key authentication**, with secrets kept in the OS
-  keychain rather than on disk.
+  keychain rather than on disk. A profile whose credentials are already stored —
+  a remembered password, or a key that needs no passphrase — connects straight
+  from the empty-state list, without the dialog opening at all.
 - **A real terminal**, not a log view: `alacritty_terminal` drives the emulation,
   so colors, cursor addressing, alternate screen and full-screen programs behave
   the way they do in any other terminal.
