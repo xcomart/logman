@@ -39,10 +39,10 @@ tab:
 
 files:
   title: Удалённые файлы
-  toggle: Удалённые файлы
-  tip_toggle: "Удалённые файлы (%{shortcut})"
+  toggle: Файлы
+  tip_toggle: "Файлы (%{shortcut})"
   mac:
-    toggle: Удалённые файлы
+    toggle: Файлы
   no_session: Нет открытых сеансов.
   not_connected: Удалённые файлы появятся, когда сеанс будет подключён.
   loading: Загрузка…
@@ -88,6 +88,23 @@ files:
   created: "Папка %{name} создана."
   invalid_name: Это имя нельзя использовать.
   failed: "Удалённые файлы: %{error}"
+  local:
+    title: Локальные файлы
+    not_connected: Файлы появятся, когда оболочка будет запущена.
+    select_copy_in: Копировать файлы сюда
+    select_copy_in_folder: Копировать папку сюда
+    menu_copy_out: Копировать в…
+    menu_copy_in: Копировать файлы сюда…
+    menu_copy_in_folder: Копировать папку сюда…
+    tip_copy_in: Копировать файлы сюда
+    tip_copy_in_folder: Копировать папку сюда
+    tip_copy_out: Копировать в другую папку
+    copying: "Копирование %{name}… %{percent} %"
+    copied: "Файл %{name} скопирован."
+    copied_many: "Скопировано файлов: %{count}."
+    copied_tree: "Скопировано файлов: %{files} в папках: %{folders}."
+    nothing_to_copy: Не удалось прочитать ничего для копирования.
+    failed: "Локальные файлы: %{error}"
 
 empty:
   hint: "Нажмите %{shortcut}, чтобы подключиться к узлу."

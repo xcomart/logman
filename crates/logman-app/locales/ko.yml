@@ -39,10 +39,10 @@ tab:
 
 files:
   title: 원격 파일
-  toggle: 원격 파일 패널
-  tip_toggle: "원격 파일 (%{shortcut})"
+  toggle: 파일 패널
+  tip_toggle: "파일 (%{shortcut})"
   mac:
-    toggle: 원격 파일 패널
+    toggle: 파일 패널
   no_session: 열린 세션이 없습니다.
   not_connected: 세션이 연결되면 원격 파일이 표시됩니다.
   loading: 불러오는 중…
@@ -88,6 +88,23 @@ files:
   created: "%{name}을(를) 만들었습니다."
   invalid_name: 사용할 수 없는 이름입니다.
   failed: "원격 파일: %{error}"
+  local:
+    title: 로컬 파일
+    not_connected: 셸이 시작되면 파일이 표시됩니다.
+    select_copy_in: 여기로 복사
+    select_copy_in_folder: 폴더를 여기로 복사
+    menu_copy_out: 다른 폴더로 복사…
+    menu_copy_in: 파일을 여기로 복사…
+    menu_copy_in_folder: 폴더를 여기로 복사…
+    tip_copy_in: 파일을 여기로 복사
+    tip_copy_in_folder: 폴더를 여기로 복사
+    tip_copy_out: 다른 폴더로 복사
+    copying: "%{name} 복사 중… %{percent}%"
+    copied: "%{name}을(를) 복사했습니다."
+    copied_many: "파일 %{count}개를 복사했습니다."
+    copied_tree: "폴더 %{folders}개에 파일 %{files}개를 복사했습니다."
+    nothing_to_copy: 복사할 수 있는 항목을 읽지 못했습니다.
+    failed: "로컬 파일: %{error}"
 
 empty:
   hint: "%{shortcut} 키를 눌러 호스트에 접속하세요."

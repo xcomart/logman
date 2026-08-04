@@ -19,16 +19,20 @@
 use std::fmt;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use futures::StreamExt;
 use gpui::{App, AppContext, Context, Entity, SharedString, Task};
 use logman_core::{EffectiveTerminal, SessionOverrides, SessionProfile};
 #[cfg(unix)]
 use logman_pty::{PtyConfig, PtyEvent, PtySession, login_shell_name};
-use logman_ssh::{SftpClient, SshAuth, SshConfig, SshEvent, SshSession};
+use logman_ssh::{SshAuth, SshConfig, SshEvent, SshSession};
 use logman_term::{TerminalModel, TerminalTheme};
 
 use crate::app_settings;
+#[cfg(unix)]
+use crate::files::LocalSource;
+use crate::files::{FileSource, SftpSource};
 use crate::i18n::ts;
 use crate::ui::TabStatus;
 use crate::verifier::host_key_verifier;
@@ -361,24 +365,46 @@ impl Session {
         self.terminal.cwd()
     }
 
-    /// An SFTP client riding on this session's transport, or `None` while the
-    /// session is not carrying a live remote shell.
+    /// The filesystem this session can browse, or `None` while it is not
+    /// carrying a live shell to browse one over.
     ///
-    /// Always `None` for a local session: there is no SSH transport to ride on,
-    /// and the local filesystem is not what the remote file panel browses.
+    /// An SSH session browses the server over SFTP; a local one browses this
+    /// computer. Which of the two the caller gets is the only thing that differs
+    /// — both are [`FileSource`]s, and the file panel above is written against
+    /// the trait and never asks.
     ///
-    /// Gated on [`SessionStatus::Connected`] rather than merely on the transport
-    /// existing: during `Connecting` the handle is already there and the SFTP
-    /// service would happily queue requests behind the authentication, so a file
-    /// panel would sit on a pending listing with nothing to show for it. Once
-    /// the session ends the client is gone and every call would answer
-    /// [`SftpError::Disconnected`](logman_ssh::SftpError::Disconnected) anyway.
+    /// Both arms are gated on [`SessionStatus::Connected`], and for the same
+    /// reason rather than for two: **the panel shows what the session is
+    /// looking at, and until a shell is running there is nothing it is looking
+    /// at.** Remotely that is also a practical matter — during `Connecting` the
+    /// handle is already there and the SFTP service would queue requests behind
+    /// the authentication, leaving the panel on a pending listing with nothing
+    /// to show for it. Locally the filesystem would answer perfectly well a
+    /// moment early, and it is still the wrong answer: a pane that has not
+    /// started its shell yet is drawn as *starting*, and a file panel listing a
+    /// directory beside it would say the session was further along than it is.
+    /// Once a session ends, both sources are gone with the transport.
     ///
-    /// Cheap: the returned client only clones the request channel, and the SFTP
-    /// channel itself is opened lazily on the first request and then reused.
-    pub fn sftp(&self) -> Option<SftpClient> {
+    /// Cheap on both sides: the SFTP source only clones a request channel — the
+    /// channel itself is opened lazily on the first request and then reused —
+    /// and the local one only clones the executor handle it does its blocking
+    /// work on.
+    pub fn files(&self, cx: &App) -> Option<Arc<dyn FileSource>> {
+        // Read only by the local arm below, which does not exist off unix: a
+        // build with no pty has no local session to browse from.
+        #[cfg(not(unix))]
+        let _ = cx;
         match (&self.status, &self.transport) {
-            (SessionStatus::Connected, Some(Transport::Ssh(ssh))) => Some(ssh.sftp()),
+            (SessionStatus::Connected, Some(Transport::Ssh(ssh))) => {
+                Some(Arc::new(SftpSource::new(ssh.sftp())))
+            }
+            // The pty handle itself is not needed: the shell's filesystem is
+            // this process's filesystem, reachable without going through it.
+            // What the session decides is *whether* there is one to browse.
+            #[cfg(unix)]
+            (SessionStatus::Connected, Some(Transport::Local(_))) => {
+                Some(Arc::new(LocalSource::new(cx.background_executor().clone())))
+            }
             _ => None,
         }
     }

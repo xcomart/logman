@@ -39,10 +39,10 @@ tab:
 
 files:
   title: Archivos remotos
-  toggle: Archivos remotos
-  tip_toggle: "Archivos remotos (%{shortcut})"
+  toggle: Archivos
+  tip_toggle: "Archivos (%{shortcut})"
   mac:
-    toggle: Archivos Remotos
+    toggle: Archivos
   no_session: No hay ninguna sesión abierta.
   not_connected: Los archivos remotos aparecerán cuando la sesión esté conectada.
   loading: Cargando…
@@ -88,6 +88,23 @@ files:
   created: "Se creó %{name}."
   invalid_name: Ese nombre no se puede usar.
   failed: "Archivos remotos: %{error}"
+  local:
+    title: Archivos locales
+    not_connected: Los archivos aparecerán cuando se haya iniciado el shell.
+    select_copy_in: Copiar archivos aquí
+    select_copy_in_folder: Copiar carpeta aquí
+    menu_copy_out: Copiar en…
+    menu_copy_in: Copiar archivos aquí…
+    menu_copy_in_folder: Copiar carpeta aquí…
+    tip_copy_in: Copiar archivos aquí
+    tip_copy_in_folder: Copiar carpeta aquí
+    tip_copy_out: Copiar en otra carpeta
+    copying: "Copiando %{name}… %{percent} %"
+    copied: "Se copió %{name}."
+    copied_many: "Se copiaron %{count} archivos."
+    copied_tree: "Se copiaron %{files} archivos en %{folders} carpetas."
+    nothing_to_copy: No se pudo leer nada para copiar.
+    failed: "Archivos locales: %{error}"
 
 empty:
   hint: Pulsa %{shortcut} para conectarte a un host.
