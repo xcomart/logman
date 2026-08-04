@@ -85,6 +85,15 @@ pub const NEW_TAB: &str = "icons/new-tab.svg";
 /// size of a toolbar icon, and a glyph that kept the usual margin would come
 /// out thinner and smaller than the caption buttons of the platform they stand
 /// in for.
+///
+/// They carry a heavier stroke than the rest of the set for the same reason —
+/// `2.2` against the usual `1.8`. The caption strip renders them at 12 px
+/// (`GLYPH_SIZE` in [`crate::ui::window_controls`]), which is half the viewBox,
+/// so the stroke that reaches the screen is half what the file asks for: `1.8`
+/// arrived as 0.9 px, a hairline no row of pixels could hold at full coverage
+/// once it had been antialiased, and `2.2` arrives as 1.1 px instead. All four
+/// share the value, including both rectangles of [`WINDOW_RESTORE`], so that
+/// the strip reads as one set.
 pub const WINDOW_MINIMIZE: &str = "icons/window-minimize.svg";
 
 /// The custom title bar's maximise button, while the window is not maximised.
@@ -99,27 +108,20 @@ pub const WINDOW_RESTORE: &str = "icons/window-restore.svg";
 /// The custom title bar's close button.
 pub const WINDOW_CLOSE: &str = "icons/window-close.svg";
 
-/// The application icon, drawn at the left end of the custom title bar.
+/// The application mark, drawn at the left end of the custom title bar.
 ///
-/// The one raster asset in the set, and the reason it is served beside
-/// [`ICONS`] rather than from it: the whole point of this image is its colour,
-/// so it is painted with [`img`](gpui::img) instead of [`svg`](gpui::svg) —
-/// which would keep only its alpha and hand back a monochrome blob — and the
-/// invariants the array is checked against (an SVG, on a 24×24 viewBox) are
-/// ones a PNG cannot hold. It sits outside the `icons/` prefix too, so listing
-/// the icon set still answers with icons alone.
-pub const APP_ICON: &str = "app-icon.png";
-
-/// The bytes [`Icons`] hands back for [`APP_ICON`].
-///
-/// The 128 px variant rather than the 16 px the title bar draws: the shipped
-/// icon files start there, and downscaling a larger source is what keeps the
-/// mark crisp on a HiDPI display, where those 16 logical pixels are 32 real
-/// ones or more.
-const APP_ICON_BYTES: &[u8] = include_bytes!("../../../assets/icon-128.png");
+/// Deliberately *not* the shipped application icon: `assets/icon.svg` and the
+/// `.png`/`.ico`/`.icns` files rasterised from it draw the mark on a dark tile,
+/// which is what makes it stand out among the icons of a desktop and what made
+/// it vanish here — over dark chrome the tile and the title bar were the same
+/// colour, and only the chevron came through. This one is the tile's contents
+/// alone, and being an SVG it is tinted from the theme like every other icon in
+/// the row, so it holds its contrast in a light and a dark theme both.
+pub const LOGO: &str = "icons/logo.svg";
 
 /// Every icon, paired with the bytes [`Icons`] hands back for it.
-const ICONS: [(&str, &[u8]); 17] = [
+const ICONS: [(&str, &[u8]); 18] = [
+    (LOGO, include_bytes!("../assets/icons/logo.svg")),
     (FOLDER, include_bytes!("../assets/icons/folder.svg")),
     (FILE, include_bytes!("../assets/icons/file.svg")),
     (SYMLINK, include_bytes!("../assets/icons/symlink.svg")),
@@ -163,9 +165,6 @@ pub struct Icons;
 
 impl AssetSource for Icons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path == APP_ICON {
-            return Ok(Some(Cow::Borrowed(APP_ICON_BYTES)));
-        }
         Ok(ICONS
             .iter()
             .find(|(name, _)| *name == path)
@@ -176,7 +175,6 @@ impl AssetSource for Icons {
         Ok(ICONS
             .iter()
             .map(|(name, _)| *name)
-            .chain(std::iter::once(APP_ICON))
             .filter(|name| name.starts_with(path))
             .map(SharedString::from)
             .collect())
@@ -209,19 +207,6 @@ mod tests {
                 "{name} is not 24x24"
             );
         }
-    }
-
-    #[test]
-    fn the_app_icon_loads_and_is_a_png() {
-        let bytes = Icons
-            .load(APP_ICON)
-            .expect("loading an embedded icon cannot fail")
-            .expect("the app icon is missing from the asset source");
-        assert_eq!(
-            &bytes[..8],
-            b"\x89PNG\r\n\x1a\n",
-            "the app icon is not a PNG"
-        );
     }
 
     #[test]
