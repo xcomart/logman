@@ -186,6 +186,10 @@ connection:
   select_file: Auswählen
   saved_profiles: Gespeicherte Profile
   empty_list: Noch keine gespeicherten Profile. Füllen Sie das Formular aus und verbinden Sie sich — die Verbindung wird automatisch gespeichert.
+  local:
+    name: Lokales Terminal
+    title: Shell auf diesem Computer
+    hint: "Öffnet %{shell}, Ihre Anmelde-Shell, in einem neuen Tab. Sie läuft auf diesem Computer, daher sind weder ein Host noch ein Passwort nötig."
   name: Name
   host: Host
   port: Port
@@ -237,10 +241,14 @@ session:
   disconnected: "Verbindung getrennt: %{reason}"
   failed: "%{kind}: %{message}"
   reconnect: Erneut verbinden
+  restart: Neu starten
   overlay:
     connecting: "Verbindung zu %{host} wird hergestellt..."
     disconnected: "Verbindung zu %{host} getrennt"
     failed: "Verbindung zu %{host} nicht möglich"
+    local_starting: "%{shell} wird gestartet..."
+    local_exited: "%{shell} wurde beendet"
+    local_failed: "%{shell} konnte nicht gestartet werden"
 
 about:
   title: Über logman

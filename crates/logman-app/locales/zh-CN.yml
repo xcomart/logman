@@ -186,6 +186,10 @@ connection:
   select_file: 选择
   saved_profiles: 已保存的配置
   empty_list: 还没有保存的配置。填写表单并连接后，连接会自动保存。
+  local:
+    name: 本地终端
+    title: 本机上的 Shell
+    hint: "在新标签页中打开登录 Shell %{shell}。它在本机上运行，因此既不需要主机地址，也不需要密码。"
   name: 名称
   host: 主机
   port: 端口
@@ -237,10 +241,14 @@ session:
   disconnected: "已断开：%{reason}"
   failed: "%{kind}：%{message}"
   reconnect: 重新连接
+  restart: 重新启动
   overlay:
     connecting: "正在连接 %{host}..."
     disconnected: "已与 %{host} 断开连接"
     failed: "无法连接到 %{host}"
+    local_starting: "正在启动 %{shell}..."
+    local_exited: "%{shell} 已退出"
+    local_failed: "无法启动 %{shell}"
 
 about:
   title: 关于 logman

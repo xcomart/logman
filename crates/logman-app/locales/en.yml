@@ -313,6 +313,19 @@ connection:
   select_file: Select
   saved_profiles: Saved profiles
   empty_list: No saved profiles yet. Fill in the form and connect — the connection is saved automatically.
+  # The row pinned above the saved profiles, and the panel that replaces the
+  # form once it is selected. Unix only: there is no local terminal to offer on
+  # Windows. `%{shell}` is the name of the user's login shell — a value, like
+  # the host and port samples above, and never translated.
+  #
+  # `name` doubles as the dialog's own title while the row is selected, since
+  # neither "New connection" nor "Connect" describes opening a local shell.
+  # `title` deliberately says something other than `name`, so the panel reads as
+  # an explanation of the row rather than as a repeat of it.
+  local:
+    name: Local terminal
+    title: Shell on this computer
+    hint: "Opens %{shell}, your login shell, in a new tab. It runs on this computer, so there is no host to reach and no password to enter."
   name: Name
   host: Host
   port: Port
@@ -379,10 +392,20 @@ session:
   disconnected: "disconnected: %{reason}"
   failed: "%{kind}: %{message}"
   reconnect: Reconnect
+  # The overlay button of a local session. A shell that ended is started again,
+  # not reconnected to — there was never a connection.
+  restart: Restart
   overlay:
     connecting: "Connecting to %{host}..."
     disconnected: "Disconnected from %{host}"
     failed: "Could not connect to %{host}"
+    # The same three states for a local session, worded for a shell rather than
+    # for a host: `%{shell}` is its name, and nothing here is a connection.
+    # `local_failed` is only ever reached when the shell could not be started at
+    # all; a shell that ran and then ended is `local_exited`.
+    local_starting: "Starting %{shell}..."
+    local_exited: "%{shell} exited"
+    local_failed: "%{shell} could not be started"
 
 # The about box. The version, the licence name and the names of the libraries
 # are values, not words, and are never translated.

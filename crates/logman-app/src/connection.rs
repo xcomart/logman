@@ -18,11 +18,13 @@ use std::path::PathBuf;
 use std::sync::Once;
 
 use gpui::{
-    App, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    KeyBinding, KeyDownEvent, MouseButton, PathPromptOptions, Render, ScrollHandle, SharedString,
-    Window, actions, div, prelude::*, px,
+    AnyElement, App, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    IntoElement, KeyBinding, KeyDownEvent, MouseButton, PathPromptOptions, Render, ScrollHandle,
+    SharedString, Window, actions, div, prelude::*, px,
 };
 use logman_core::{AuthMethod, ProfileStore, SecretStore, SessionOverrides, SessionProfile};
+#[cfg(unix)]
+use logman_pty::login_shell_name;
 use logman_ssh::SshAuth;
 use uuid::Uuid;
 
@@ -153,6 +155,10 @@ pub enum ConnectionDialogEvent {
         /// Credentials resolved from the form and the OS keychain.
         auth: SshAuth,
     },
+    /// Open a shell on this machine. Carries nothing: a local session is not
+    /// saved, needs no credentials, and always runs the user's login shell.
+    #[cfg(unix)]
+    ConnectLocal,
     /// The dialog was dismissed without connecting.
     Dismissed,
 }
@@ -252,6 +258,20 @@ pub struct ConnectionDialog {
     /// Identifier of the profile the form was filled from, if any. Kept so that
     /// connecting updates the existing profile instead of duplicating it.
     editing: Option<Uuid>,
+    /// Whether the pinned "Local terminal" row is the current selection.
+    ///
+    /// Mutually exclusive with [`Self::editing`]: between them they are the
+    /// dialog's one selection, so every path that selects a profile clears this
+    /// through [`Self::clear_local_selection`].
+    #[cfg(unix)]
+    local_selected: bool,
+    /// Name of the user's login shell, resolved once when the dialog is built.
+    ///
+    /// Cached rather than looked up per frame: the lookup reads `$SHELL` and,
+    /// failing that, the passwd database, and neither can change under a
+    /// running application.
+    #[cfg(unix)]
+    local_shell: SharedString,
     /// Authentication method currently selected in the form.
     auth_kind: AuthKind,
     /// Whether the secret should be written to the OS keychain.
@@ -381,6 +401,10 @@ impl ConnectionDialog {
             open: false,
             store,
             editing: None,
+            #[cfg(unix)]
+            local_selected: false,
+            #[cfg(unix)]
+            local_shell: SharedString::from(login_shell_name()),
             auth_kind: AuthKind::Password,
             save_secret: false,
             status: None,
@@ -479,6 +503,9 @@ impl ConnectionDialog {
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         self.pending_focus = None;
+        // Belt and braces: every `open_*` resets the form anyway, but a closed
+        // dialog must not carry a selection that outlives the reason for it.
+        self.clear_local_selection();
         // A closed dialog has nothing to report; leaving the last message behind
         // would let it reappear for a moment the next time the dialog opens.
         self.status = None;
@@ -503,9 +530,50 @@ impl ConnectionDialog {
         }
     }
 
+    /// Whether the pinned local row is the current selection.
+    ///
+    /// Answers `false` where there is no local terminal at all, so the render
+    /// path can branch on it without a platform conditional of its own.
+    fn is_local_selected(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.local_selected
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// Drop the pinned local row from the selection.
+    ///
+    /// A no-op where there is no local terminal, which is what keeps the SSH
+    /// paths that call it free of platform conditionals.
+    fn clear_local_selection(&mut self) {
+        #[cfg(unix)]
+        {
+            self.local_selected = false;
+        }
+    }
+
+    /// Make the pinned local row the selection.
+    ///
+    /// The form is cleared rather than left standing: it holds whatever profile
+    /// was selected before, and the local panel takes its place on screen. No
+    /// field is focused afterwards because the panel has none — a pending focus
+    /// left over from `open_*` would land on an unpainted input.
+    #[cfg(unix)]
+    fn select_local(&mut self, cx: &mut Context<Self>) {
+        self.reset_form(cx);
+        self.local_selected = true;
+        self.pending_focus = None;
+        cx.notify();
+    }
+
     /// Clear every field and drop any selection.
     fn reset_form(&mut self, cx: &mut Context<Self>) {
         self.editing = None;
+        self.clear_local_selection();
         self.auth_kind = AuthKind::Password;
         self.save_secret = false;
         self.status = None;
@@ -593,6 +661,9 @@ impl ConnectionDialog {
 
         self.save_secret = profile.save_secret;
         self.editing = Some(profile.id);
+        // The single funnel through which a profile becomes the selection, so
+        // the single place the pinned local row has to be deselected.
+        self.clear_local_selection();
     }
 
     /// The per-session overrides described by the form.
@@ -751,6 +822,12 @@ impl ConnectionDialog {
 
     /// Whether the form holds enough information to open a session.
     fn can_connect(&self, cx: &App) -> bool {
+        // The pinned local row is always ready: there is no host to reach, no
+        // credential to check and no form to complete.
+        #[cfg(unix)]
+        if self.local_selected {
+            return true;
+        }
         if self.auth_kind == AuthKind::Agent {
             return false;
         }
@@ -802,6 +879,17 @@ impl ConnectionDialog {
     /// message strip and the dialog stays open so the user can read them, while
     /// the session opens behind it. A clean run closes the dialog.
     fn connect(&mut self, cx: &mut Context<Self>) {
+        // A local session is not a profile: nothing is written to disk, no
+        // keychain entry is touched, and there are no credentials to resolve.
+        // Returning before any of that is what keeps the pinned row from
+        // disturbing the saved profiles or the form's own state.
+        #[cfg(unix)]
+        if self.local_selected {
+            cx.emit(ConnectionDialogEvent::ConnectLocal);
+            self.close(cx);
+            return;
+        }
+
         if !self.can_connect(cx) {
             self.explain_incomplete(cx);
             return;
@@ -1097,6 +1185,11 @@ impl ConnectionDialog {
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.surface)
+                    // Pinned above everything the store holds, and separated by
+                    // a rule: it is not one of the saved profiles, it is always
+                    // there, and it scrolls away with them rather than staying
+                    // stuck to the top of a long list.
+                    .children(self.render_local_rows(cx))
                     .when(empty, |this| {
                         this.child(
                             div()
@@ -1107,6 +1200,137 @@ impl ConnectionDialog {
                         )
                     })
                     .children(rows),
+            )
+    }
+
+    /// The pinned "Local terminal" row and the rule under it, or nothing at all
+    /// on a platform with no local terminal.
+    ///
+    /// A list rather than an `Option` so that the rule is a sibling of the row
+    /// instead of being wrapped in a container that would break the list's own
+    /// spacing.
+    fn render_local_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        #[cfg(not(unix))]
+        {
+            let _ = cx;
+            Vec::new()
+        }
+
+        #[cfg(unix)]
+        {
+            let theme = theme(cx);
+            let this = cx.entity();
+            let selected = self.local_selected;
+
+            let row = div()
+                .id("connection-local")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .px(px(8.))
+                .py(px(6.))
+                .rounded_md()
+                .cursor_pointer()
+                .bg(if selected {
+                    theme.surface_active
+                } else {
+                    gpui::transparent_black()
+                })
+                .hover(move |style| {
+                    style.bg(if selected {
+                        theme.surface_active
+                    } else {
+                        theme.surface_hover
+                    })
+                })
+                // Selected on a single click, opened on a double one, exactly
+                // like a saved profile row.
+                .on_click(move |event, _window, cx| {
+                    let double = event.click_count() >= 2;
+                    this.update(cx, |dialog, cx| {
+                        dialog.select_local(cx);
+                        if double {
+                            dialog.connect(cx);
+                        }
+                    });
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_grow()
+                        .min_w_0()
+                        .gap(px(1.))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(13.))
+                                .text_color(theme.text)
+                                .child(ts!("connection.local.name")),
+                        )
+                        // The shell's name is a value, not a word: never
+                        // translated, and shown where a profile shows its
+                        // `user@host`.
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(theme.text_muted)
+                                .child(self.local_shell.clone()),
+                        ),
+                );
+
+            let rule = div()
+                .h(px(1.))
+                .flex_none()
+                .my(px(2.))
+                .mx(px(4.))
+                .bg(theme.border);
+
+            vec![row.into_any_element(), rule.into_any_element()]
+        }
+    }
+
+    /// The right-hand side of the dialog: the connection form, or the local
+    /// panel while the pinned row is selected.
+    fn render_target_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(unix)]
+        if self.local_selected {
+            return self.render_local_panel(cx).into_any_element();
+        }
+        self.render_form(cx).into_any_element()
+    }
+
+    /// What stands in for the form once the pinned local row is selected.
+    ///
+    /// Deliberately has no controls: a local session takes no configuration,
+    /// so the panel only says what pressing Connect will do.
+    #[cfg(unix)]
+    fn render_local_panel(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = theme(cx);
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_w_0()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .text_color(theme.text)
+                    .child(ts!("connection.local.title")),
+            )
+            .child(
+                div()
+                    .max_w(px(380.))
+                    .text_size(px(12.))
+                    .text_color(theme.text_muted)
+                    .child(ts!(
+                        "connection.local.hint",
+                        shell = self.local_shell.clone()
+                    )),
             )
     }
 
@@ -1434,7 +1658,12 @@ impl Render for ConnectionDialog {
 
         self.apply_pending_focus(window, cx);
 
-        let title = if self.editing.is_some() {
+        let local = self.is_local_selected();
+        let title = if local {
+            // Neither "New connection" nor "Connect": nothing is being
+            // connected to, and nothing is being created.
+            ts!("connection.local.name")
+        } else if self.editing.is_some() {
             ts!("connection.title_edit")
         } else {
             ts!("connection.title_new")
@@ -1465,9 +1694,11 @@ impl Render for ConnectionDialog {
                             .items_start()
                             .gap(px(16.))
                             .child(self.render_profile_list(cx))
-                            .child(self.render_form(cx)),
+                            .child(self.render_target_panel(cx)),
                     )
-                    .child(self.render_overrides(cx)),
+                    // A local session is never saved, so there is nothing for a
+                    // per-session override to be attached to.
+                    .children((!local).then(|| self.render_overrides(cx))),
             )
             .child(self.render_footer(cx));
 

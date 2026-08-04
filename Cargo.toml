@@ -62,6 +62,9 @@ futures = "0.3"
 async-trait = "0.1"
 bitflags = "2"
 tempfile = "3"
+# Unix-only, and used only where a raw syscall is unavoidable: clearing
+# `O_NONBLOCK` on a pty master, and reading the passwd entry.
+libc = "0.2"
 
 # --- localization ---
 # `rust-i18n` compiles `crates/logman-app/locales/*.yml` into the binary, so
@@ -103,6 +106,7 @@ gpui = "0.2.2"
 
 # --- internal crates ---
 logman-core = { path = "crates/logman-core" }
+logman-pty = { path = "crates/logman-pty" }
 logman-ssh = { path = "crates/logman-ssh" }
 logman-term = { path = "crates/logman-term" }
 

@@ -627,27 +627,52 @@ impl TerminalView {
     /// Builds the connection overlay shown while the session is not live.
     fn render_overlay(&self, status: &SessionStatus, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = theme(cx);
-        let label = self.session.read(cx).profile().label();
+        let session_ref = self.session.read(cx);
+        let label = session_ref.label();
+        // A local session has no host to name and nothing to *re*connect to, so
+        // it gets its own wording throughout rather than the remote sentences
+        // with a shell name substituted into them.
+        let local = session_ref.is_local();
 
-        // The detail line quotes the SSH layer verbatim, so it stays English;
+        // The detail line quotes the transport verbatim, so it stays English;
         // only the headline around it follows the locale.
-        let (headline, detail, reconnect): (SharedString, SharedString, bool) = match status {
+        let (headline, detail, retry): (SharedString, SharedString, bool) = match status {
             SessionStatus::Connected => return None,
             SessionStatus::Connecting => (
-                ts!("session.overlay.connecting", host = label),
+                if local {
+                    ts!("session.overlay.local_starting", shell = label)
+                } else {
+                    ts!("session.overlay.connecting", host = label)
+                },
                 SharedString::default(),
                 false,
             ),
             SessionStatus::Disconnected { reason } => (
-                ts!("session.overlay.disconnected", host = label),
+                if local {
+                    ts!("session.overlay.local_exited", shell = label)
+                } else {
+                    ts!("session.overlay.disconnected", host = label)
+                },
                 reason.clone().into(),
                 true,
             ),
             SessionStatus::Failed { kind, message } => (
-                ts!("session.overlay.failed", host = label),
-                ts!("session.failed", kind = kind.to_string(), message = message),
+                if local {
+                    ts!("session.overlay.local_failed", shell = label)
+                } else {
+                    ts!("session.overlay.failed", host = label)
+                },
+                ts!("session.failed", kind = kind, message = message),
                 true,
             ),
+        };
+
+        // Restarting a shell is not reconnecting to anything, and the button is
+        // the only thing on the card the user can act on.
+        let retry_label = if local {
+            ts!("session.restart")
+        } else {
+            ts!("session.reconnect")
         };
 
         let session = self.session.clone();
@@ -685,9 +710,9 @@ impl TerminalView {
                         .child(detail),
                 )
             })
-            .when(reconnect, |this| {
+            .when(retry, |this| {
                 this.child(
-                    Button::new("terminal-reconnect", ts!("session.reconnect"))
+                    Button::new("terminal-reconnect", retry_label)
                         .variant(ButtonVariant::Primary)
                         .on_click(move |_, _window, cx| {
                             session.update(cx, |session, cx| session.reconnect(cx));

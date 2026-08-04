@@ -1,0 +1,25 @@
+[package]
+name = "logman-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Everything in this crate is unix-only: the pty plumbing it wraps has no
+# Windows counterpart here. The dependencies are gated the same way so that a
+# Windows build of the workspace compiles an empty crate and pulls in nothing.
+[target.'cfg(unix)'.dependencies]
+# The pty itself — `openpty`, `setsid`, controlling-terminal setup, and the
+# macOS detour through `/usr/bin/login` — already exists inside alacritty's
+# `tty` module, which the workspace depends on for terminal emulation anyway.
+# Reusing it keeps the fiddly parts in one well-tested place.
+alacritty_terminal.workspace = true
+
+futures.workspace = true
+# Undoing the non-blocking mode alacritty forces on the master, and reading the
+# passwd entry when `$SHELL` is unset.
+libc.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+tempfile.workspace = true

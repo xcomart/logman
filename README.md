@@ -28,6 +28,10 @@ A multi-platform GUI SSH terminal written in Rust, built on
   shell's working directory, with a breadcrumb header whose every piece drops
   down the directories beside it, drag-and-drop upload and download — whole
   folders included, with a progress bar while they move — and a draggable edge.
+- **A local terminal too** (Linux and macOS): the connection dialog offers your
+  own login shell above the saved profiles, and it opens in a tab like any other
+  session — no host, no credentials, and splitting one starts the new shell in
+  the directory the first one is in.
 - **Password and private key authentication**, with secrets kept in the OS
   keychain rather than on disk.
 - **A real terminal**, not a log view: `alacritty_terminal` drives the emulation,
@@ -128,10 +132,17 @@ Reconnect button.
 
 ### Remote files panel
 
-The sidebar to the left of the terminal is an SFTP browser for the session in
-the focused pane. It rides on the same SSH connection over a channel of its
-own, so listing a directory or copying a file never holds up the shell — and
-the shell never holds up a transfer.
+The sidebar to the left of the terminal browses the filesystem of the session
+in the focused pane. For an SSH session that is the server: the panel rides on
+the same connection over an SFTP channel of its own, so listing a directory or
+copying a file never holds up the shell — and the shell never holds up a
+transfer. For a local session it is this computer, read straight off the disk
+on a background thread.
+
+Everything below works the same either way; only the wording changes, because
+putting a file into a directory on the disk it is already on is a copy rather
+than an upload. Deleting still asks first — locally that question is about your
+own files.
 
 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> (<kbd>Cmd</kbd>+<kbd>B</kbd> on
 macOS) shows and hides it, as does the panel button left of the tab strip. It
