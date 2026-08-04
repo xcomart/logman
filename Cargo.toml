@@ -42,7 +42,7 @@ exclude = ["vendor/gpui"]
 gpui = { path = "vendor/gpui" }
 
 [workspace.package]
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["logman contributors"]
