@@ -1348,7 +1348,7 @@ impl Workspace {
                     icons::icon(
                         icons::PANEL,
                         px(16.),
-                        if open { theme.accent } else { theme.text_muted },
+                        if open { theme.accent } else { theme.icon },
                     )
                     .group_hover(PANEL_TOGGLE_GROUP, move |style| {
                         style.text_color(hover_text)

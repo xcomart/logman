@@ -2519,15 +2519,11 @@ impl FilePanel {
             .child(if is_dir {
                 icons::icon(icons::FOLDER, px(ROW_ICON), theme.accent)
             } else {
-                icons::icon(icons::FILE, px(ROW_ICON), theme.text_muted)
+                icons::icon(icons::FILE, px(ROW_ICON), theme.icon)
             })
             .child(div().flex_1().min_w_0().truncate().child(label))
             .when(is_symlink, |row| {
-                row.child(icons::icon(
-                    icons::SYMLINK,
-                    px(BADGE_ICON),
-                    theme.text_muted,
-                ))
+                row.child(icons::icon(icons::SYMLINK, px(BADGE_ICON), theme.icon))
             })
             .children(size.map(|size| {
                 div()
@@ -3708,10 +3704,13 @@ fn icon_button(
 ) -> impl IntoElement {
     let hover = theme.surface_hover;
     let text = theme.text;
+    // The icon tint rather than the muted text of the labels around the panel:
+    // these buttons are all mark and no word. A disabled one is faded from the
+    // same colour, so the two states stay one family.
     let color = if enabled {
-        theme.text_muted
+        theme.icon
     } else {
-        theme.text_muted.opacity(0.4)
+        theme.icon.opacity(0.4)
     };
 
     div()

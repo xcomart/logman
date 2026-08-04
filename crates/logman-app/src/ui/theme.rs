@@ -11,6 +11,15 @@
 //! [`ThemeFile`] is the on-disk form, [`crate::theme_store`] reads the files,
 //! and [`ThemeRegistry`] is where the two kinds are listed and resolved
 //! together.
+//!
+//! # Stored colors and derived ones
+//!
+//! Not every slot of a [`Theme`] is written down. A palette spells out the
+//! colors an author chooses — that is [`Palette`], the one gate every theme is
+//! built through — and the slots that have to *hold* for any palette whatever
+//! are worked out from those. [`Theme::icon`] is the first of them: it is the
+//! muted text bent until it clears [`MIN_ICON_CONTRAST`] on both backgrounds,
+//! so that a theme nobody checked still draws icons that can be seen.
 
 use gpui::{App, Global, Hsla, Rgba, hsla};
 use serde::{Deserialize, Serialize};
@@ -42,6 +51,25 @@ pub struct Theme {
     pub text: Hsla,
     /// Secondary foreground color for hints, placeholders and inactive labels.
     pub text_muted: Hsla,
+    /// Resting foreground color of an *icon*, as opposed to muted text.
+    ///
+    /// Icons used to be painted in [`Theme::text_muted`], which is the right
+    /// hierarchy for a hint or an inactive label but the wrong one for a mark:
+    /// a glyph is a solid run of pixels, while an icon is a hairline — the
+    /// caption buttons draw a 1.1 px stroke — and a stroke that thin never
+    /// reaches full coverage once it has been antialiased, so the same color
+    /// arrives on screen weaker than the text beside it. WCAG asks 3:1 of a
+    /// graphical control for that reason, and several of the built-in dark
+    /// palettes did not even reach that with their muted text.
+    ///
+    /// So this slot is *derived* rather than stored: [`Palette`] runs
+    /// [`readable_icon`] over the theme's own muted text, keeping its hue and
+    /// saturation and moving only its lightness away from the surfaces until it
+    /// clears [`MIN_ICON_CONTRAST`] against both [`Theme::background`] and
+    /// [`Theme::surface`]. Deriving it is what lets a theme a user wrote by
+    /// hand — [`ThemeFile`] carries no `icon` key, and gains none — come out
+    /// legible without the user having thought about contrast at all.
+    pub icon: Hsla,
     /// Brand color used for the active tab, focus rings and primary buttons.
     pub accent: Hsla,
     /// Destructive actions and error states.
@@ -55,7 +83,7 @@ pub struct Theme {
 impl Theme {
     /// The default dark theme, in the spirit of One Dark.
     pub fn dark() -> Self {
-        Self {
+        Palette {
             dark: true,
             background: hsla(220. / 360., 0.13, 0.18, 1.0),
             surface: hsla(220. / 360., 0.13, 0.14, 1.0),
@@ -69,11 +97,12 @@ impl Theme {
             success: hsla(95. / 360., 0.38, 0.62, 1.0),
             overlay: hsla(220. / 360., 0.13, 0.06, 0.62),
         }
+        .into()
     }
 
     /// A light counterpart to [`Theme::dark`].
     pub fn light() -> Self {
-        Self {
+        Palette {
             dark: false,
             background: hsla(0., 0.0, 1.0, 1.0),
             surface: hsla(220. / 360., 0.16, 0.96, 1.0),
@@ -87,6 +116,7 @@ impl Theme {
             success: hsla(120. / 360., 0.45, 0.33, 1.0),
             overlay: hsla(220. / 360., 0.13, 0.35, 0.40),
         }
+        .into()
     }
 
     /// Chrome for Solarized Dark.
@@ -96,7 +126,7 @@ impl Theme {
     /// and `base01`; the three status colors are the palette's own blue, red
     /// and green.
     pub fn solarized_dark() -> Self {
-        Self {
+        Palette {
             dark: true,
             background: hsla(192. / 360., 1.00, 0.11, 1.0),
             surface: hsla(192. / 360., 1.00, 0.085, 1.0),
@@ -110,6 +140,7 @@ impl Theme {
             success: hsla(68. / 360., 1.00, 0.30, 1.0),
             overlay: hsla(192. / 360., 1.00, 0.04, 0.62),
         }
+        .into()
     }
 
     /// Chrome for Solarized Light.
@@ -119,7 +150,7 @@ impl Theme {
     /// text is `base01` over `base0`, which is the contrast pairing Solarized
     /// itself prescribes for a light background.
     pub fn solarized_light() -> Self {
-        Self {
+        Palette {
             dark: false,
             background: hsla(44. / 360., 0.87, 0.94, 1.0),
             surface: hsla(46. / 360., 0.42, 0.88, 1.0),
@@ -133,6 +164,7 @@ impl Theme {
             success: hsla(68. / 360., 1.00, 0.26, 1.0),
             overlay: hsla(44. / 360., 0.30, 0.35, 0.40),
         }
+        .into()
     }
 
     /// Chrome for Gruvbox Dark.
@@ -141,7 +173,7 @@ impl Theme {
     /// saturated; the text is `light1` over `gray`, and the accents are the
     /// bright blue, red and green of the ANSI palette.
     pub fn gruvbox_dark() -> Self {
-        Self {
+        Palette {
             dark: true,
             background: hsla(20. / 360., 0.03, 0.157, 1.0),
             surface: hsla(20. / 360., 0.03, 0.12, 1.0),
@@ -155,6 +187,7 @@ impl Theme {
             success: hsla(61. / 360., 0.66, 0.44, 1.0),
             overlay: hsla(20. / 360., 0.05, 0.06, 0.62),
         }
+        .into()
     }
 
     /// Chrome for Dracula.
@@ -163,7 +196,7 @@ impl Theme {
     /// `Current Line`, the muted text is `Comment`, and the accent is the
     /// `Purple` that Dracula puts in the ANSI blue slot.
     pub fn dracula() -> Self {
-        Self {
+        Palette {
             dark: true,
             background: hsla(231. / 360., 0.15, 0.184, 1.0),
             surface: hsla(231. / 360., 0.15, 0.14, 1.0),
@@ -177,7 +210,171 @@ impl Theme {
             success: hsla(135. / 360., 0.94, 0.65, 1.0),
             overlay: hsla(231. / 360., 0.15, 0.07, 0.62),
         }
+        .into()
     }
+}
+
+/// The colors a theme *spells out*, before the derived ones are worked out.
+///
+/// Every `Theme` in the application is built from one of these — the six
+/// built-in palettes above and [`ThemeFile::to_theme`] all end in
+/// `Palette { … }.into()` — which is the point of the type: a slot that has to
+/// hold for *any* palette, [`Theme::icon`] so far, can then be derived in the
+/// single [`From`] impl below instead of being spelled out once per theme and
+/// forgotten by the seventh. It is deliberately not public: a palette written
+/// outside this module could not be held to that promise.
+struct Palette {
+    /// See [`Theme::dark`](Theme#structfield.dark).
+    dark: bool,
+    /// See [`Theme::background`](Theme#structfield.background).
+    background: Hsla,
+    /// See [`Theme::surface`](Theme#structfield.surface).
+    surface: Hsla,
+    /// See [`Theme::surface_hover`](Theme#structfield.surface_hover).
+    surface_hover: Hsla,
+    /// See [`Theme::surface_active`](Theme#structfield.surface_active).
+    surface_active: Hsla,
+    /// See [`Theme::border`](Theme#structfield.border).
+    border: Hsla,
+    /// See [`Theme::text`](Theme#structfield.text).
+    text: Hsla,
+    /// See [`Theme::text_muted`](Theme#structfield.text_muted).
+    text_muted: Hsla,
+    /// See [`Theme::accent`](Theme#structfield.accent).
+    accent: Hsla,
+    /// See [`Theme::danger`](Theme#structfield.danger).
+    danger: Hsla,
+    /// See [`Theme::success`](Theme#structfield.success).
+    success: Hsla,
+    /// See [`Theme::overlay`](Theme#structfield.overlay).
+    overlay: Hsla,
+}
+
+impl From<Palette> for Theme {
+    fn from(palette: Palette) -> Self {
+        Self {
+            dark: palette.dark,
+            background: palette.background,
+            surface: palette.surface,
+            surface_hover: palette.surface_hover,
+            surface_active: palette.surface_active,
+            border: palette.border,
+            text: palette.text,
+            text_muted: palette.text_muted,
+            // The one slot no palette writes; see [`Theme::icon`].
+            icon: readable_icon(palette.text_muted, palette.background, palette.surface),
+            accent: palette.accent,
+            danger: palette.danger,
+            success: palette.success,
+            overlay: palette.overlay,
+        }
+    }
+}
+
+/// Contrast an icon has to reach against the surfaces it is painted on.
+///
+/// WCAG 2.1 asks 3:1 of a graphical control and 4.5:1 of body text; icons are
+/// held to the text figure here because they are drawn *thinner* than text —
+/// a 12 px caption glyph is a stroke a little over a pixel wide, and an
+/// antialiased stroke that narrow never reaches the full coverage the ratio
+/// assumes. Aiming at 4.5 buys back roughly what the antialiasing gives away.
+const MIN_ICON_CONTRAST: f32 = 4.5;
+
+/// How many times [`readable_icon`] halves the interval it searches.
+///
+/// Lightness is an `f32` in `[0, 1]`, so twenty-four halvings put the answer
+/// far below the 1/255 that survives being written to a framebuffer: the
+/// search stops well before precision does.
+const ICON_SEARCH_STEPS: u32 = 24;
+
+/// The relative luminance of `color`, as WCAG 2.1 defines it.
+///
+/// Alpha plays no part: every foreground slot of a theme is opaque, and a
+/// translucent one would have to be composited against a specific background
+/// before its luminance meant anything at all.
+fn relative_luminance(color: Hsla) -> f32 {
+    let rgba = Rgba::from(color);
+    // sRGB's transfer function, undone: the stored channel is gamma-encoded,
+    // and luminance is a sum of *linear* light.
+    let linear = |channel: f32| {
+        let channel = channel.clamp(0.0, 1.0);
+        if channel <= 0.03928 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(rgba.r) + 0.7152 * linear(rgba.g) + 0.0722 * linear(rgba.b)
+}
+
+/// The WCAG contrast ratio between two colors, from `1.0` to `21.0`.
+///
+/// Symmetric in its arguments, so a caller need not know which of the two is
+/// the foreground.
+pub fn contrast_ratio(left: Hsla, right: Hsla) -> f32 {
+    let (left, right) = (relative_luminance(left), relative_luminance(right));
+    let (lighter, darker) = if left >= right {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+/// The icon tint a theme whose muted text is `muted` should use.
+///
+/// Icons sit on both of a theme's two backgrounds — the app background and the
+/// raised chrome of toolbars, panels and the tab strip — so the color is judged
+/// against the *worse* of the two and has to clear [`MIN_ICON_CONTRAST`] there.
+/// A palette whose muted text already does is left exactly as it is, which is
+/// what keeps a well-judged theme looking like itself; only the ones that fall
+/// short are moved, and then only in lightness, so that the hue and saturation
+/// the theme's author chose survive.
+///
+/// The direction is whichever end of the lightness axis is further from the two
+/// backgrounds — away from them, in other words, which for a dark theme means
+/// brighter and for a light one darker — and the amount is the smallest that
+/// reaches the target, found by bisection. Relative luminance rises
+/// monotonically with HSL lightness at a fixed hue and saturation, so beyond
+/// the backgrounds the contrast does too and the bisection is well-founded.
+///
+/// One background always leaves an end of the axis that clears 4.5:1, so the
+/// only palettes the search cannot satisfy are the ones whose two backgrounds
+/// sit far apart on the ramp — black chrome on a white page, which no theme
+/// here or on disk is — and those are given the better end anyway rather than
+/// left where they were.
+fn readable_icon(muted: Hsla, background: Hsla, surface: Hsla) -> Hsla {
+    let at = |lightness: f32| Hsla {
+        l: lightness,
+        ..muted
+    };
+    let worst = |color: Hsla| contrast_ratio(color, background).min(contrast_ratio(color, surface));
+
+    if worst(muted) >= MIN_ICON_CONTRAST {
+        return muted;
+    }
+
+    let end = if worst(at(1.0)) >= worst(at(0.0)) {
+        1.0
+    } else {
+        0.0
+    };
+    if worst(at(end)) < MIN_ICON_CONTRAST {
+        return at(end);
+    }
+
+    // The invariant carried through the halvings: `short` fails the target and
+    // `enough` meets it, so the answer is always the endpoint that meets it.
+    let (mut short, mut enough) = (muted.l, end);
+    for _ in 0..ICON_SEARCH_STEPS {
+        let middle = (short + enough) / 2.0;
+        if worst(at(middle)) >= MIN_ICON_CONTRAST {
+            enough = middle;
+        } else {
+            short = middle;
+        }
+    }
+    at(enough)
 }
 
 impl Default for Theme {
@@ -475,7 +672,7 @@ impl ThemeFile {
         let fallback = Theme::dark();
         let color = |value: &str, fallback: Hsla| parse_hex(value).unwrap_or(fallback);
 
-        Theme {
+        Palette {
             dark: self.dark,
             background: color(&self.colors.background, fallback.background),
             surface: color(&self.colors.surface, fallback.surface),
@@ -489,6 +686,10 @@ impl ThemeFile {
             success: color(&self.colors.success, fallback.success),
             overlay: color(&self.colors.overlay, fallback.overlay),
         }
+        // Which also settles [`Theme::icon`], for a file that never mentions
+        // it: a hand-written theme is legible whether or not its author
+        // thought about the icons.
+        .into()
     }
 
     /// The file that would reproduce `theme` under the name `name`.
@@ -720,6 +921,167 @@ mod tests {
             assert_eq!((theme.build)().dark, theme.dark, "{}", theme.id);
         }
         assert!(!ThemeRegistry::is_builtin("nonsense"));
+    }
+
+    /// The worst contrast an icon shows on the two backgrounds it is painted
+    /// on, which is the figure [`readable_icon`] is judged by.
+    fn icon_contrast(theme: &Theme) -> f32 {
+        contrast_ratio(theme.icon, theme.background).min(contrast_ratio(theme.icon, theme.surface))
+    }
+
+    /// A palette built around one background and one muted text, for the cases
+    /// no shipped theme covers.
+    fn palette(background: Hsla, surface: Hsla, text_muted: Hsla) -> Theme {
+        Palette {
+            background,
+            surface,
+            text_muted,
+            ..dark_palette()
+        }
+        .into()
+    }
+
+    /// The default palette, as a starting point for [`palette`].
+    fn dark_palette() -> Palette {
+        let theme = Theme::dark();
+        Palette {
+            dark: theme.dark,
+            background: theme.background,
+            surface: theme.surface,
+            surface_hover: theme.surface_hover,
+            surface_active: theme.surface_active,
+            border: theme.border,
+            text: theme.text,
+            text_muted: theme.text_muted,
+            accent: theme.accent,
+            danger: theme.danger,
+            success: theme.success,
+            overlay: theme.overlay,
+        }
+    }
+
+    #[test]
+    fn contrast_is_symmetric_and_spans_the_whole_range() {
+        let black = hsla(0., 0., 0., 1.0);
+        let white = hsla(0., 0., 1.0, 1.0);
+        assert!((contrast_ratio(black, white) - 21.0).abs() < 0.01);
+        assert_eq!(contrast_ratio(black, white), contrast_ratio(white, black));
+        assert_eq!(contrast_ratio(white, white), 1.0);
+    }
+
+    /// The reason [`Theme::icon`] exists: every theme that ships has to clear
+    /// the bar on *both* of the backgrounds an icon is drawn on, which several
+    /// of them did not when the icons were painted in the muted text — and the
+    /// bar is read off the implementation rather than hardcoded here, so that
+    /// raising it can never leave this test agreeing with the old figure.
+    #[test]
+    fn every_builtin_theme_gives_its_icons_enough_contrast() {
+        for builtin in &BUILTIN_THEMES {
+            let theme = (builtin.build)();
+            assert!(
+                icon_contrast(&theme) >= MIN_ICON_CONTRAST,
+                "{}: icons at {:.2}:1",
+                builtin.id,
+                icon_contrast(&theme)
+            );
+        }
+    }
+
+    /// And a palette whose muted text is already legible keeps it: the derived
+    /// slot is a floor under a theme, not a restyling of one.
+    #[test]
+    fn a_muted_text_that_is_already_legible_is_left_alone() {
+        let theme = palette(
+            hsla(0., 0., 0.05, 1.0),
+            hsla(0., 0., 0.10, 1.0),
+            hsla(210. / 360., 0.20, 0.80, 1.0),
+        );
+        assert_eq!(theme.icon, theme.text_muted);
+    }
+
+    /// A palette that has to be moved keeps its hue and saturation, and moves
+    /// no further than it must.
+    #[test]
+    fn an_illegible_muted_text_is_moved_only_in_lightness() {
+        let muted = hsla(225. / 360., 0.27, 0.51, 1.0);
+        let theme = palette(hsla(231. / 360., 0.15, 0.184, 1.0), muted, muted);
+        assert_ne!(theme.icon, theme.text_muted);
+        assert_eq!(theme.icon.h, muted.h);
+        assert_eq!(theme.icon.s, muted.s);
+        assert_eq!(theme.icon.a, muted.a);
+        assert!(icon_contrast(&theme) >= MIN_ICON_CONTRAST);
+        // The smallest move that works: a hair darker would not have.
+        let short = Hsla {
+            l: theme.icon.l - 0.01,
+            ..theme.icon
+        };
+        assert!(
+            contrast_ratio(short, theme.background).min(contrast_ratio(short, theme.surface))
+                < MIN_ICON_CONTRAST
+        );
+    }
+
+    /// The extremes answer rather than panicking, and they answer with the most
+    /// legible colour on offer: a mid-grey background can still be cleared, by
+    /// going dark rather than light.
+    #[test]
+    fn an_extreme_palette_still_gets_an_answer() {
+        let grey = hsla(0., 0., 0.5, 1.0);
+        let theme = palette(grey, grey, grey);
+        assert!(theme.icon.l < grey.l, "the icon went the wrong way");
+        assert!(icon_contrast(&theme) >= MIN_ICON_CONTRAST);
+
+        // And a palette that no colour can satisfy — one background at each end
+        // of the ramp — is pushed to an end of the axis instead of being left
+        // where it was.
+        let split = palette(
+            hsla(0., 0., 0.0, 1.0),
+            hsla(0., 0., 1.0, 1.0),
+            hsla(0., 0., 0.5, 1.0),
+        );
+        assert!(split.icon.l == 0.0 || split.icon.l == 1.0);
+    }
+
+    /// The guarantee reaches themes logman never saw: a file carries no `icon`
+    /// key — adding one would break every theme already written — so the slot
+    /// is derived on the way in, for a hand-written palette as much as for a
+    /// built-in one.
+    #[test]
+    fn a_theme_from_a_file_gets_the_same_guarantee() {
+        let json = r##"{
+            "name": "Murky",
+            "dark": true,
+            "colors": {
+                "background": "#202430",
+                "surface": "#1a1e28",
+                "surface_hover": "#2a2f3c",
+                "surface_active": "#333949",
+                "border": "#3d4455",
+                "text": "#c8ccd8",
+                "text_muted": "#4a5064",
+                "accent": "#6ea8fe",
+                "danger": "#e05561",
+                "success": "#8cc265",
+                "overlay": "#0a0c129e"
+            }
+        }"##;
+
+        let file: ThemeFile = serde_json::from_str(json).expect("parse");
+        let muted = parse_hex("#4a5064").expect("muted");
+        let theme = file.to_theme();
+        assert!(
+            contrast_ratio(muted, theme.background).min(contrast_ratio(muted, theme.surface))
+                < MIN_ICON_CONTRAST,
+            "the fixture was not the illegible palette this test needs"
+        );
+        assert!(icon_contrast(&theme) >= MIN_ICON_CONTRAST);
+
+        // The file it writes back is still the eleven stored slots: the derived
+        // one is not a key, so a round trip cannot invent one.
+        let written = ThemeFile::from_theme("Murky", &theme);
+        assert_eq!(written.colors, file.colors);
+        let json = serde_json::to_string(&written).expect("serialize");
+        assert!(!json.contains("icon"), "{json}");
     }
 
     #[test]

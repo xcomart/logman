@@ -427,7 +427,9 @@ impl RenderOnce for TabBar {
                             .size(px(16.))
                             .rounded_sm()
                             .text_size(px(12.))
-                            .text_color(theme.text_muted)
+                            // The mark on a button, not a word in the title
+                            // beside it, so it takes the icon tint.
+                            .text_color(theme.icon)
                             .invisible()
                             .group_hover(group.clone(), |style| style.visible())
                             .hover(|style| style.bg(theme.surface_hover).text_color(theme.text))
@@ -490,7 +492,7 @@ impl RenderOnce for TabBar {
                         .size(px(16.))
                         .flex_none()
                         .path(path)
-                        .text_color(theme.text_muted)
+                        .text_color(theme.icon)
                         .group_hover(NEW_GROUP, move |style| style.text_color(hover_text))
                         .into_any_element(),
                     None => "+".into_any_element(),
@@ -510,7 +512,10 @@ impl RenderOnce for TabBar {
                         .mx(px(4.))
                         .rounded_md()
                         .text_size(px(16.))
-                        .text_color(theme.text_muted)
+                        // Reaches the bare "+" this button falls back to when
+                        // no icon was handed in; the icon carries its own tint
+                        // above, and the two have to agree.
+                        .text_color(theme.icon)
                         .cursor_pointer()
                         .hover(|style| style.bg(theme.surface_hover).text_color(theme.text))
                         .on_click(move |_, window, cx| handler(window, cx))
