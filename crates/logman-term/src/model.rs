@@ -747,6 +747,24 @@ mod tests {
     }
 
     #[test]
+    fn trigram_symbols_stay_narrow_like_the_deployed_wcwidth() {
+        let mut term = model(20, 3);
+        // Unicode 16 widened the trigram block to two columns, but glibc's
+        // wcwidth and vim's own table still call it one. vim-airline draws
+        // U+2630 in its default powerline status line, so the grid has to
+        // advance by a single column or the line overflows onto the next row.
+        term.feed("\u{2630}x".as_bytes());
+
+        let line = &term.snapshot().lines[0];
+        let spans: Vec<_> = line
+            .runs
+            .iter()
+            .map(|run| (run.text.as_str(), run.start_col, run.cells))
+            .collect();
+        assert_eq!(spans, vec![("\u{2630}", 0, 1), ("x", 1, 1)]);
+    }
+
+    #[test]
     fn combining_marks_are_attached_to_the_base_character() {
         let mut term = model(20, 3);
         // `e` followed by a combining acute accent.
