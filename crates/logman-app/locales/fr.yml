@@ -251,6 +251,18 @@ connection:
     term: TERM
     inherits_value: "hérite de %{value}"
     inherits_lines: "hérite de %{value} lignes"
+  tunnels:
+    title: Tunnels SSH
+    none: aucun port redirigé
+    one: 1 port redirigé
+    many: "%{count} ports redirigés"
+    hint: Chaque règle écoute sur un port de cet ordinateur et le redirige, à travers cette session, vers un hôte que la machine distante peut joindre.
+    local_port: Port local
+    remote_host: Hôte distant
+    remote_port: Port distant
+    add: Ajouter un tunnel
+    remove: Supprimer
+    incomplete: Complétez ou supprimez la règle de tunnel incomplète.
 
 session:
   connecting: connexion

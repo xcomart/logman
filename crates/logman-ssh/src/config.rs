@@ -86,6 +86,29 @@ impl fmt::Debug for SshAuth {
     }
 }
 
+/// One local port forwarding, the equivalent of OpenSSH's `-L`.
+///
+/// The listener is opened on the machine running logman once the session's
+/// shell is up, and every connection it accepts is carried over the *same*
+/// transport as the shell — no second connection is made, and no second
+/// authentication happens. `remote_host` is resolved by the remote end, so it
+/// may well be a name that exists only inside the remote network.
+///
+/// A forwarding that cannot bind does not fail the session: it is reported as
+/// [`SshEvent::TunnelFailed`](crate::SshEvent::TunnelFailed) and the shell
+/// carries on, the way `ssh -L` warns and still logs you in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelForward {
+    /// Local address the listener binds, usually `127.0.0.1`.
+    pub bind_address: String,
+    /// Local TCP port to listen on.
+    pub local_port: u16,
+    /// Host to connect to from the remote end, as the remote end resolves it.
+    pub remote_host: String,
+    /// TCP port to connect to on `remote_host`.
+    pub remote_port: u16,
+}
+
 /// Everything needed to open an interactive shell on a remote host.
 #[derive(Clone)]
 pub struct SshConfig {
@@ -110,6 +133,9 @@ pub struct SshConfig {
     /// TCP connect timeout in seconds; `0` disables the timeout and defers to
     /// the operating system. Defaults to [`DEFAULT_CONNECT_TIMEOUT_SECS`].
     pub connect_timeout_secs: u64,
+    /// Local port forwardings to open once the shell is running. Empty by
+    /// default, which is a session that forwards nothing.
+    pub tunnels: Vec<TunnelForward>,
 }
 
 impl SshConfig {
@@ -131,6 +157,7 @@ impl SshConfig {
             term: DEFAULT_TERM.to_owned(),
             keepalive_secs: DEFAULT_KEEPALIVE_SECS,
             connect_timeout_secs: DEFAULT_CONNECT_TIMEOUT_SECS,
+            tunnels: Vec::new(),
         }
     }
 }
@@ -149,6 +176,8 @@ impl fmt::Debug for SshConfig {
             .field("term", &self.term)
             .field("keepalive_secs", &self.keepalive_secs)
             .field("connect_timeout_secs", &self.connect_timeout_secs)
+            // Addresses and ports only; a forwarding carries no secret.
+            .field("tunnels", &self.tunnels)
             .finish()
     }
 }

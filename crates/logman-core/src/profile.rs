@@ -30,6 +30,35 @@ pub enum AuthMethod {
     Agent,
 }
 
+/// Address a tunnel listener binds to when the profile does not say.
+///
+/// Loopback rather than `0.0.0.0`, for the same reason OpenSSH defaults `-L`
+/// that way: a forwarded port carries whatever the remote service trusts its
+/// own network to hold, and exposing it to the local network hands that trust
+/// to every machine on the segment.
+fn default_bind_address() -> String {
+    "127.0.0.1".to_owned()
+}
+
+/// One local port forwarding rule, the equivalent of OpenSSH's `-L`.
+///
+/// A connection to `bind_address:local_port` is carried over the session's own
+/// transport and opened, by the remote host, to `remote_host:remote_port`. The
+/// remote address is therefore resolved *there*: a name that only exists inside
+/// the remote network is exactly the point of the rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelRule {
+    /// Address the local listener binds; loopback unless the user edited it.
+    #[serde(default = "default_bind_address")]
+    pub bind_address: String,
+    /// Local TCP port to listen on.
+    pub local_port: u16,
+    /// Host to connect to from the remote end, as the remote end resolves it.
+    pub remote_host: String,
+    /// TCP port to connect to on `remote_host`.
+    pub remote_port: u16,
+}
+
 /// Per-session deviations from the global [`crate::AppSettings`].
 ///
 /// Every field is optional: `None` means "inherit whatever the global settings
@@ -87,14 +116,20 @@ pub struct SessionProfile {
     /// is overridden.
     #[serde(default, skip_serializing_if = "SessionOverrides::is_empty")]
     pub overrides: SessionOverrides,
+    /// Local port forwardings opened once this session's shell is up.
+    ///
+    /// Absent from older `profiles.json` files and omitted again while the list
+    /// is empty, which is what the great majority of profiles look like.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tunnels: Vec<TunnelRule>,
 }
 
 impl SessionProfile {
     /// Create a profile with a freshly generated identifier.
     ///
-    /// `save_secret` starts out disabled and no settings are overridden; enable
-    /// the former explicitly before storing a secret with
-    /// [`crate::SecretStore::set`].
+    /// `save_secret` starts out disabled, no settings are overridden and no
+    /// port is forwarded; enable the first explicitly before storing a secret
+    /// with [`crate::SecretStore::set`].
     pub fn new(
         name: impl Into<String>,
         host: impl Into<String>,
@@ -111,6 +146,7 @@ impl SessionProfile {
             auth,
             save_secret: false,
             overrides: SessionOverrides::default(),
+            tunnels: Vec::new(),
         }
     }
 
@@ -418,6 +454,62 @@ mod tests {
         assert!(profile.save_secret);
         assert_eq!(profile.overrides, SessionOverrides::default());
         assert!(profile.overrides.is_empty());
+        assert!(profile.tunnels.is_empty());
+    }
+
+    #[test]
+    fn empty_tunnels_are_not_written_to_disk() {
+        let mut store = ProfileStore::default();
+        store.upsert(sample("plain"));
+
+        let json = serde_json::to_string(&store).expect("serialize");
+        assert!(
+            !json.contains("tunnels"),
+            "an empty tunnel list must be skipped, got {json}"
+        );
+    }
+
+    #[test]
+    fn tunnel_rules_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("profiles.json");
+
+        let mut profile = sample("forwarder");
+        profile.tunnels = vec![
+            TunnelRule {
+                bind_address: default_bind_address(),
+                local_port: 15432,
+                remote_host: "db.internal".to_string(),
+                remote_port: 5432,
+            },
+            TunnelRule {
+                bind_address: "0.0.0.0".to_string(),
+                local_port: 8080,
+                remote_host: "127.0.0.1".to_string(),
+                remote_port: 80,
+            },
+        ];
+
+        let mut store = ProfileStore::default();
+        store.upsert(profile.clone());
+        store.save_to(&path).expect("save");
+
+        let saved = std::fs::read_to_string(&path).expect("read");
+        assert!(saved.contains("db.internal"), "got {saved}");
+
+        let loaded = ProfileStore::load_from(&path).expect("load");
+        assert_eq!(loaded.profiles(), &[profile]);
+    }
+
+    #[test]
+    fn tunnel_rule_without_bind_address_defaults_to_loopback() {
+        // Hand-edited files are expected to leave the address out, since it is
+        // the one field a rule almost never needs to set.
+        let rule: TunnelRule = serde_json::from_str(
+            r#"{ "local_port": 15432, "remote_host": "db.internal", "remote_port": 5432 }"#,
+        )
+        .expect("parse");
+        assert_eq!(rule.bind_address, "127.0.0.1");
     }
 
     #[test]

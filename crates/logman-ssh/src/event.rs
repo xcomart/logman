@@ -9,7 +9,9 @@ use std::fmt;
 /// A single observation about the life of an SSH session.
 ///
 /// The stream always ends with either [`SshEvent::Disconnected`] or
-/// [`SshEvent::Error`]; no further events follow those.
+/// [`SshEvent::Error`]; no further events follow those. Every other variant is
+/// non-terminal, including [`SshEvent::TunnelFailed`], which reports a problem
+/// the session itself survives.
 #[derive(Clone)]
 pub enum SshEvent {
     /// The transport is about to open a TCP connection to the server.
@@ -39,6 +41,18 @@ pub enum SshEvent {
     ExtendedData(Vec<u8>),
     /// The remote shell reported its exit status.
     ExitStatus(u32),
+    /// A port forwarding failed without ending the session.
+    ///
+    /// Emitted when a rule's local listener cannot be bound, when the listener
+    /// gives up, or when the server refuses to open a forwarding channel. The
+    /// shell is unaffected and every other rule keeps working, so this is a
+    /// warning to show beside the session rather than a reason to close it.
+    TunnelFailed {
+        /// The rule that failed, as `local_port:remote_host:remote_port`.
+        rule: String,
+        /// Human-readable explanation, suitable for display in the UI.
+        message: String,
+    },
     /// The session finished. Covers both orderly and unexpected shutdowns
     /// that are not classified as errors.
     Disconnected {
@@ -69,6 +83,11 @@ impl fmt::Debug for SshEvent {
             Self::Data(bytes) => write!(f, "Data({} bytes)", bytes.len()),
             Self::ExtendedData(bytes) => write!(f, "ExtendedData({} bytes)", bytes.len()),
             Self::ExitStatus(code) => write!(f, "ExitStatus({code})"),
+            Self::TunnelFailed { rule, message } => f
+                .debug_struct("TunnelFailed")
+                .field("rule", rule)
+                .field("message", message)
+                .finish(),
             Self::Disconnected { reason } => f
                 .debug_struct("Disconnected")
                 .field("reason", reason)

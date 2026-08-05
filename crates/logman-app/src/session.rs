@@ -26,7 +26,7 @@ use gpui::{App, AppContext, Context, Entity, SharedString, Task};
 use logman_core::{EffectiveTerminal, SessionOverrides, SessionProfile};
 #[cfg(unix)]
 use logman_pty::{PtyConfig, PtyEvent, PtySession, login_shell_name};
-use logman_ssh::{SshAuth, SshConfig, SshEvent, SshSession};
+use logman_ssh::{SshAuth, SshConfig, SshEvent, SshSession, TunnelForward};
 use logman_term::{TerminalModel, TerminalTheme};
 
 use crate::app_settings;
@@ -131,7 +131,10 @@ enum Target {
     /// A remote host reached over SSH.
     Ssh {
         /// Profile the session was opened from.
-        profile: SessionProfile,
+        ///
+        /// Boxed because a profile is by far the largest thing either variant
+        /// carries, and every local session would otherwise pay for it.
+        profile: Box<SessionProfile>,
         /// Credentials, retained so that [`Session::reconnect`] can reuse them.
         ///
         /// Never rendered, logged or otherwise exposed.
@@ -238,7 +241,14 @@ impl Session {
     /// are correct from the very first frame.
     pub fn new(profile: SessionProfile, auth: SshAuth, cx: &mut Context<Self>) -> Self {
         let overrides = profile.overrides.clone();
-        let mut session = Self::build(Target::Ssh { profile, auth }, overrides, cx);
+        let mut session = Self::build(
+            Target::Ssh {
+                profile: Box::new(profile),
+                auth,
+            },
+            overrides,
+            cx,
+        );
         session.start(cx);
         session
     }
@@ -500,7 +510,7 @@ impl Session {
     pub fn duplicate(&self, cx: &mut Context<Self>) -> Entity<Self> {
         match &self.target {
             Target::Ssh { profile, auth } => {
-                let (profile, auth) = (profile.clone(), auth.clone());
+                let (profile, auth) = ((**profile).clone(), auth.clone());
                 cx.new(|cx| Self::new(profile, auth, cx))
             }
             #[cfg(unix)]
@@ -567,6 +577,19 @@ impl Session {
                 config.term = effective.term;
                 config.keepalive_secs = settings.connection.keepalive_secs;
                 config.connect_timeout_secs = settings.connection.connect_timeout_secs;
+                // The profile's rules are the transport's rules, one for one:
+                // reading them here rather than at construction is what lets a
+                // reconnect pick up a forwarding the user has since edited.
+                config.tunnels = profile
+                    .tunnels
+                    .iter()
+                    .map(|rule| TunnelForward {
+                        bind_address: rule.bind_address.clone(),
+                        local_port: rule.local_port,
+                        remote_host: rule.remote_host.clone(),
+                        remote_port: rule.remote_port,
+                    })
+                    .collect();
 
                 let (ssh, mut events) = SshSession::connect(config, host_key_verifier());
                 let pump = cx.spawn(async move |this, cx| {
@@ -624,6 +647,22 @@ impl Session {
             SshEvent::Data(bytes) | SshEvent::ExtendedData(bytes) => self.on_output(&bytes),
             SshEvent::ExitStatus(code) => {
                 log::debug!("{}: remote shell exited with {code}", self.label());
+            }
+            // Non-fatal by contract: the shell is unaffected, so the session
+            // status stays as it is and nothing in the tab strip changes.
+            //
+            // The warning is written into the terminal instead, which is where
+            // `ssh -L` puts the same complaint: it belongs next to the shell it
+            // concerns, it scrolls away with the rest of the session, and it
+            // reaches a user who is looking at the terminal rather than at the
+            // status bar. The prefix names logman so the line cannot be
+            // mistaken for output of the remote shell; `message` is written by
+            // the transport and stays in English, like every other detail this
+            // layer passes through.
+            SshEvent::TunnelFailed { rule, message } => {
+                log::warn!("{}: tunnel {rule} failed: {message}", self.label());
+                let notice = format!("\r\n\x1b[33mlogman: tunnel {rule}: {message}\x1b[0m\r\n");
+                self.on_output(notice.as_bytes());
             }
             SshEvent::Disconnected { reason } => {
                 self.transport = None;

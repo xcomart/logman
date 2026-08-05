@@ -251,6 +251,18 @@ connection:
     term: TERM
     inherits_value: "%{value} を継承"
     inherits_lines: "%{value} 行を継承"
+  tunnels:
+    title: SSH トンネル
+    none: 転送するポートなし
+    one: 1 ポートを転送
+    many: "%{count} ポートを転送"
+    hint: 各ルールはこのコンピューターのポートで待ち受け、このセッションを通じて、リモートマシンから到達できるホストへ転送します。
+    local_port: ローカルポート
+    remote_host: リモートホスト
+    remote_port: リモートポート
+    add: トンネルを追加
+    remove: 削除
+    incomplete: 未完成のトンネルルールを完成させるか削除してください。
 
 session:
   connecting: 接続中
