@@ -70,7 +70,7 @@ gpui = { path = "vendor/gpui" }
 unicode-width = { path = "vendor/unicode-width" }
 
 [workspace.package]
-version = "0.2.6"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["logman contributors"]
