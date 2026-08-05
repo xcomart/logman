@@ -261,13 +261,21 @@ impl TerminalModel {
             }
 
             let (fg, bg, flags) = self.cell_style(cell);
-            let extends = current
-                .as_ref()
-                .is_some_and(|run| run.fg == fg && run.bg == bg && run.flags == flags);
+            // Only plain ASCII cells may share a run: their glyphs advance by
+            // exactly one cell in a monospace font, so shaping them together
+            // still lands every character on its own column. Everything else
+            // becomes a run of its own, because a fallback font's advance would
+            // otherwise drag the rest of the run off the grid.
+            let simple = cell.c.is_ascii() && cell.zerowidth().is_none();
+            let extends = simple
+                && current.as_ref().is_some_and(|run| {
+                    run.text.is_ascii() && run.fg == fg && run.bg == bg && run.flags == flags
+                });
 
             if extends {
                 let run = current.as_mut().expect("checked above");
                 push_cell(&mut run.text, cell);
+                run.cells += 1;
             } else {
                 if let Some(run) = current.take() {
                     runs.push(run);
@@ -277,6 +285,11 @@ impl TerminalModel {
                 current = Some(StyledRun {
                     text,
                     start_col: col as u16,
+                    cells: if cell.flags.contains(Flags::WIDE_CHAR) {
+                        2
+                    } else {
+                        1
+                    },
                     fg,
                     bg,
                     flags,
@@ -689,10 +702,48 @@ mod tests {
         let line = &term.snapshot().lines[0];
         // The spacer cells are dropped, so the text holds three characters ...
         assert_eq!(line.text(), "한글x");
-        // ... while `x` still starts at column four.
-        let last = line.runs.last().expect("a run");
-        assert_eq!(last.start_col, 0);
-        assert_eq!(last.text.chars().count(), 3);
+        // ... and each wide character is a run of its own spanning two columns,
+        // which is what puts `x` at column four.
+        let spans: Vec<_> = line
+            .runs
+            .iter()
+            .map(|run| (run.text.as_str(), run.start_col, run.cells))
+            .collect();
+        assert_eq!(spans, vec![("한", 0, 2), ("글", 2, 2), ("x", 4, 1)]);
+    }
+
+    #[test]
+    fn non_ascii_cells_are_split_out_of_the_surrounding_ascii_run() {
+        let mut term = model(20, 3);
+        // A braille glyph between two stretches of ASCII: the ASCII cells merge
+        // with each other but never with the cluster, whose fallback font may
+        // advance by something other than one cell.
+        term.feed("ab\u{2840}cd".as_bytes());
+
+        let line = &term.snapshot().lines[0];
+        let spans: Vec<_> = line
+            .runs
+            .iter()
+            .map(|run| (run.text.as_str(), run.start_col, run.cells))
+            .collect();
+        assert_eq!(spans, vec![("ab", 0, 2), ("\u{2840}", 2, 1), ("cd", 3, 2)]);
+        assert_eq!(line.text(), "ab\u{2840}cd");
+    }
+
+    #[test]
+    fn narrow_private_use_glyphs_occupy_a_single_column_each() {
+        let mut term = model(20, 3);
+        // The powerline separators vim's airline draws sit in the private use
+        // area and are one column wide, so each becomes its own run.
+        term.feed("\u{e0b0}\u{e0b2}".as_bytes());
+
+        let line = &term.snapshot().lines[0];
+        let spans: Vec<_> = line
+            .runs
+            .iter()
+            .map(|run| (run.text.as_str(), run.start_col, run.cells))
+            .collect();
+        assert_eq!(spans, vec![("\u{e0b0}", 0, 1), ("\u{e0b2}", 1, 1)]);
     }
 
     #[test]
@@ -700,7 +751,12 @@ mod tests {
         let mut term = model(20, 3);
         // `e` followed by a combining acute accent.
         term.feed("e\u{0301}".as_bytes());
-        assert_eq!(term.snapshot().lines[0].text(), "e\u{0301}");
+
+        let line = &term.snapshot().lines[0];
+        assert_eq!(line.text(), "e\u{0301}");
+        // The mark makes the cell a cluster, so it holds one column on its own.
+        assert_eq!(line.runs.len(), 1);
+        assert_eq!(line.runs[0].cells, 1);
     }
 
     #[test]

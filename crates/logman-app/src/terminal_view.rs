@@ -988,11 +988,21 @@ fn row_text(line: &TerminalLine, from: u16, to: u16) -> String {
             }
             col = col.saturating_add(1);
         }
-        for ch in run.text.chars() {
-            if (from..=to).contains(&col) {
-                text.push(ch);
+        if run.text.is_ascii() {
+            for ch in run.text.chars() {
+                if (from..=to).contains(&col) {
+                    text.push(ch);
+                }
+                col = col.saturating_add(1);
             }
-            col = col.saturating_add(1);
+        } else {
+            // A cluster is copied whole - its combining marks belong to the
+            // base character and consume no column of their own - and the
+            // columns it covers are skipped in one step.
+            if (from..=to).contains(&col) {
+                text.push_str(&run.text);
+            }
+            col = col.saturating_add(run.cells);
         }
     }
 
@@ -1001,8 +1011,18 @@ fn row_text(line: &TerminalLine, from: u16, to: u16) -> String {
 
 /// The character rendered at `col`, if any.
 fn char_at(line: &TerminalLine, col: u16) -> Option<char> {
-    let run = line.runs.iter().rev().find(|run| run.start_col <= col)?;
-    run.text.chars().nth(usize::from(col - run.start_col))
+    let run = line
+        .runs
+        .iter()
+        .rev()
+        .find(|run| run.start_col <= col && col < run.start_col.saturating_add(run.cells))?;
+    if run.text.is_ascii() {
+        run.text.chars().nth(usize::from(col - run.start_col))
+    } else {
+        // The trailing column of a double width character reports the base
+        // character rather than nothing.
+        run.text.chars().next()
+    }
 }
 
 /// Applies the bold and italic attributes of a run to `base`.
@@ -1230,6 +1250,11 @@ impl Element for TerminalElement {
         let mut runs = Vec::new();
         for (row, line) in snapshot.lines.iter().enumerate() {
             let y = bounds.origin.y + line_height * row as f32;
+            // Every run starts on a real grid column, and the model keeps each
+            // non-ASCII cluster in a run of its own, so shaping per run snaps
+            // the whole row back onto the grid. A cluster whose glyph is wider
+            // than its cells still spills over its neighbour, exactly as other
+            // terminals let it.
             for run in &line.runs {
                 let origin = point(bounds.origin.x + cell_width * f32::from(run.start_col), y);
                 let text_run = text_run_for(run, &base_font);
@@ -1240,8 +1265,11 @@ impl Element for TerminalElement {
                     None,
                 );
                 if run.bg != palette.background {
+                    // Sized from the columns the run owns rather than from the
+                    // shaped width, which a fallback font may report wider or
+                    // narrower than the cells it was given.
                     quads.push(fill(
-                        Bounds::new(origin, size(shaped.width, line_height)),
+                        Bounds::new(origin, size(cell_width * f32::from(run.cells), line_height)),
                         to_hsla(run.bg),
                     ));
                 }
@@ -1770,5 +1798,73 @@ mod tests {
         // negative.
         let huge = preedit_origin(&geometry, bounds, px(400.));
         assert_eq!(huge, point(px(0.), px(18.)));
+    }
+
+    // --- reading the grid back out of the runs -----------------------------
+
+    /// A run of `cells` columns starting at `start_col`, in the default style.
+    fn styled(text: &str, start_col: u16, cells: u16) -> StyledRun {
+        StyledRun {
+            text: text.to_owned(),
+            start_col,
+            cells,
+            fg: Rgb::new(255, 255, 255),
+            bg: Rgb::new(0, 0, 0),
+            flags: RunFlags::empty(),
+        }
+    }
+
+    /// `한글x`, as the model splits it: one run per wide cluster.
+    fn wide_line() -> TerminalLine {
+        TerminalLine {
+            runs: vec![styled("한", 0, 2), styled("글", 2, 2), styled("x", 4, 1)],
+        }
+    }
+
+    #[test]
+    fn char_at_reports_the_base_character_on_a_spacer_column() {
+        let line = wide_line();
+        assert_eq!(char_at(&line, 0), Some('한'));
+        // Column one is the trailing half of the same character.
+        assert_eq!(char_at(&line, 1), Some('한'));
+        assert_eq!(char_at(&line, 2), Some('글'));
+        assert_eq!(char_at(&line, 3), Some('글'));
+        assert_eq!(char_at(&line, 4), Some('x'));
+        assert_eq!(char_at(&line, 5), None);
+    }
+
+    #[test]
+    fn char_at_indexes_into_an_ascii_run_and_stops_at_its_end() {
+        let line = TerminalLine {
+            runs: vec![styled("ab", 0, 2), styled("cd", 5, 2)],
+        };
+        assert_eq!(char_at(&line, 1), Some('b'));
+        assert_eq!(char_at(&line, 6), Some('d'));
+        // The gap between the runs holds no character at all.
+        assert_eq!(char_at(&line, 2), None);
+        assert_eq!(char_at(&line, 4), None);
+        assert_eq!(char_at(&line, 7), None);
+    }
+
+    #[test]
+    fn row_text_keeps_the_columns_of_wide_characters() {
+        let line = wide_line();
+        assert_eq!(row_text(&line, 0, 4), "한글x");
+        // Selecting from the trailing half of the first character starts at the
+        // next cluster instead of repeating it.
+        assert_eq!(row_text(&line, 1, 4), "글x");
+        assert_eq!(row_text(&line, 2, 3), "글");
+        assert_eq!(row_text(&line, 4, 4), "x");
+    }
+
+    #[test]
+    fn row_text_lets_combining_marks_ride_along_with_their_base() {
+        // `e` plus a combining acute accent is one column, so `f` sits at
+        // column one and the gap padding stays correct.
+        let line = TerminalLine {
+            runs: vec![styled("e\u{0301}", 0, 1), styled("f", 3, 1)],
+        };
+        assert_eq!(row_text(&line, 0, 3), "e\u{0301}  f");
+        assert_eq!(row_text(&line, 1, 3), "  f");
     }
 }

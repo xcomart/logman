@@ -35,6 +35,20 @@ bitflags::bitflags! {
 }
 
 /// A horizontal stretch of cells that share the exact same style.
+///
+/// A run is one of exactly two shapes, and the renderer tells them apart with
+/// `text.is_ascii()`:
+///
+/// * a maximal stretch of plain ASCII cells sharing one style — every `char`
+///   is one column wide, so the whole run can be shaped in one go;
+/// * a single non-ASCII cluster — one base character plus its combining
+///   marks. Such a cell never merges with its neighbours, even when the style
+///   matches, so that [`StyledRun::start_col`] always names a real grid column
+///   and the renderer can snap every cluster back onto the grid instead of
+///   letting a fallback font's advance push the rest of the row sideways.
+///
+/// The split is exact: a cluster always carries at least one non-ASCII byte,
+/// because its base character is non-ASCII or a combining mark is attached.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StyledRun {
     /// The characters of the run.
@@ -44,6 +58,11 @@ pub struct StyledRun {
     pub text: String,
     /// Column index the run starts at.
     pub start_col: u16,
+    /// Number of terminal columns the run spans.
+    ///
+    /// The same as the number of characters for an ASCII run; `2` for a double
+    /// width cluster and `1` for every other one.
+    pub cells: u16,
     /// Resolved text color.
     pub fg: Rgb,
     /// Resolved background color.
@@ -145,10 +164,11 @@ impl TerminalSnapshot {
 mod tests {
     use super::*;
 
-    fn run(text: &str, start_col: u16) -> StyledRun {
+    fn run(text: &str, start_col: u16, cells: u16) -> StyledRun {
         StyledRun {
             text: text.to_owned(),
             start_col,
+            cells,
             fg: Rgb::new(1, 2, 3),
             bg: Rgb::new(4, 5, 6),
             flags: RunFlags::empty(),
@@ -158,7 +178,7 @@ mod tests {
     #[test]
     fn line_text_concatenates_runs() {
         let line = TerminalLine {
-            runs: vec![run("ab", 0), run("cd", 2)],
+            runs: vec![run("ab", 0, 2), run("cd", 2, 2)],
         };
         assert_eq!(line.text(), "abcd");
         assert!(!line.is_empty());
@@ -172,7 +192,7 @@ mod tests {
             rows: 2,
             lines: vec![
                 TerminalLine {
-                    runs: vec![run("ab", 0)],
+                    runs: vec![run("ab", 0, 2)],
                 },
                 TerminalLine::default(),
             ],
