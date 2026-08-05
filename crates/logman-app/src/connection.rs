@@ -29,7 +29,9 @@ use gpui::{
     IntoElement, KeyBinding, KeyDownEvent, MouseButton, PathPromptOptions, Render, ScrollHandle,
     SharedString, Window, actions, div, prelude::*, px,
 };
-use logman_core::{AuthMethod, ProfileStore, SecretStore, SessionOverrides, SessionProfile};
+use logman_core::{
+    AuthMethod, ProfileStore, SecretStore, SessionOverrides, SessionProfile, TunnelRule,
+};
 #[cfg(unix)]
 use logman_pty::login_shell_name;
 use logman_ssh::SshAuth;
@@ -52,6 +54,24 @@ const MAX_SCROLLBACK_DIGITS: usize = 6;
 
 /// Widest font size override the field accepts, in characters.
 const MAX_FONT_SIZE_DIGITS: usize = 5;
+
+/// Width of a port column in the tunnel table.
+///
+/// Wide enough for five digits and the heading over them; the remote host takes
+/// whatever is left, since it is the only value of a rule with no length limit.
+const TUNNEL_PORT_WIDTH: f32 = 92.;
+
+/// Width of the action column at the end of a tunnel row.
+const TUNNEL_ACTION_WIDTH: f32 = 56.;
+
+/// Address a tunnel rule added in the form binds its local listener to.
+///
+/// Loopback, which is both what OpenSSH's `-L` defaults to and what
+/// `logman-core` fills in for a stored rule that names no address. That default
+/// is a private serde helper, so the value is repeated here rather than shared;
+/// the form does not offer the field, and a rule loaded from disk keeps
+/// whatever address it was given.
+const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1";
 
 /// Id used by the "inherit the global scheme" card in the overrides picker.
 const INHERIT_SCHEME_ID: &str = "";
@@ -139,10 +159,23 @@ mod tab {
     pub const OVERRIDE_SCROLLBACK: isize = 87;
     /// Per-session `TERM`.
     pub const OVERRIDE_TERM: isize = 88;
+    /// The "SSH tunnels" disclosure button.
+    pub const TUNNELS: isize = 90;
+    /// First input of the first tunnel row.
+    ///
+    /// Every row takes [`TUNNEL_ROW_STRIDE`] indices, one per input, and is
+    /// numbered from its position in the list, so the rows tab in the order
+    /// they are drawn. Removing a row leaves the others where they are: the
+    /// remaining indices still ascend, which is all the tab ring reads.
+    pub const TUNNEL_ROWS: isize = 100;
+    /// Indices one tunnel row occupies: local port, remote host, remote port.
+    pub const TUNNEL_ROW_STRIDE: isize = 3;
+    /// The "Add tunnel" button, past every row the numbering can reach.
+    pub const TUNNEL_ADD: isize = 180;
     /// Cancel.
-    pub const CANCEL: isize = 90;
+    pub const CANCEL: isize = 190;
     /// Connect.
-    pub const CONNECT: isize = 100;
+    pub const CONNECT: isize = 200;
 }
 
 /// Emitted by [`ConnectionDialog`] when the user acts on it.
@@ -249,6 +282,87 @@ enum FocusTarget {
     Secret,
 }
 
+/// One editable row of the "SSH tunnels" section.
+///
+/// The three inputs are the whole of what the form offers; `bind_address` is
+/// carried alongside them so that a rule written by hand into `profiles.json`
+/// keeps the address it names. Editing the rest of such a rule in the dialog
+/// therefore preserves it, which is what a field the UI does not show has to
+/// do to be worth storing at all.
+struct TunnelRow {
+    /// Local TCP port the listener binds, digits only.
+    local_port: Entity<TextInput>,
+    /// Host the remote end connects to, as the remote end resolves it.
+    remote_host: Entity<TextInput>,
+    /// Port on that host, digits only.
+    remote_port: Entity<TextInput>,
+    /// Address the listener binds; not editable in the form.
+    bind_address: String,
+}
+
+/// The text of one tunnel row, read out of its inputs.
+///
+/// Splitting the reading from the interpreting is what lets the rules of an
+/// unfinished row be exercised without a window: [`collect_tunnel_rules`] sees
+/// only strings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TunnelFields {
+    /// Local port as typed.
+    local_port: String,
+    /// Remote host as typed.
+    remote_host: String,
+    /// Remote port as typed.
+    remote_port: String,
+    /// Address the finished rule binds to.
+    bind_address: String,
+}
+
+impl TunnelFields {
+    /// Whether the user has typed nothing into any of the three inputs.
+    fn is_blank(&self) -> bool {
+        self.local_port.is_empty() && self.remote_host.is_empty() && self.remote_port.is_empty()
+    }
+}
+
+/// Turn the rows of the tunnel section into rules, or refuse.
+///
+/// A row the user has not touched is dropped rather than complained about: the
+/// section always ends with an empty row once "Add tunnel" has been pressed,
+/// and an empty form is not an error. Anything else has to be complete — both
+/// ports present, in range and non-zero, and a host to reach — because a
+/// half-written rule cannot be forwarded and silently dropping it would open a
+/// session the user believes forwards a port it does not.
+///
+/// `None` is that refusal; the caller turns it into the message strip.
+fn collect_tunnel_rules(rows: &[TunnelFields]) -> Option<Vec<TunnelRule>> {
+    let mut rules = Vec::new();
+    for row in rows {
+        if row.is_blank() {
+            continue;
+        }
+        let local_port = row
+            .local_port
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)?;
+        let remote_port = row
+            .remote_port
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)?;
+        if row.remote_host.is_empty() {
+            return None;
+        }
+        rules.push(TunnelRule {
+            bind_address: row.bind_address.clone(),
+            local_port,
+            remote_host: row.remote_host.clone(),
+            remote_port,
+        });
+    }
+    Some(rules)
+}
+
 /// Modal dialog for picking a saved profile or entering a new connection.
 ///
 /// The dialog is an entity: create it once with [`ConnectionDialog::new`], keep
@@ -316,13 +430,15 @@ pub struct ConnectionDialog {
     override_scrollback_input: Entity<TextInput>,
     /// Per-session `TERM`; blank inherits.
     override_term_input: Entity<TextInput>,
+    /// Whether the "SSH tunnels" section is expanded.
+    tunnels_open: bool,
+    /// Editable port forwardings, in the order they are rendered.
+    tunnel_rows: Vec<TunnelRow>,
 }
 
 impl ConnectionDialog {
     /// Build the dialog, loading saved profiles from disk.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let weak = cx.weak_entity();
-
         // Scoped to the dialog's key context on purpose: a global `tab` binding
         // would stop the terminal from sending `\t` to the remote shell.
         BIND_KEYS.call_once(|| {
@@ -332,60 +448,32 @@ impl ConnectionDialog {
             ]);
         });
 
-        // Every field submits the whole form, so `Enter` connects from anywhere.
-        let field = {
-            let weak = weak.clone();
-            move |cx: &mut Context<Self>,
-                  placeholder: SharedString,
-                  masked: bool,
-                  tab_index: isize| {
-                let weak = weak.clone();
-                cx.new(move |cx| {
-                    TextInput::new(cx)
-                        .placeholder(placeholder)
-                        .masked(masked)
-                        .tab_index(tab_index)
-                        .on_submit(move |_, _window, cx| {
-                            // `on_submit` fires from inside the TextInput's own
-                            // `update`, which means gpui has leased that entity
-                            // out of the entity map. Submitting reads every
-                            // field back — including the one that fired — and a
-                            // `read` of a leased entity is a hard panic. Defer
-                            // to the end of the effect cycle, by which point the
-                            // lease has been returned.
-                            let weak = weak.clone();
-                            cx.defer(move |cx| {
-                                weak.update(cx, |this, cx| this.submit(cx)).ok();
-                            });
-                        })
-                })
-            }
-        };
-
         // The name, host, port and key-path hints spell out a sample *value*
         // and read the same in every language; the rest are words, and are the
         // ones `refresh_placeholders` revisits after a language switch.
-        let name_input = field(cx, "web-01".into(), false, tab::NAME);
-        let host_input = field(cx, "web-01.example.com".into(), false, tab::HOST);
-        let port_input = field(cx, "22".into(), false, tab::PORT);
-        let username_input = field(cx, "alice".into(), false, tab::USERNAME);
-        let password_input = field(
+        let name_input = Self::field(cx, "web-01".into(), false, tab::NAME);
+        let host_input = Self::field(cx, "web-01.example.com".into(), false, tab::HOST);
+        let port_input = Self::field(cx, "22".into(), false, tab::PORT);
+        let username_input = Self::field(cx, "alice".into(), false, tab::USERNAME);
+        let password_input = Self::field(
             cx,
             ts!("connection.password_placeholder"),
             true,
             tab::SECRET_OR_KEY,
         );
-        let key_path_input = field(cx, "~/.ssh/id_ed25519".into(), false, tab::SECRET_OR_KEY);
-        let passphrase_input = field(
+        let key_path_input = Self::field(cx, "~/.ssh/id_ed25519".into(), false, tab::SECRET_OR_KEY);
+        let passphrase_input = Self::field(
             cx,
             ts!("connection.passphrase_placeholder"),
             true,
             tab::PASSPHRASE,
         );
         let inherit = ts!("connection.inherit_placeholder");
-        let override_font_size_input = field(cx, inherit.clone(), false, tab::OVERRIDE_FONT_SIZE);
-        let override_scrollback_input = field(cx, inherit.clone(), false, tab::OVERRIDE_SCROLLBACK);
-        let override_term_input = field(cx, inherit, false, tab::OVERRIDE_TERM);
+        let override_font_size_input =
+            Self::field(cx, inherit.clone(), false, tab::OVERRIDE_FONT_SIZE);
+        let override_scrollback_input =
+            Self::field(cx, inherit.clone(), false, tab::OVERRIDE_SCROLLBACK);
+        let override_term_input = Self::field(cx, inherit, false, tab::OVERRIDE_TERM);
 
         port_input.update(cx, |input, cx| {
             input.set_content(DEFAULT_PORT.to_string(), cx);
@@ -430,7 +518,41 @@ impl ConnectionDialog {
             override_font_size_input,
             override_scrollback_input,
             override_term_input,
+            tunnels_open: false,
+            tunnel_rows: Vec::new(),
         }
+    }
+
+    /// Build one text field of the form.
+    ///
+    /// Every field submits the whole form, so `Enter` connects from anywhere.
+    /// Also used for the tunnel rows, which are created long after the dialog
+    /// itself and have to behave the same way.
+    fn field(
+        cx: &mut Context<Self>,
+        placeholder: SharedString,
+        masked: bool,
+        tab_index: isize,
+    ) -> Entity<TextInput> {
+        let weak = cx.weak_entity();
+        cx.new(move |cx| {
+            TextInput::new(cx)
+                .placeholder(placeholder)
+                .masked(masked)
+                .tab_index(tab_index)
+                .on_submit(move |_, _window, cx| {
+                    // `on_submit` fires from inside the TextInput's own
+                    // `update`, which means gpui has leased that entity out of
+                    // the entity map. Submitting reads every field back —
+                    // including the one that fired — and a `read` of a leased
+                    // entity is a hard panic. Defer to the end of the effect
+                    // cycle, by which point the lease has been returned.
+                    let weak = weak.clone();
+                    cx.defer(move |cx| {
+                        weak.update(cx, |this, cx| this.submit(cx)).ok();
+                    });
+                })
+        })
     }
 
     /// Re-translate the placeholders of the fields that have a worded one.
@@ -605,6 +727,11 @@ impl ConnectionDialog {
         self.override_term_input
             .update(cx, |input, cx| input.clear(cx));
 
+        // The rows are dropped rather than emptied: they are entities of their
+        // own, and the next profile brings its own set.
+        self.tunnels_open = false;
+        self.tunnel_rows.clear();
+
         self.body_scroll.scroll_to_item(0);
     }
 
@@ -666,6 +793,12 @@ impl ConnectionDialog {
         self.override_term_input
             .update(cx, |input, cx| input.set_content(term, cx));
 
+        // Same treatment for the tunnels: a profile that forwards nothing keeps
+        // the section shut, one that forwards something opens it, and either
+        // way the rows of whatever profile was selected before are gone.
+        self.tunnels_open = !profile.tunnels.is_empty();
+        self.set_tunnel_rows(&profile.tunnels, cx);
+
         self.save_secret = profile.save_secret;
         self.editing = Some(profile.id);
         // The single funnel through which a profile becomes the selection, so
@@ -705,6 +838,105 @@ impl ConnectionDialog {
             self.body_scroll.scroll_to_item(1);
         }
         cx.notify();
+    }
+
+    /// Build an empty tunnel row numbered for `position` in the list.
+    fn tunnel_row(cx: &mut Context<Self>, position: usize) -> TunnelRow {
+        // Clamped so that a list longer than the numbering allows for cannot
+        // push a row past the "Add tunnel" button and out of the tab ring's
+        // order; rows that far down share an index and tab in paint order.
+        let base = (tab::TUNNEL_ROWS + position as isize * tab::TUNNEL_ROW_STRIDE)
+            .min(tab::TUNNEL_ADD - tab::TUNNEL_ROW_STRIDE);
+        // Sample values, like the host and port hints of the form above: they
+        // read the same in every language and are never translated.
+        let local_port = Self::field(cx, "8080".into(), false, base);
+        let remote_host = Self::field(cx, "db.internal".into(), false, base + 1);
+        let remote_port = Self::field(cx, "5432".into(), false, base + 2);
+        digits_only(cx, &local_port, false, MAX_PORT_DIGITS);
+        digits_only(cx, &remote_port, false, MAX_PORT_DIGITS);
+        TunnelRow {
+            local_port,
+            remote_host,
+            remote_port,
+            bind_address: DEFAULT_BIND_ADDRESS.to_owned(),
+        }
+    }
+
+    /// Replace the tunnel rows with one per rule of a profile.
+    ///
+    /// The rows are rebuilt from scratch on every profile, which is what stops
+    /// the forwardings of the previously selected one from following the user
+    /// to the next.
+    fn set_tunnel_rows(&mut self, rules: &[TunnelRule], cx: &mut Context<Self>) {
+        let mut rows = Vec::with_capacity(rules.len());
+        for (position, rule) in rules.iter().enumerate() {
+            let mut row = Self::tunnel_row(cx, position);
+            // The one field the form does not show, carried through the edit
+            // so that saving a rule cannot quietly move its listener.
+            row.bind_address = rule.bind_address.clone();
+            row.local_port.update(cx, |input, cx| {
+                input.set_content(rule.local_port.to_string(), cx)
+            });
+            row.remote_host.update(cx, |input, cx| {
+                input.set_content(rule.remote_host.clone(), cx)
+            });
+            row.remote_port.update(cx, |input, cx| {
+                input.set_content(rule.remote_port.to_string(), cx)
+            });
+            rows.push(row);
+        }
+        self.tunnel_rows = rows;
+    }
+
+    /// Append an empty tunnel row.
+    fn add_tunnel_row(&mut self, cx: &mut Context<Self>) {
+        let row = Self::tunnel_row(cx, self.tunnel_rows.len());
+        self.tunnel_rows.push(row);
+        cx.notify();
+    }
+
+    /// Drop the tunnel row at `index`.
+    fn remove_tunnel_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.tunnel_rows.len() {
+            return;
+        }
+        self.tunnel_rows.remove(index);
+        cx.notify();
+    }
+
+    /// Expand or collapse the "SSH tunnels" section.
+    fn toggle_tunnels(&mut self, cx: &mut Context<Self>) {
+        self.tunnels_open = !self.tunnels_open;
+        if self.tunnels_open {
+            // Opening an empty section on nothing but a button says less than
+            // opening it on the row the user came to fill in.
+            if self.tunnel_rows.is_empty() {
+                let row = Self::tunnel_row(cx, 0);
+                self.tunnel_rows.push(row);
+            }
+            // Index of the section within the scrolled body; see `render`.
+            self.body_scroll.scroll_to_item(2);
+        }
+        cx.notify();
+    }
+
+    /// The text of every tunnel row, in order.
+    fn tunnel_fields(&self, cx: &App) -> Vec<TunnelFields> {
+        self.tunnel_rows
+            .iter()
+            .map(|row| TunnelFields {
+                local_port: Self::text(&row.local_port, cx),
+                remote_host: Self::text(&row.remote_host, cx),
+                remote_port: Self::text(&row.remote_port, cx),
+                bind_address: row.bind_address.clone(),
+            })
+            .collect()
+    }
+
+    /// The forwardings described by the form, or `None` while a row is
+    /// half-written.
+    fn tunnel_rules(&self, cx: &App) -> Option<Vec<TunnelRule>> {
+        collect_tunnel_rules(&self.tunnel_fields(cx))
     }
 
     /// Pick the per-session scheme, or clear it back to "inherit".
@@ -847,7 +1079,12 @@ impl ConnectionDialog {
         {
             return false;
         }
-        self.port(cx).is_some()
+        if self.port(cx).is_none() {
+            return false;
+        }
+        // A forwarding the user started and did not finish blocks the session
+        // rather than being dropped from it: see `collect_tunnel_rules`.
+        self.tunnel_rules(cx).is_some()
     }
 
     /// `Enter` in any field: connect when the form is complete, explain why not
@@ -872,8 +1109,10 @@ impl ConnectionDialog {
             && Self::text(&self.key_path_input, cx).is_empty()
         {
             ts!("connection.need_key")
-        } else {
+        } else if self.port(cx).is_none() {
             ts!("connection.need_port")
+        } else {
+            ts!("connection.tunnels.incomplete")
         };
         self.set_status(StatusLevel::Error, reason);
         cx.notify();
@@ -910,6 +1149,10 @@ impl ConnectionDialog {
             self.explain_incomplete(cx);
             return;
         };
+        let Some(tunnels) = self.tunnel_rules(cx) else {
+            self.explain_incomplete(cx);
+            return;
+        };
 
         let name = {
             let typed = Self::text(&self.name_input, cx);
@@ -942,6 +1185,9 @@ impl ConnectionDialog {
         };
         profile.save_secret = self.save_secret;
         profile.overrides = self.collect_overrides(cx);
+        // The form is the whole truth about the forwardings: a rule the user
+        // removed from an existing profile has to disappear from it too.
+        profile.tunnels = tunnels;
 
         // Each entry is a whole sentence, shown on a line of its own under the
         // heading: a list of problems cannot be joined into one sentence in a
@@ -1634,6 +1880,173 @@ impl ConnectionDialog {
             .children(open.then_some(body))
     }
 
+    /// The collapsible "SSH tunnels" section.
+    ///
+    /// Laid out as a table rather than as a stack of [`form_row`]s: a rule is
+    /// three values read together, and one label per input would put nine of
+    /// them on screen for three rules.
+    fn render_tunnels(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = theme(cx);
+        let this = cx.entity();
+        let open = self.tunnels_open;
+
+        let caret = if open { "\u{25be}" } else { "\u{25b8}" };
+        // Counts what the user has begun, not what would be forwarded: a row
+        // that is still being filled in is exactly the one worth mentioning
+        // while the section is collapsed over it.
+        let started = self
+            .tunnel_fields(cx)
+            .iter()
+            .filter(|fields| !fields.is_blank())
+            .count();
+        // Two keys rather than a plural rule, as in the overrides section.
+        let summary = match started {
+            0 => ts!("connection.tunnels.none"),
+            1 => ts!("connection.tunnels.one"),
+            many => ts!("connection.tunnels.many", count = many),
+        };
+
+        let toggle = Button::new(
+            "connection-tunnels-toggle",
+            format!("{caret}  {}", ts!("connection.tunnels.title")),
+        )
+        .variant(ButtonVariant::Ghost)
+        .tab_index(tab::TUNNELS)
+        .on_click({
+            let this = this.clone();
+            move |_, _window, cx| {
+                this.update(cx, |dialog, cx| dialog.toggle_tunnels(cx));
+            }
+        });
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(11.))
+            .text_color(theme.text_muted)
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(TUNNEL_PORT_WIDTH))
+                    .child(ts!("connection.tunnels.local_port")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(ts!("connection.tunnels.remote_host")),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(TUNNEL_PORT_WIDTH))
+                    .child(ts!("connection.tunnels.remote_port")),
+            )
+            // Holds the column of the per-row remove action open, so the
+            // headings stay over the fields they name.
+            .child(div().flex_none().w(px(TUNNEL_ACTION_WIDTH)));
+
+        let rows = self
+            .tunnel_rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(TUNNEL_PORT_WIDTH))
+                            .child(row.local_port.clone()),
+                    )
+                    .child(div().flex_1().min_w_0().child(row.remote_host.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(TUNNEL_PORT_WIDTH))
+                            .child(row.remote_port.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .w(px(TUNNEL_ACTION_WIDTH))
+                            .justify_end()
+                            .child(row_action(
+                                ElementId::from(("connection-tunnel-remove", index)),
+                                ts!("connection.tunnels.remove"),
+                                theme.danger,
+                                theme.surface_hover,
+                                {
+                                    let this = this.clone();
+                                    move |cx| {
+                                        this.update(cx, |dialog, cx| {
+                                            dialog.remove_tunnel_row(index, cx);
+                                        });
+                                    }
+                                },
+                            )),
+                    )
+            })
+            .collect::<Vec<_>>();
+
+        let add = Button::new("connection-tunnel-add", ts!("connection.tunnels.add"))
+            .variant(ButtonVariant::Secondary)
+            .tab_index(tab::TUNNEL_ADD)
+            .on_click({
+                let this = this.clone();
+                move |_, _window, cx| {
+                    this.update(cx, |dialog, cx| dialog.add_tunnel_row(cx));
+                }
+            });
+
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .pt(px(10.))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme.text_muted)
+                    .child(ts!("connection.tunnels.hint")),
+            )
+            .when(!rows.is_empty(), |this| this.child(header))
+            .children(rows)
+            .child(div().flex().flex_row().pt(px(2.)).child(add));
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w_full()
+            .child(div().h(px(1.)).w_full().flex_none().bg(theme.border))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .pt(px(8.))
+                    .child(toggle)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(theme.text_muted)
+                            .child(summary),
+                    ),
+            )
+            .children(open.then_some(body))
+    }
+
     /// Move focus into the field recorded by the last `open_*` call.
     fn apply_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.pending_focus.take() else {
@@ -1704,8 +2117,10 @@ impl Render for ConnectionDialog {
                             .child(self.render_target_panel(cx)),
                     )
                     // A local session is never saved, so there is nothing for a
-                    // per-session override to be attached to.
-                    .children((!local).then(|| self.render_overrides(cx))),
+                    // per-session override to be attached to — and nothing to
+                    // forward a port over either.
+                    .children((!local).then(|| self.render_overrides(cx)))
+                    .children((!local).then(|| self.render_tunnels(cx))),
             )
             .child(self.render_footer(cx));
 
@@ -2120,6 +2535,72 @@ mod tests {
         // Nothing can be remembered for a method the transport cannot perform.
         let decision = decide_credentials(&AuthMethod::Agent, None, never_probed);
         assert!(matches!(decision, Credentials::Ask));
+    }
+
+    /// A finished row, as the three inputs would be read.
+    fn typed(local_port: &str, remote_host: &str, remote_port: &str) -> TunnelFields {
+        TunnelFields {
+            local_port: local_port.to_owned(),
+            remote_host: remote_host.to_owned(),
+            remote_port: remote_port.to_owned(),
+            bind_address: DEFAULT_BIND_ADDRESS.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_finished_tunnel_row_becomes_a_rule() {
+        let rules = collect_tunnel_rules(&[typed("15432", "db.internal", "5432")])
+            .expect("the row is complete");
+        assert_eq!(
+            rules,
+            vec![TunnelRule {
+                bind_address: DEFAULT_BIND_ADDRESS.to_owned(),
+                local_port: 15432,
+                remote_host: "db.internal".to_owned(),
+                remote_port: 5432,
+            }]
+        );
+    }
+
+    #[test]
+    fn untouched_tunnel_rows_are_dropped_without_complaint() {
+        // The section always ends with the empty row "Add tunnel" produced, so
+        // an untouched one must not stop the connection.
+        let rows = [
+            typed("15432", "db.internal", "5432"),
+            TunnelFields::default(),
+        ];
+        let rules = collect_tunnel_rules(&rows).expect("the blank row is ignored");
+        assert_eq!(rules.len(), 1);
+    }
+
+    #[test]
+    fn a_half_written_tunnel_row_is_refused() {
+        // Each of the three fields on its own: dropping any of these would open
+        // a session the user believes forwards a port it does not.
+        assert!(collect_tunnel_rules(&[typed("15432", "", "")]).is_none());
+        assert!(collect_tunnel_rules(&[typed("", "db.internal", "")]).is_none());
+        assert!(collect_tunnel_rules(&[typed("15432", "db.internal", "")]).is_none());
+        assert!(collect_tunnel_rules(&[typed("", "db.internal", "5432")]).is_none());
+    }
+
+    #[test]
+    fn a_tunnel_port_out_of_range_is_refused() {
+        // Port 0 binds whatever the operating system feels like, which is not
+        // what anyone typing a forwarding means; 65536 does not exist at all.
+        assert!(collect_tunnel_rules(&[typed("0", "db.internal", "5432")]).is_none());
+        assert!(collect_tunnel_rules(&[typed("15432", "db.internal", "0")]).is_none());
+        assert!(collect_tunnel_rules(&[typed("65536", "db.internal", "5432")]).is_none());
+    }
+
+    #[test]
+    fn a_hand_written_bind_address_survives_an_edit() {
+        // The form never shows the address, so the only way it can survive the
+        // user changing the port beside it is by being carried on the row.
+        let mut row = typed("8080", "127.0.0.1", "80");
+        row.bind_address = "0.0.0.0".to_owned();
+        let rules = collect_tunnel_rules(&[row]).expect("the row is complete");
+        assert_eq!(rules[0].bind_address, "0.0.0.0");
     }
 
     #[test]

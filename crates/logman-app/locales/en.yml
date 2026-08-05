@@ -430,6 +430,30 @@ connection:
     term: TERM
     inherits_value: "inherits %{value}"
     inherits_lines: "inherits %{value} lines"
+  # The collapsible port-forwarding section, the equivalent of OpenSSH's `-L`.
+  # The counts are two keys rather than one plural rule, exactly as above, and
+  # count the rules the user has started rather than the ones that are ready:
+  # an unfinished rule is the one worth mentioning over a closed section.
+  #
+  # The column headings sit over the three fields of a rule; the fields
+  # themselves are hinted with sample values, which are never translated.
+  tunnels:
+    title: SSH tunnels
+    none: no ports forwarded
+    one: 1 port forwarded
+    many: "%{count} ports forwarded"
+    hint: Each rule listens on a port of this computer and forwards it, through this session, to a host the remote machine can reach.
+    local_port: Local port
+    remote_host: Remote host
+    remote_port: Remote port
+    add: Add tunnel
+    # The action at the end of a rule's row. Names what it does to the rule,
+    # not to the connection: nothing is disconnected by it.
+    remove: Remove
+    # A rule with some of its three fields filled in, or with a port outside
+    # 1–65535. Such a rule cannot be forwarded, and connecting without it would
+    # open a session the user believes forwards a port it does not.
+    incomplete: Complete or remove the unfinished tunnel rule.
 
 # Session life cycle, shown in the status bar and in the terminal overlay.
 #

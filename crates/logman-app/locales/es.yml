@@ -251,6 +251,18 @@ connection:
     term: TERM
     inherits_value: "hereda %{value}"
     inherits_lines: "hereda %{value} líneas"
+  tunnels:
+    title: Túneles SSH
+    none: ningún puerto reenviado
+    one: 1 puerto reenviado
+    many: "%{count} puertos reenviados"
+    hint: Cada regla escucha en un puerto de este equipo y lo reenvía, a través de esta sesión, a un host que la máquina remota puede alcanzar.
+    local_port: Puerto local
+    remote_host: Host remoto
+    remote_port: Puerto remoto
+    add: Añadir túnel
+    remove: Quitar
+    incomplete: Completa o quita la regla de túnel sin terminar.
 
 session:
   connecting: conectando

@@ -24,6 +24,12 @@
 //! out an [`SftpClient`] that opens its own SFTP channel on first use, so
 //! listing a directory or moving a file never interferes with the shell.
 //!
+//! It carries port forwardings too: every [`TunnelForward`] in the
+//! configuration becomes a local listener once the shell is up, and each
+//! connection it accepts is tunnelled over the session's own transport. A rule
+//! that cannot be opened is reported as [`SshEvent::TunnelFailed`] and leaves
+//! the session running.
+//!
 //! Host key policy is deliberately left to the caller through the
 //! [`HostKeyVerifier`] trait: this crate ships only [`AcceptAllVerifier`] and
 //! [`RejectAllVerifier`], so that `known_hosts` storage lives in the
@@ -39,11 +45,12 @@ mod config;
 mod event;
 mod session;
 mod sftp;
+mod tunnel;
 mod verify;
 
 pub use config::{
     DEFAULT_COLS, DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_KEEPALIVE_SECS, DEFAULT_ROWS, DEFAULT_TERM,
-    SshAuth, SshConfig,
+    SshAuth, SshConfig, TunnelForward,
 };
 pub use event::{SshErrorKind, SshEvent};
 pub use session::SshSession;

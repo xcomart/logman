@@ -1,9 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# `vendor/gpui` is a patched dependency, not a member: it keeps its own
-# manifest and must not inherit workspace settings.
-exclude = ["vendor/gpui"]
+# `vendor/gpui` and `vendor/unicode-width` are patched dependencies, not
+# members: they keep their own manifests and must not inherit workspace
+# settings.
+exclude = ["vendor/gpui", "vendor/unicode-width"]
 
 # gpui 0.2.2 pins the process at 100% CPU, permanently unresponsive, when a
 # Korean IME ends a composition mid-word (the Han/Yeong key) and the user then
@@ -38,11 +39,38 @@ exclude = ["vendor/gpui"]
 #
 # crates.io has no newer gpui (0.2.2 is current), so vendoring is the only
 # route. Delete these patches and `vendor/gpui` once a release carries them.
+# unicode-width 0.2 follows Unicode 16, which promoted a handful of symbol
+# blocks from one column to two. The rest of the deployed world did not move
+# with it: glibc's wcwidth and vim's own built-in width table both still answer
+# one for them. A terminal emulator does not get to hold a private opinion
+# here — it must agree with the applications drawing into it, because they lay
+# their output out by their own count and the grid advances by ours. The
+# visible symptom is vim-airline: its default powerline `maxlinenr` symbol is
+# U+2630 '☰', vim budgets one column for it, the grid takes two, and the status
+# line overflows onto the next row.
+#
+# `vendor/unicode-width` narrows exactly the ranges where the tables disagree
+# with wcwidth in the widening direction, in `src/tables.rs`, marked
+# `LOGMAN PATCH`:
+#   * U+2630..U+2637   — the eight trigrams, airline's '☰' among them
+#   * U+268A..U+268F   — monogram and digram symbols
+#   * U+1D300..U+1D356 — Tai Xuan Jing symbols
+#   * U+1D360..U+1D376 — counting rod numerals
+# Both `lookup_width` and `lookup_width_cjk` gain the same early return, since
+# these were neutral rather than ambiguous before Unicode 16.
+#
+# The patch lives here rather than in this workspace's own code because
+# `alacritty_terminal` calls `UnicodeWidthChar::width` directly when it sizes a
+# cell, with no hook to inject a width policy. Delete the patch and
+# `vendor/unicode-width` once either end of that moves: `alacritty_terminal`
+# growing a way to supply the width function, or the distributions' wcwidth
+# catching up to the Unicode 16 widths.
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }
+unicode-width = { path = "vendor/unicode-width" }
 
 [workspace.package]
-version = "0.2.6"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["logman contributors"]

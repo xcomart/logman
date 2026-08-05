@@ -251,6 +251,18 @@ connection:
     term: TERM
     inherits_value: "erbt %{value}"
     inherits_lines: "erbt %{value} Zeilen"
+  tunnels:
+    title: SSH-Tunnel
+    none: keine Ports weitergeleitet
+    one: 1 Port weitergeleitet
+    many: "%{count} Ports weitergeleitet"
+    hint: Jede Regel wartet auf einem Port dieses Computers und leitet ihn über diese Sitzung an einen Host weiter, den der entfernte Rechner erreichen kann.
+    local_port: Lokaler Port
+    remote_host: Entfernter Host
+    remote_port: Entfernter Port
+    add: Tunnel hinzufügen
+    remove: Entfernen
+    incomplete: Vervollständigen oder entfernen Sie die unvollständige Tunnelregel.
 
 session:
   connecting: wird verbunden

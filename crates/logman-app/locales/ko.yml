@@ -251,6 +251,18 @@ connection:
     term: TERM
     inherits_value: "%{value} 상속"
     inherits_lines: "%{value}줄 상속"
+  tunnels:
+    title: SSH 터널
+    none: 전달하는 포트 없음
+    one: 포트 1개 전달
+    many: "포트 %{count}개 전달"
+    hint: 각 규칙은 이 컴퓨터의 포트에서 대기하다가, 이 세션을 통해 원격 컴퓨터가 접근할 수 있는 호스트로 연결을 전달합니다.
+    local_port: 로컬 포트
+    remote_host: 원격 호스트
+    remote_port: 원격 포트
+    add: 터널 추가
+    remove: 제거
+    incomplete: 완성되지 않은 터널 규칙을 채우거나 제거하세요.
 
 session:
   connecting: 접속 중

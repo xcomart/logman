@@ -302,7 +302,7 @@ impl client::Handler for ClientHandler {
 }
 
 /// Publishes an event, reporting whether anyone is still listening.
-fn emit(events: &UnboundedSender<SshEvent>, event: SshEvent) -> bool {
+pub(crate) fn emit(events: &UnboundedSender<SshEvent>, event: SshEvent) -> bool {
     match events.unbounded_send(event) {
         Ok(()) => true,
         Err(_) => {
@@ -418,6 +418,12 @@ async fn run(
     // not delay a keystroke, and a stalled shell must not delay a transfer.
     // The task ends with this runtime, so it cannot outlive the session.
     tokio::spawn(crate::sftp::serve(Arc::clone(&handle), sftp_requests));
+
+    // After `Ready` on purpose: a forwarding is an addition to a session that
+    // already works, and a rule that cannot be bound must not be able to keep
+    // the shell from opening. Each rule that does bind runs as its own task on
+    // this same runtime and ends with it.
+    crate::tunnel::open(&handle, &config.tunnels, events).await;
 
     let buffered = std::mem::take(&mut *pending_input.lock());
     if !buffered.is_empty()
