@@ -63,7 +63,8 @@ use crate::session::Session;
 use crate::ui::scrollbar::INSET;
 use crate::ui::{
     Button, ButtonVariant, ContextMenu, DraggedThumb, MenuEntry, Scrollbar, ScrollbarAxis,
-    ScrollbarState, TextInput, Theme, hide_later, scroll_to, scrolled, theme, tooltip_label,
+    ScrollbarState, TextInput, Theme, hide_later, hide_now, scroll_to, scrolled, theme,
+    tooltip_label,
 };
 
 /// Width the panel opens at, in pixels.
@@ -966,6 +967,27 @@ impl FilePanel {
             panel.active_state().map(|s| &mut s.scrollbar)
         });
         cx.notify();
+    }
+
+    /// Puts the listing's bar up while the pointer rests on the edge it rides,
+    /// and starts it going the moment the pointer leaves.
+    fn hover_scrollbar(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        let Some(state) = self.active_state() else {
+            return;
+        };
+        if hovered {
+            if state.scrollbar.hover_enter() {
+                cx.notify();
+            }
+            return;
+        }
+
+        let Some(epoch) = state.scrollbar.hover_leave() else {
+            return;
+        };
+        hide_now(self, epoch, cx, |panel| {
+            panel.active_state().map(|s| &mut s.scrollbar)
+        });
     }
 
     /// The active session's id, file source and current directory.
@@ -2432,7 +2454,13 @@ impl FilePanel {
                     )
                     .children(rows),
             )
-            .children(Self::scrollbar(state).render(&theme))
+            .children(
+                Self::scrollbar(state)
+                    .on_hover(cx.listener(|panel, hovered: &bool, _window, cx| {
+                        panel.hover_scrollbar(*hovered, cx);
+                    }))
+                    .render(&theme),
+            )
             .into_any_element()
     }
 

@@ -52,7 +52,7 @@ use crate::i18n::ts;
 use crate::session::{Session, SessionStatus};
 use crate::ui::{
     Button, ButtonVariant, DraggedThumb, Scrollbar, ScrollbarAxis, ScrollbarState, hide_later,
-    theme,
+    hide_now, theme,
 };
 
 actions!(
@@ -526,6 +526,21 @@ impl TerminalView {
         }
     }
 
+    /// Puts the bar up while the pointer rests on the edge it rides, and starts
+    /// it going the moment the pointer leaves.
+    fn hover_scrollbar(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            if self.scrollbar.hover_enter() {
+                cx.notify();
+            }
+            return;
+        }
+
+        if let Some(epoch) = self.scrollbar.hover_leave() {
+            hide_now(self, epoch, cx, |view| Some(&mut view.scrollbar));
+        }
+    }
+
     /// Focuses the grid and starts a selection drag.
     fn on_mouse_down(
         &mut self,
@@ -907,9 +922,12 @@ impl Render for TerminalView {
         let overlay = self.render_overlay(&status, cx);
         let position = self.session.read(cx).terminal().scroll_position();
         self.watch_scroll(position, cx);
-        let scrollbar = self
-            .scrollbar(position)
-            .and_then(|bar| bar.render(&theme(cx)));
+        let scrollbar = self.scrollbar(position).and_then(|bar| {
+            bar.on_hover(cx.listener(|view, hovered: &bool, _window, cx| {
+                view.hover_scrollbar(*hovered, cx);
+            }))
+            .render(&theme(cx))
+        });
         let element = TerminalElement {
             view: cx.entity(),
             session: self.session.clone(),

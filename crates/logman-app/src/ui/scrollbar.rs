@@ -1,14 +1,17 @@
 //! Overlay scroll indicators.
 //!
 //! A thumb with no track behind it, drawn over the content rather than beside
-//! it, shown while a surface is being scrolled and taken down again a moment
-//! after it stops — the behaviour macOS gives every scrollable view. Nothing
-//! here reserves layout space, so turning it on costs a surface no width.
+//! it, shown while a surface is being scrolled or while the pointer rests on
+//! the edge it rides, and taken down again once neither is true — the behaviour
+//! macOS gives every scrollable view. Nothing here reserves layout space, so
+//! turning it on costs a surface no width.
 //!
-//! While it is up the thumb can be dragged, and once it is gone it is gone
-//! completely: a hidden bar is not rendered at all, so it has no hit box and
-//! there is nothing over the content to press. That is the whole of the
-//! "disappears means untouchable" guarantee — no state to get wrong.
+//! While it is up the thumb can be dragged. Once it has gone, all that is left
+//! along that edge is a sensor: a transparent strip that neither draws nor
+//! occludes, so a press aimed at the content beneath goes straight through it,
+//! and the only thing it does is notice a pointer arriving so the bar can come
+//! back. That is the guarantee to hold on to — a bar that has gone shows
+//! nothing and steals no press; it only listens.
 //!
 //! Four pieces, kept apart on purpose:
 //!
@@ -18,8 +21,9 @@
 //!   dragged past either end — is decided there, where it can be tested without
 //!   a window.
 //! * [`ScrollbarState`] is the "is it showing?" flip-flop.  It carries no timer
-//!   of its own: the owning view arms one with [`hide_later`], because only the
-//!   view can notify itself when it fires.
+//!   of its own: the owning view arms one with [`hide_later`], or starts the
+//!   fade this instant with [`hide_now`], because only the view can notify
+//!   itself when either lands.
 //! * [`Scrollbar`] describes one bar, and both draws it and reads drags of it.
 //! * [`DraggedThumb`] is what a drag of one carries.
 //!
@@ -41,7 +45,7 @@ use std::time::Duration;
 use gpui::{Animation, transparent_black};
 use gpui::{
     AnimationExt, AnyElement, App, Bounds, Context, DragMoveEvent, ElementId, Pixels, Point,
-    ScrollHandle, Size, div, ease_in_out, prelude::*, px,
+    ScrollHandle, Size, Window, div, ease_in_out, prelude::*, px,
 };
 
 use super::theme::Theme;
@@ -58,6 +62,10 @@ const THICKNESS: f32 = 4.;
 /// pointer can be expected to find. Only the thickness is widened: the grab
 /// area is exactly as long as the thumb, so the bare track stays untouched and
 /// keeps letting presses through to the content under it.
+///
+/// The same thickness measures the strip that senses the pointer, so that the
+/// band a pointer has to reach to summon the bar is the band it then has to
+/// stay inside to hold it there.
 const HIT_THICKNESS: f32 = 10.;
 
 /// Default gap between the thumb and the container edges it rides.
@@ -72,10 +80,13 @@ const MIN_LENGTH: f32 = 24.;
 
 /// How long the thumb stays up after the last movement.
 ///
-/// Two seconds, asked for by name: long enough to still be there when a wheel
-/// is turned in bursts, or to be reached for and dragged, and short enough that
-/// it is gone before it becomes furniture.
-pub const HIDE_AFTER: Duration = Duration::from_secs(2);
+/// Nothing announces the end of a scroll: movement is noticed one repaint at a
+/// time, so a wheel turned in bursts and a wheel let go of look identical for
+/// as long as the gap between two ticks. This is the width of that gap and
+/// nothing more — long enough to carry the bar across it without a blink, short
+/// enough that a bar nobody is scrolling or pointing at is on its way out
+/// almost at once.
+pub const SCROLL_LINGER: Duration = Duration::from_millis(500);
 
 /// How long the thumb takes to appear.
 ///
@@ -96,7 +107,7 @@ pub const FADE_OUT: Duration = Duration::from_millis(250);
 /// state that can be reasoned about rather than a wall-clock guess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Fade {
-    /// Not on screen, and not drawn at all — so nothing of it can be pressed.
+    /// Not on screen: nothing of it is drawn, and nothing of it takes a press.
     #[default]
     Hidden,
     /// Coming up.
@@ -240,9 +251,14 @@ impl DraggedThumb {
 /// hooking every route that scrolls — a wheel, a keyboard, "scroll the active
 /// tab into view", a window resize. Anything that moves a surface repaints it,
 /// so the comparison catches all of them and nothing has to remember to
-/// announce itself. A drag is the one exception, because a pointer held still
-/// on the thumb moves nothing and must still keep the bar up; that is what
-/// [`ScrollbarState::hold`] is for.
+/// announce itself. Two things move nothing and must still keep the bar up: a
+/// pointer held still on the thumb, which is what [`ScrollbarState::hold`] is
+/// for, and a pointer resting on the edge the bar rides, which is what
+/// [`ScrollbarState::hover_enter`] is for.
+///
+/// Those two are also the only reasons a bar waits at all. Scrolling has to be
+/// waited out, because its end is never announced; a pointer leaving the edge
+/// is announced the moment it happens, so that bar starts going at once.
 #[derive(Debug, Default)]
 pub struct ScrollbarState {
     /// Offset at the last look, or `None` before the first one.
@@ -256,6 +272,9 @@ pub struct ScrollbarState {
     epoch: u64,
     /// Whether a pointer is holding the thumb. No timer may fire while it is.
     held: bool,
+    /// Whether a pointer is on the edge the bar rides. No timer may fire while
+    /// it is either: the bar was asked for, and it stays until it is left.
+    hovered: bool,
     phase: Fade,
 }
 
@@ -268,12 +287,13 @@ impl ScrollbarState {
     /// Notes where the surface is scrolled to now.
     ///
     /// Returns the epoch to arm an expiry timer with when the surface moved
-    /// since the last look, and `None` when it sat still — or when a drag has
-    /// the bar, which arms its own timer when it lets go.
+    /// since the last look, and `None` when it sat still — or when a drag or a
+    /// resting pointer has the bar, either of which is already holding it up
+    /// and will say so itself when it lets go.
     pub fn moved(&mut self, scrolled: f32) -> Option<u64> {
         let moved = self.seen.is_some_and(|seen| seen != scrolled);
         self.seen = Some(scrolled);
-        if !moved || self.held {
+        if !moved || self.held || self.hovered {
             return None;
         }
 
@@ -305,6 +325,43 @@ impl ScrollbarState {
         self.phase = Fade::Shown;
     }
 
+    /// Takes note of a pointer arriving on the edge the bar rides, putting the
+    /// bar up and keeping it there.
+    ///
+    /// A bar the pointer catches on its way out comes back at full strength for
+    /// the same reason a scrolled one does, so this is [`ScrollbarState::show`]
+    /// with the pointer remembered; the epoch it bumps retires whatever expiry
+    /// was going to take the bar down.
+    ///
+    /// Returns whether anything changed, which is whether the view needs to be
+    /// repainted.
+    pub fn hover_enter(&mut self) -> bool {
+        let before = (self.hovered, self.phase);
+        self.hovered = true;
+        self.show();
+        before != (self.hovered, self.phase)
+    }
+
+    /// Takes note of the pointer leaving that edge again, returning the epoch to
+    /// start the fade with.
+    ///
+    /// Nothing is waited out here: the pointer's departure is an event in its
+    /// own right, unlike the end of a scroll, so there is nothing to bridge and
+    /// the bar can start going the moment it happens.
+    ///
+    /// `None` when the bar should stay where it is: while the thumb is held,
+    /// because letting go of it starts its own clock, and when the bar is off
+    /// screen already.
+    pub fn hover_leave(&mut self) -> Option<u64> {
+        self.hovered = false;
+        if self.held {
+            return None;
+        }
+
+        self.epoch = self.epoch.wrapping_add(1);
+        self.showing().then_some(self.epoch)
+    }
+
     /// Lets go of the thumb, returning the epoch to arm the expiry with.
     ///
     /// `None` when nothing was holding it, which is every mouse button release
@@ -329,7 +386,7 @@ impl ScrollbarState {
     }
 
     /// Starts the bar fading out, unless a newer movement has since put it back
-    /// up or a pointer is holding it.
+    /// up or a pointer is holding the thumb or resting on the edge.
     ///
     /// Leaves the epoch alone, so the same one carries on to [`ScrollbarState::finish`]:
     /// the fade and the expiry that started it are one expiry, and anything that
@@ -338,7 +395,11 @@ impl ScrollbarState {
     /// Returns whether anything changed, which is whether the view needs to be
     /// repainted.
     pub fn hide(&mut self, epoch: u64) -> bool {
-        if self.held || self.epoch != epoch || matches!(self.phase, Fade::Hidden | Fade::Out) {
+        if self.held
+            || self.hovered
+            || self.epoch != epoch
+            || matches!(self.phase, Fade::Hidden | Fade::Out)
+        {
             return false;
         }
         self.phase = Fade::Out;
@@ -356,18 +417,64 @@ impl ScrollbarState {
     }
 }
 
-/// Arms the timer that takes a bar down again.
+/// Arms the timer that takes a bar down once the scrolling has stopped.
 ///
-/// `pick` finds the state inside the view when the timer fires rather than
-/// borrowing it now, because by then the surface it belongs to may be gone —
-/// a closed session's file listing, say.
+/// The wait is [`SCROLL_LINGER`], which is what a stopped scroll has to be told
+/// apart from a paused one by.
 pub fn hide_later<V: 'static>(
     epoch: u64,
     cx: &mut Context<V>,
     pick: impl Fn(&mut V) -> Option<&mut ScrollbarState> + 'static,
 ) {
+    hide_after(SCROLL_LINGER, epoch, cx, pick);
+}
+
+/// Starts a bar fading out this instant, and takes it off screen when the fade
+/// has run.
+///
+/// For the departures that announce themselves — a pointer leaving the edge the
+/// bar rides — where there is nothing to wait out and waiting would only leave
+/// the bar sitting over content the user has moved on from.
+///
+/// The first half happens here rather than in a task, so the bar is already on
+/// its way out in the frame the pointer left in; only the tail that finishes the
+/// fade is spawned.
+pub fn hide_now<V: 'static>(
+    view: &mut V,
+    epoch: u64,
+    cx: &mut Context<V>,
+    pick: impl Fn(&mut V) -> Option<&mut ScrollbarState> + 'static,
+) {
+    if !pick(view).is_some_and(|state| state.hide(epoch)) {
+        return;
+    }
+    cx.notify();
+
     cx.spawn(async move |view, cx| {
-        cx.background_executor().timer(HIDE_AFTER).await;
+        cx.background_executor().timer(FADE_OUT).await;
+        view.update(cx, |view, cx| {
+            if pick(view).is_some_and(|state| state.finish(epoch)) {
+                cx.notify();
+            }
+        })
+        .ok();
+    })
+    .detach();
+}
+
+/// Arms the timer that takes a bar down again, `delay` from now.
+///
+/// `pick` finds the state inside the view when the timer fires rather than
+/// borrowing it now, because by then the surface it belongs to may be gone —
+/// a closed session's file listing, say.
+pub fn hide_after<V: 'static>(
+    delay: Duration,
+    epoch: u64,
+    cx: &mut Context<V>,
+    pick: impl Fn(&mut V) -> Option<&mut ScrollbarState> + 'static,
+) {
+    cx.spawn(async move |view, cx| {
+        cx.background_executor().timer(delay).await;
         let fading = view
             .update(cx, |view, cx| {
                 let fading = pick(view).is_some_and(|state| state.hide(epoch));
@@ -395,6 +502,10 @@ pub fn hide_later<V: 'static>(
     .detach();
 }
 
+/// Callback told `true` when the pointer reaches the edge a bar rides, and
+/// `false` when it leaves again.
+type HoverHandler = Box<dyn Fn(&bool, &mut Window, &mut App)>;
+
 /// One overlay bar: where it is, how long its content is, and how to draw it.
 ///
 /// Built afresh on every render from whatever the surface can report — a
@@ -410,6 +521,7 @@ pub struct Scrollbar {
     scrolled: f32,
     inset: f32,
     fade: Fade,
+    on_hover: Option<HoverHandler>,
 }
 
 impl Scrollbar {
@@ -435,6 +547,7 @@ impl Scrollbar {
             scrolled,
             inset: INSET,
             fade: Fade::Shown,
+            on_hover: None,
         }
     }
 
@@ -480,6 +593,19 @@ impl Scrollbar {
         self
     }
 
+    /// Called with `true` when the pointer reaches the edge the bar rides, and
+    /// with `false` when it leaves again.
+    ///
+    /// The one thing a bar cannot answer for itself: whether the pointer being
+    /// there should put the bar up is a question about the
+    /// [`ScrollbarState`] the owner keeps, and only the owner can notify itself
+    /// afterwards. A bar left without a listener senses nothing and comes and
+    /// goes with the scrolling alone.
+    pub fn on_hover(mut self, listener: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
+        self.on_hover = Some(Box::new(listener));
+        self
+    }
+
     /// The thumb as it stands, or `None` when there is nothing to scroll.
     pub fn thumb(&self) -> Option<Thumb> {
         thumb(
@@ -490,112 +616,143 @@ impl Scrollbar {
         )
     }
 
-    /// The bar as an element, or `None` when it is off screen or there is
-    /// nothing to scroll.
+    /// The bar as an element, or `None` when there is nothing to scroll and so
+    /// nothing to say.
     ///
     /// Absolutely positioned, so it is placed against its parent's padding box
     /// and takes no part in that parent's layout. The parent has to be the box
     /// the thumb measures — for a scroll container that means a wrapper around
     /// it, not the container itself, whose own children scroll away underneath.
     ///
-    /// Two boxes, not one. The outer is the grab area, transparent and
-    /// [`HIT_THICKNESS`] across, and it occludes: a press on the thumb belongs
-    /// to the bar and must not also reach the tab, row or terminal underneath.
-    /// The inner is the [`THICKNESS`] the eye sees. Splitting them is what lets
-    /// the bar be as slim as it should look and still be worth aiming at — and
-    /// the grab area is widened only across, never along, so the bare track
-    /// keeps letting presses through to the content beneath it.
+    /// Four boxes. Outermost is the strip, running the whole length of the
+    /// track and [`HIT_THICKNESS`] across, which draws nothing and answers
+    /// nothing itself. Inside it sits the grab area, transparent and the same
+    /// thickness but only as long as the thumb, and that one occludes: a press
+    /// on the thumb belongs to the bar and must not also reach the tab, row or
+    /// terminal underneath. Inside that is the [`THICKNESS`] the eye sees.
+    /// Splitting the two is what lets the bar be as slim as it should look and
+    /// still be worth aiming at — and only the grab area is widened, so the bare
+    /// track keeps letting presses through to the content beneath it.
     ///
-    /// A [`Fade::Hidden`] bar returns nothing at all, and so has no hit box:
-    /// that is the whole of "what has gone cannot be caught". A fading one is
-    /// still there to be caught, because it can still be seen — and catching it
-    /// brings it back, since holding the thumb pins the bar at full strength.
+    /// The fourth is the sensor, which fills the strip, carries its hover
+    /// listener, and is painted last on purpose. gpui's hit test walks the boxes
+    /// from the front and stops at the first that occludes, so a sensor behind
+    /// the grab area would drop out of the hit list the moment the pointer
+    /// reached the thumb — and the bar would read that as the pointer having
+    /// left. In front it stays in the list, and because it occludes nothing the
+    /// grab area behind it stays there too.
+    ///
+    /// A [`Fade::Hidden`] bar is the strip and its sensor alone: nothing drawn,
+    /// nothing to press, which is the whole of "what has gone cannot be caught".
+    /// A fading one is still there to be caught, because it can still be seen —
+    /// and catching it brings it back, since holding the thumb pins the bar at
+    /// full strength.
     ///
     /// The fill is opaque on purpose. A translucent window composes one tint
     /// fill per pixel and no more (see `app_settings::window_tint`), and a bar
     /// over the terminal surface would be a second one; the fades are the one
     /// exception, and they are over in a quarter of a second.
-    pub fn render(&self, theme: &Theme) -> Option<AnyElement> {
-        if self.fade == Fade::Hidden {
-            return None;
-        }
+    pub fn render(self, theme: &Theme) -> Option<AnyElement> {
         let thumb = self.thumb()?;
 
         let axis = self.axis;
         let track = self.track;
-        let length = thumb.length;
-        let grab = div()
-            .id(self.id.clone())
-            .absolute()
-            .occlude()
-            .bg(transparent_black())
-            // An empty preview: the thumb follows the pointer directly, so a
-            // ghost trailing it would only be a second thing to watch.
-            .on_drag(
-                DraggedThumb {
-                    id: self.id.clone(),
-                    axis,
-                    track,
-                    length,
-                    grab: Cell::new(px(0.)),
-                },
-                move |dragged, grab, _window, cx| {
-                    dragged.grab.set(axis.of(grab));
-                    cx.new(|_| gpui::Empty)
-                },
-            );
-        let seen = div().absolute().rounded_full().bg(theme.text_muted);
+        let inset = self.inset;
         // Always deep enough to hold the thumb drawn inside it, however far in
         // from the edge that thumb has been pushed.
-        let hit = px(HIT_THICKNESS.max(self.inset + THICKNESS));
+        let hit = px(HIT_THICKNESS.max(inset + THICKNESS));
 
-        let bar = match self.axis {
-            ScrollbarAxis::Horizontal => grab
-                .left(thumb.start)
-                .bottom(px(0.))
-                .w(thumb.length)
-                .h(hit)
-                .child(
-                    seen.left_0()
-                        .right_0()
-                        .bottom(px(self.inset))
-                        .h(px(THICKNESS)),
-                ),
-            ScrollbarAxis::Vertical => grab
-                .top(thumb.start)
-                .right(px(0.))
-                .h(thumb.length)
-                .w(hit)
-                .child(
-                    seen.top_0()
-                        .bottom_0()
-                        .right(px(self.inset))
-                        .w(px(THICKNESS)),
-                ),
-        };
+        let drawn = (self.fade != Fade::Hidden).then(|| {
+            let length = thumb.length;
+            let grab = div()
+                .id(self.id.clone())
+                .absolute()
+                .occlude()
+                .bg(transparent_black())
+                // An empty preview: the thumb follows the pointer directly, so a
+                // ghost trailing it would only be a second thing to watch.
+                .on_drag(
+                    DraggedThumb {
+                        id: self.id.clone(),
+                        axis,
+                        track,
+                        length,
+                        grab: Cell::new(px(0.)),
+                    },
+                    move |dragged, grab, _window, cx| {
+                        dragged.grab.set(axis.of(grab));
+                        cx.new(|_| gpui::Empty)
+                    },
+                );
+            let seen = div().absolute().rounded_full().bg(theme.text_muted);
 
-        // The animation drives its own frames — it asks for the next one until
-        // it is done — so nothing here has to keep the view repainting. Each
-        // phase animates under an id of its own, so that entering one starts
-        // its fade from the beginning rather than resuming the phase before.
-        Some(match self.fade {
-            Fade::Hidden => unreachable!("returned above"),
-            Fade::Shown => bar.into_any_element(),
-            Fade::In => bar
-                .with_animation(
-                    ElementId::from((self.id.clone(), "fade-in")),
-                    Animation::new(FADE_IN).with_easing(ease_in_out),
-                    |bar, delta| bar.opacity(delta),
-                )
-                .into_any_element(),
-            Fade::Out => bar
-                .with_animation(
-                    ElementId::from((self.id.clone(), "fade-out")),
-                    Animation::new(FADE_OUT).with_easing(ease_in_out),
-                    |bar, delta| bar.opacity(1. - delta),
-                )
-                .into_any_element(),
-        })
+            let bar = match axis {
+                ScrollbarAxis::Horizontal => grab
+                    .left(thumb.start)
+                    .bottom(px(0.))
+                    .w(thumb.length)
+                    .h(hit)
+                    .child(seen.left_0().right_0().bottom(px(inset)).h(px(THICKNESS))),
+                ScrollbarAxis::Vertical => grab
+                    .top(thumb.start)
+                    .right(px(0.))
+                    .h(thumb.length)
+                    .w(hit)
+                    .child(seen.top_0().bottom_0().right(px(inset)).w(px(THICKNESS))),
+            };
+
+            // The animation drives its own frames — it asks for the next one
+            // until it is done — so nothing here has to keep the view
+            // repainting. Each phase animates under an id of its own, so that
+            // entering one starts its fade from the beginning rather than
+            // resuming the phase before. Only what is drawn is wrapped: the
+            // sensor below has to be there through every phase, including the
+            // one where there is nothing to see.
+            match self.fade {
+                Fade::In => bar
+                    .with_animation(
+                        ElementId::from((self.id.clone(), "fade-in")),
+                        Animation::new(FADE_IN).with_easing(ease_in_out),
+                        |bar, delta| bar.opacity(delta),
+                    )
+                    .into_any_element(),
+                Fade::Out => bar
+                    .with_animation(
+                        ElementId::from((self.id.clone(), "fade-out")),
+                        Animation::new(FADE_OUT).with_easing(ease_in_out),
+                        |bar, delta| bar.opacity(1. - delta),
+                    )
+                    .into_any_element(),
+                _ => bar.into_any_element(),
+            }
+        });
+
+        // Carries no listener of its own beyond the hover one, and never
+        // occludes: everything the strip covers but the thumb has to go on
+        // answering presses exactly as it did before the bar was over it.
+        let sensor = div()
+            .id(ElementId::from((self.id.clone(), "hover")))
+            .absolute()
+            .when_some(self.on_hover, |sensor, listener| sensor.on_hover(listener));
+
+        let strip = div().absolute().children(drawn);
+        Some(
+            match axis {
+                ScrollbarAxis::Horizontal => strip
+                    .left_0()
+                    .right_0()
+                    .bottom(px(0.))
+                    .h(hit)
+                    .child(sensor.left_0().right_0().top_0().bottom_0()),
+                ScrollbarAxis::Vertical => strip
+                    .top_0()
+                    .bottom_0()
+                    .right(px(0.))
+                    .w(hit)
+                    .child(sensor.left_0().right_0().top_0().bottom_0()),
+            }
+            .into_any_element(),
+        )
     }
 
     /// How far along its range `event` has dragged this bar, or `None` when the
@@ -924,16 +1081,130 @@ mod tests {
         assert_eq!(state.release(), None);
     }
 
-    /// A bar that is off screen is drawn as nothing at all, which is what makes
-    /// it impossible to press rather than merely impossible to see.
+    /// A bar the pointer reaches comes up without anything having scrolled, and
+    /// stays up for as long as the pointer is on it.
     #[test]
-    fn a_hidden_bar_is_not_drawn() {
-        let bar = Scrollbar::new("bar", ScrollbarAxis::Vertical, track(200.), 100., 300., 0.);
+    fn a_pointer_on_the_edge_puts_the_bar_up() {
+        let mut state = ScrollbarState::new();
+        state.moved(0.);
+        assert_eq!(state.fade(), Fade::Hidden);
 
+        assert!(state.hover_enter(), "arriving asked for no repaint");
+        assert_eq!(state.fade(), Fade::In);
+        assert!(
+            !state.hover_enter(),
+            "staying put asked for a repaint anyway"
+        );
+    }
+
+    /// And one the pointer catches on its way out comes back at full strength,
+    /// for the same reason scrolling into a fade does.
+    #[test]
+    fn a_pointer_catches_a_fading_bar_at_full_strength() {
+        let mut state = ScrollbarState::new();
+        state.moved(0.);
+        let going = state.moved(40.).expect("a moved surface");
+        assert!(state.hide(going));
+        assert_eq!(state.fade(), Fade::Out);
+
+        assert!(state.hover_enter());
+        assert_eq!(state.fade(), Fade::Shown);
+        assert!(!state.finish(going), "an interrupted fade still completed");
+    }
+
+    /// The timer a scroll leaves behind cannot take down a bar the pointer is
+    /// resting on, however long it has been resting there.
+    #[test]
+    fn a_resting_pointer_outlasts_the_scrolls_timer() {
+        let mut state = ScrollbarState::new();
+        state.moved(0.);
+        let scrolling = state.moved(40.).expect("a moved surface");
+
+        state.hover_enter();
+        assert!(
+            !state.hide(scrolling),
+            "a timer hid a bar under the pointer"
+        );
+
+        // Movement under a resting pointer arms nothing, so a wheel turned over
+        // the edge leaves no timer behind for every tick of it.
+        assert_eq!(state.moved(80.), None);
+        assert!(state.showing());
+    }
+
+    /// The pointer leaving is the whole of the notice needed: the bar starts
+    /// going at once, under the epoch the departure hands back.
+    #[test]
+    fn the_pointer_leaving_starts_the_fade_at_once() {
+        let mut state = ScrollbarState::new();
+        state.moved(0.);
+        state.hover_enter();
+
+        let epoch = state.hover_leave().expect("a bar that was up");
+        assert!(state.hide(epoch));
+        assert_eq!(state.fade(), Fade::Out);
+        assert!(state.finish(epoch));
+        assert_eq!(state.fade(), Fade::Hidden);
+
+        // And a pointer leaving a bar that has already gone asks for nothing,
+        // there being no fade left to start.
+        state.hover_enter();
+        let again = state.hover_leave().expect("a bar that was up");
+        state.hide(again);
+        state.finish(again);
+        assert_eq!(state.hover_leave(), None);
+    }
+
+    /// Arriving retires whatever was going to take the bar down, so the timer
+    /// the last scroll armed cannot fire through the pointer that followed it.
+    #[test]
+    fn a_pointer_arriving_retires_the_scrolls_timer() {
+        let mut state = ScrollbarState::new();
+        state.moved(0.);
+        let scrolling = state.moved(40.).expect("a moved surface");
+
+        state.hover_enter();
+        let leaving = state.hover_leave().expect("a bar that was up");
+        assert_ne!(leaving, scrolling);
+        assert!(!state.hide(scrolling), "a retired timer hid the bar anyway");
+    }
+
+    /// A pointer that leaves while the thumb is being dragged asks for nothing:
+    /// a drag that carries the thumb off the edge the pointer started on has not
+    /// finished with the bar, and letting go is what starts its clock.
+    #[test]
+    fn a_pointer_leaving_a_held_thumb_asks_for_nothing() {
+        let mut state = ScrollbarState::new();
+        state.moved(0.);
+        state.hover_enter();
+        state.hold();
+
+        assert_eq!(state.hover_leave(), None);
+        assert_eq!(state.fade(), Fade::Shown);
+
+        let epoch = state.release().expect("a held thumb");
+        assert!(state.hide(epoch));
+        assert!(state.finish(epoch));
+        assert_eq!(state.fade(), Fade::Hidden);
+    }
+
+    /// A bar that is off screen draws nothing, but the strip that senses the
+    /// pointer is still there — that is what lets a bar nobody has scrolled come
+    /// back at all. A surface with nothing to scroll has neither.
+    #[test]
+    fn a_hidden_bar_leaves_only_its_sensor() {
+        let bar = Scrollbar::new("bar", ScrollbarAxis::Vertical, track(200.), 100., 300., 0.);
         assert!(bar.thumb().is_some(), "the surface had nothing to scroll");
         assert!(
-            bar.fade(Fade::Hidden).render(&Theme::dark()).is_none(),
-            "a hidden bar was drawn anyway"
+            bar.fade(Fade::Hidden).render(&Theme::dark()).is_some(),
+            "a hidden bar left nothing to sense the pointer with"
+        );
+
+        let nothing = Scrollbar::new("bar", ScrollbarAxis::Vertical, track(200.), 100., 0., 0.);
+        assert!(nothing.thumb().is_none());
+        assert!(
+            nothing.render(&Theme::dark()).is_none(),
+            "a surface with nothing to scroll was drawn anyway"
         );
     }
 }

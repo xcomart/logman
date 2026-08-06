@@ -71,7 +71,7 @@ use terminal_view::{PaneFocused, TerminalView};
 use ui::{
     Button, ButtonVariant, ContextMenu, DraggedThumb, MenuButton, MenuEntry, Scrollbar,
     ScrollbarAxis, ScrollbarState, TabBar, TabItem, Theme, ThemeRegistry, WindowControlIcons,
-    WindowControls, hide_later, scroll_to, scrolled, set_theme, theme, tooltip_label,
+    WindowControls, hide_later, hide_now, scroll_to, scrolled, set_theme, theme, tooltip_label,
 };
 
 actions!(
@@ -1540,7 +1540,11 @@ impl Workspace {
             .tabs(tabs)
             .active(self.active)
             .scroll_handle(&self.tab_scroll)
-            .scrollbar(self.tab_scrollbar())
+            .scrollbar(self.tab_scrollbar().on_hover(cx.listener(
+                |workspace, hovered: &bool, _window, cx| {
+                    workspace.hover_tab_scrollbar(*hovered, cx);
+                },
+            )))
             .menu_icon(icons::TAB_LIST)
             .new_icon(icons::NEW_TAB)
             // The close button reuses the tab menu's own row: it is the same
@@ -1812,6 +1816,23 @@ impl Workspace {
         if let Some(epoch) = self.tab_scrollbar.release() {
             hide_later(epoch, cx, |workspace| Some(&mut workspace.tab_scrollbar));
             cx.notify();
+        }
+    }
+
+    /// Puts the strip's bar up while the pointer rests on the edge it rides, and
+    /// starts it going the moment the pointer leaves.
+    fn hover_tab_scrollbar(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            if self.tab_scrollbar.hover_enter() {
+                cx.notify();
+            }
+            return;
+        }
+
+        if let Some(epoch) = self.tab_scrollbar.hover_leave() {
+            hide_now(self, epoch, cx, |workspace| {
+                Some(&mut workspace.tab_scrollbar)
+            });
         }
     }
 

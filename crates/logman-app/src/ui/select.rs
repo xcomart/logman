@@ -396,7 +396,7 @@ impl RenderOnce for Select {
             .flex_col()
             .flex_none()
             .child(list)
-            .children(self.scrollbar.as_ref().and_then(|bar| bar.render(&theme)));
+            .children(self.scrollbar.and_then(|bar| bar.render(&theme)));
 
         // The list hangs off a zero-sized box laid out *before* the trigger,
         // not off the trigger itself: an `anchored` element is positioned

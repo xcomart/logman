@@ -25,7 +25,7 @@ use crate::theme_store;
 use crate::ui::{
     Button, ButtonVariant, Checkbox, DraggedThumb, SchemePicker, SchemePreview, SchemeSwatch,
     Scrollbar, ScrollbarAxis, ScrollbarState, Segmented, Select, TextInput, Theme, ThemeRegistry,
-    form_row, hide_later, modal, scroll_to, scrolled, theme,
+    form_row, hide_later, hide_now, modal, scroll_to, scrolled, theme,
 };
 
 /// The dialog's three scrolling surfaces, and the element id of each one's
@@ -542,6 +542,23 @@ impl SettingsDialog {
         Scrollbar::for_handle(id, ScrollbarAxis::Vertical, handle).fade(state.fade())
     }
 
+    /// The same bar, listening for the pointer reaching the edge it rides.
+    ///
+    /// Only the bars that are drawn need it: the one the drag path builds is
+    /// there to be measured, and never reaches an element tree.
+    fn hovering_scrollbar(
+        &self,
+        id: &'static str,
+        surface: Surface,
+        cx: &mut Context<Self>,
+    ) -> Scrollbar {
+        self.scrollbar(id, surface).on_hover(cx.listener(
+            move |dialog, hovered: &bool, _window, cx| {
+                dialog.hover_scrollbar(surface, *hovered, cx);
+            },
+        ))
+    }
+
     /// Puts each surface's bar up whenever it has been scrolled, and starts the
     /// clock that takes it down again.
     fn watch_scroll(&mut self, cx: &mut Context<Self>) {
@@ -577,6 +594,28 @@ impl SettingsDialog {
                 cx.notify();
             }
         }
+    }
+
+    /// Puts one surface's bar up while the pointer rests on the edge it rides,
+    /// and starts it going the moment the pointer leaves.
+    ///
+    /// Told which surface rather than asked to work it out: three bars are on
+    /// screen at once at most, and each strip knows only its own.
+    fn hover_scrollbar(&mut self, surface: Surface, hovered: bool, cx: &mut Context<Self>) {
+        let state = self.surface(surface).1;
+        if hovered {
+            if state.hover_enter() {
+                cx.notify();
+            }
+            return;
+        }
+
+        let Some(epoch) = state.hover_leave() else {
+            return;
+        };
+        hide_now(self, epoch, cx, move |dialog| {
+            Some(dialog.surface(surface).1)
+        });
     }
 
     /// Show the dialog, re-reading the current settings into the form.
@@ -1308,7 +1347,7 @@ impl SettingsDialog {
     /// The "Appearance" section.
     fn render_appearance(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let this = cx.entity();
-        let language_bar = self.scrollbar(SCROLLBARS[2].0, Surface::Language);
+        let language_bar = self.hovering_scrollbar(SCROLLBARS[2].0, Surface::Language, cx);
         // Built before the section is assembled, because `section` borrows the
         // context to read the theme and this borrows it mutably to listen.
         let theme_actions = self.render_actions(Catalog::UiTheme, tab::UI_THEME_ACTIONS, cx);
@@ -1432,7 +1471,7 @@ impl SettingsDialog {
 
     /// The "Terminal" section.
     fn render_terminal(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let font_bar = self.scrollbar(SCROLLBARS[1].0, Surface::Font);
+        let font_bar = self.hovering_scrollbar(SCROLLBARS[1].0, Surface::Font, cx);
         let this = cx.entity();
         // Hoisted for the same reason the appearance section's row is.
         let scheme_actions = self.render_actions(Catalog::Scheme, tab::SCHEME_ACTIONS, cx);
@@ -1677,7 +1716,7 @@ impl Render for SettingsDialog {
         self.apply_pending_focus(window, cx);
         self.watch_scroll(cx);
         let theme = theme(cx);
-        let body_bar = self.scrollbar(SCROLLBARS[0].0, Surface::Body);
+        let body_bar = self.hovering_scrollbar(SCROLLBARS[0].0, Surface::Body, cx);
 
         // While a colour is being edited the form steps aside entirely rather
         // than being covered up, so that the window's tab ring holds only the
