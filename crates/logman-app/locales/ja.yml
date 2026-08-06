@@ -33,7 +33,10 @@ tab:
   split_below: 現在のタブの下に分割して追加
   duplicate_right: 新しい接続で右に分割
   duplicate_below: 新しい接続で下に分割
+  duplicate: タブを複製
   close: タブを閉じる
+  close_others: 他のタブを閉じる
+  close_right: 右側のタブを閉じる
   tip_list: すべてのタブ
   tip_new: "新規セッション (%{shortcut})"
 
@@ -50,12 +53,16 @@ files:
   select_upload: アップロード
   select_upload_folder: フォルダーをアップロード
   select_download_folder: 保存
+  menu_open: 開く
   menu_download: ダウンロード…
   menu_rename: 名前を変更…
   menu_delete: 削除…
   menu_new_folder: 新規フォルダー…
   menu_upload: ファイルをアップロード…
   menu_upload_folder: フォルダーをアップロード…
+  menu_copy_name: 名前をコピー
+  menu_copy_path: パスをコピー
+  menu_select_all: すべて選択
   menu_refresh: 再読み込み
   tip_refresh: 再読み込み
   tip_new_folder: 新規フォルダー
@@ -109,6 +116,7 @@ files:
 empty:
   hint: "%{shortcut} を押してホストに接続します。"
   saved_profiles: 保存済みプロファイル
+  menu_edit: 編集…
 
 statusbar:
   no_session: セッションなし
@@ -200,6 +208,7 @@ connection:
   browse: 参照…
   edit: 編集
   delete: 削除
+  duplicate: 複製
   select_file: 選択
   saved_profiles: 保存済みプロファイル
   empty_list: 保存済みプロファイルはまだありません。フォームに入力して接続すると、接続が自動的に保存されます。
@@ -233,6 +242,7 @@ connection:
   delete_failed_list: "プロファイルを削除しましたが、プロファイル一覧を保存できませんでした (%{error})。"
   delete_failed_secret: "プロファイルを削除しましたが、キーチェーンの項目を削除できませんでした (%{error})。"
   delete_failed_both: "プロファイルを削除しましたが、プロファイル一覧を保存できず (%{list_error})、キーチェーンの項目も削除できませんでした (%{secret_error})。"
+  duplicate_failed: "プロファイルを複製しましたが、プロファイル一覧を保存できませんでした (%{error})。"
   connect_problems: "接続しますが、一部を保存できませんでした:"
   problem_secret_read: "保存されたシークレットを読み取れませんでした (%{error})。"
   problem_profile_save: "プロファイルを保存できませんでした (%{error})。"
@@ -278,6 +288,20 @@ session:
     local_starting: "%{shell} を起動しています..."
     local_exited: "%{shell} が終了しました"
     local_failed: "%{shell} を起動できませんでした"
+
+terminal:
+  menu_copy: コピー
+  menu_paste: 貼り付け
+  menu_select_all: すべて選択
+  menu_clear_scrollback: スクロールバックを消去
+  menu_scroll_bottom: 一番下へスクロール
+  menu_close_pane: ペインを閉じる
+
+input:
+  menu_cut: 切り取り
+  menu_copy: コピー
+  menu_paste: 貼り付け
+  menu_select_all: すべて選択
 
 about:
   title: logman について

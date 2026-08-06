@@ -26,8 +26,8 @@ use std::sync::Once;
 
 use gpui::{
     AnyElement, App, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, KeyBinding, KeyDownEvent, MouseButton, PathPromptOptions, Render, ScrollHandle,
-    SharedString, Window, actions, div, prelude::*, px,
+    IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
+    Point, Render, ScrollHandle, SharedString, Window, actions, div, prelude::*, px,
 };
 use logman_core::{
     AuthMethod, ProfileStore, SecretStore, SessionOverrides, SessionProfile, TunnelRule,
@@ -39,8 +39,8 @@ use uuid::Uuid;
 
 use crate::i18n::ts;
 use crate::ui::{
-    Button, ButtonVariant, Checkbox, SchemePicker, SchemeSwatch, Segmented, TextInput, form_row,
-    modal, theme,
+    Button, ButtonVariant, Checkbox, ContextMenu, MenuEntry, SchemePicker, SchemeSwatch, Segmented,
+    TextInput, form_row, modal, theme,
 };
 
 /// Port pre-filled into the form and used when the port field is left empty.
@@ -434,6 +434,13 @@ pub struct ConnectionDialog {
     tunnels_open: bool,
     /// Editable port forwardings, in the order they are rendered.
     tunnel_rows: Vec<TunnelRow>,
+    /// The saved profile a right-click opened a context menu for, and where the
+    /// pointer was when it did.
+    ///
+    /// Held by id for the same reason the empty state holds one: the menu
+    /// outlives the frame that opened it, and two of its rows rearrange the very
+    /// list the row was in.
+    context: Option<(Uuid, Point<Pixels>)>,
 }
 
 impl ConnectionDialog {
@@ -520,6 +527,7 @@ impl ConnectionDialog {
             override_term_input,
             tunnels_open: false,
             tunnel_rows: Vec::new(),
+            context: None,
         }
     }
 
@@ -623,6 +631,19 @@ impl ConnectionDialog {
         cx.notify();
     }
 
+    /// Show the dialog with the saved profile `id` loaded for editing.
+    ///
+    /// The other half of [`Self::open_profile`]: that one is on its way to a
+    /// session and puts the caret in the field a connection is still waiting
+    /// on, while this one is only the form, so the caret stays where an empty
+    /// form would have left it — on the first field. An unknown `id` leaves the
+    /// empty form standing, which is [`Self::select_profile`]'s behaviour and
+    /// the same thing [`Self::open_profile`] does with one.
+    pub fn edit_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.open_new(cx);
+        self.select_profile(id, cx);
+    }
+
     /// Whether the dialog is visible.
     pub fn is_open(&self) -> bool {
         self.open
@@ -632,6 +653,9 @@ impl ConnectionDialog {
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         self.pending_focus = None;
+        // Nothing renders it while the dialog is down, so a menu left standing
+        // would reappear the next time the dialog comes up.
+        self.context = None;
         // Belt and braces: every `open_*` resets the form anyway, but a closed
         // dialog must not carry a selection that outlives the reason for it.
         self.clear_local_selection();
@@ -972,6 +996,38 @@ impl ConnectionDialog {
         cx.notify();
     }
 
+    /// Copy the profile `id` under a name of its own, and select the copy.
+    ///
+    /// The list is written back straight away, the way a delete writes it back:
+    /// nothing else will, since a copy nobody connects to would otherwise live
+    /// only until the dialog is closed. No secret comes with it — see
+    /// [`ProfileStore::duplicate`] — so the copy asks for one the first time it
+    /// is used, which is also why the form is filled from it: the copy is a
+    /// profile that still wants finishing.
+    ///
+    /// Selecting it is skipped while the dialog is closed, which is how the
+    /// empty state calls this. There is no form on screen to fill, and the next
+    /// opening resets it anyway.
+    pub(crate) fn duplicate_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let Some(copy) = self.store.duplicate(id) else {
+            return;
+        };
+        // Reported after the selection rather than before it: selecting has a
+        // message of its own to put up or take down, and would clear this one.
+        let written = self.store.save();
+        if self.open {
+            self.select_profile(copy.id, cx);
+        }
+        if let Err(err) = written {
+            log::error!("could not write the profile list: {err:#}");
+            self.set_status(
+                StatusLevel::Error,
+                ts!("connection.duplicate_failed", error = format!("{err:#}")),
+            );
+        }
+        cx.notify();
+    }
+
     /// Forget the profile `id`, together with any secret stored for it.
     ///
     /// Deleting the secret alongside the profile is what keeps the keychain from
@@ -980,7 +1036,7 @@ impl ConnectionDialog {
     /// Only two things can go wrong here, so all three outcomes are spelled out
     /// as whole sentences rather than clauses joined with "and": the conjunction
     /// and the clause order of such a join are not translatable.
-    fn delete_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    pub(crate) fn delete_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
         if self.store.remove(id).is_none() {
             return;
         }
@@ -1290,11 +1346,98 @@ impl ConnectionDialog {
     }
 
     /// `Escape` dismisses the dialog from anywhere inside it.
+    ///
+    /// A row menu takes the key first and only undoes itself: backing out of a
+    /// menu must not also throw away the form behind it, which is how the
+    /// workspace layers its own menus over the dialogs.
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.open && event.keystroke.key == "escape" {
-            cx.stop_propagation();
-            self.dismiss(cx);
+        if !self.open || event.keystroke.key != "escape" {
+            return;
         }
+        cx.stop_propagation();
+        if self.close_context(cx) {
+            return;
+        }
+        self.dismiss(cx);
+    }
+
+    /// Open the context menu of the saved profile `id`, with its corner at `at`.
+    ///
+    /// The right-click deliberately does not also load the profile into the
+    /// form, the way a left-click does: the menu's own Connect and Edit rows
+    /// say so explicitly, and a menu that had already overwritten the form
+    /// would leave a user who dismisses it worse off than before.
+    fn open_context(&mut self, id: Uuid, at: Point<Pixels>, cx: &mut Context<Self>) {
+        self.context = Some((id, at));
+        cx.notify();
+    }
+
+    /// Put the row menu away, and say whether there was one to put away.
+    fn close_context(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.context.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
+    /// The open row menu, if there is one.
+    ///
+    /// The four commands the row already carries between its click gestures and
+    /// its hover buttons, plus the copy, which has no gesture of its own. Only
+    /// the profile going away can leave the menu with nothing to speak for,
+    /// which is what a delete from the menu itself does.
+    fn render_context(&self, cx: &mut Context<Self>) -> Option<ContextMenu> {
+        let (id, position) = self.context?;
+        self.store.get(id)?;
+        let this = cx.entity();
+
+        let entries = vec![
+            // What a double-click on the row does.
+            MenuEntry::new(ts!("connection.connect")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |dialog, cx| {
+                        dialog.select_profile(id, cx);
+                        dialog.connect(cx);
+                    });
+                }
+            }),
+            // What the hover Edit button does: load the profile and put the
+            // caret at the top of the form. No ellipsis — the form is already
+            // on screen, so nothing further is being promised.
+            MenuEntry::new(ts!("connection.edit")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |dialog, cx| {
+                        dialog.select_profile(id, cx);
+                        dialog.pending_focus = Some(FocusTarget::Host);
+                    });
+                }
+            }),
+            MenuEntry::new(ts!("connection.duplicate")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |dialog, cx| dialog.duplicate_profile(id, cx));
+                }
+            }),
+            MenuEntry::separator(),
+            MenuEntry::new(ts!("connection.delete")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |dialog, cx| dialog.delete_profile(id, cx));
+                }
+            }),
+        ];
+
+        Some(
+            ContextMenu::new("connection-profile-context")
+                .position(position)
+                .entries(entries)
+                .on_dismiss(move |_window, cx| {
+                    this.update(cx, |dialog, cx| dialog.close_context(cx));
+                }),
+        )
     }
 
     /// The saved-profile column.
@@ -1345,6 +1488,17 @@ impl ConnectionDialog {
                                 if double {
                                     dialog.connect(cx);
                                 }
+                            });
+                        }
+                    })
+                    .on_mouse_down(MouseButton::Right, {
+                        let this = this.clone();
+                        move |event: &MouseDownEvent, _window, cx| {
+                            // The press belongs to this row, not to the list
+                            // that scrolls under it.
+                            cx.stop_propagation();
+                            this.update(cx, |dialog, cx| {
+                                dialog.open_context(id, event.position, cx);
                             });
                         }
                     })
@@ -2153,6 +2307,10 @@ impl Render for ConnectionDialog {
                 body,
                 on_dismiss,
             ))
+            // Deferred inside, so it paints over the modal whatever its place
+            // in this list, and positioned in window coordinates — which the
+            // wrapper spans, so the two agree.
+            .children(self.render_context(cx))
     }
 }
 

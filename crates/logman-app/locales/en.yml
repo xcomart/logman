@@ -62,7 +62,16 @@ tab:
   split_below: Split below current tab
   duplicate_right: Split right with a new connection
   duplicate_below: Split below with a new connection
+  # Opens a second connection to the same host in a tab of its own, next to the
+  # clicked one. The tab-sized twin of the `duplicate_*` rows above, so it says
+  # the same thing they do about what appears: a new connection, not a view of
+  # the existing one.
+  duplicate: Duplicate tab
   close: Close tab
+  # The two bulk closes, offered beneath `close`. Both are worded from the
+  # clicked tab: the one that was clicked is the one that survives.
+  close_others: Close other tabs
+  close_right: Close tabs to the right
   # Hover labels for the two buttons at the end of the tab strip. The close
   # button on each tab reuses `close` above: same command, same wording.
   tip_list: All tabs
@@ -111,14 +120,26 @@ files:
   # the names they have on the server — so this says "save", not "download".
   select_download_folder: Save
   # Rows of the menu a right-click opens over the listing. The ellipsis marks
-  # the ones that ask something before they act, which is every one of them
-  # except the refresh.
+  # the ones that ask something before they act; the rows that take effect on
+  # the spot — the refresh, the two clipboard rows, opening a directory and
+  # selecting everything — carry none.
+  #
+  # `menu_open` is offered over a single directory only, and says what a
+  # double-click on the row already does.
+  menu_open: Open
   menu_download: Download…
   menu_rename: Rename…
   menu_delete: Delete…
   menu_new_folder: New folder…
   menu_upload: Upload files…
   menu_upload_folder: Upload folder…
+  # The two rows that only hand text over: the entry's own name, and the whole
+  # path an operation on it would have used. Neither has a `local:` twin — a
+  # name and a path read the same whichever filesystem they came from.
+  menu_copy_name: Copy name
+  menu_copy_path: Copy path
+  # Selects every entry of the listed directory. Left out once they all are.
+  menu_select_all: Select all
   menu_refresh: Refresh
   # Hover labels for the panel's toolbar buttons, which carry an icon and no
   # text. Deliberately a separate set from the `menu_` rows above rather than a
@@ -232,6 +253,15 @@ empty:
   # `%{shortcut}` is "Cmd+T" or "Ctrl+T"; neither is translated.
   hint: Press %{shortcut} to connect to a host.
   saved_profiles: Saved profiles
+  # The menu a right-click on a saved profile row opens. Only one of its four
+  # rows is worded here: connecting, copying and forgetting a profile are the
+  # same commands the connection dialog offers, so they reuse `connection.
+  # connect`, `connection.duplicate` and `connection.delete` rather than saying
+  # the same thing twice. Editing is the one that differs — from here the form
+  # is not on screen yet, so the row promises it with an ellipsis where the
+  # dialog's own button, which only fills a form already in front of the user,
+  # takes none.
+  menu_edit: Edit…
 
 # The bar along the bottom of the window.
 statusbar:
@@ -356,8 +386,14 @@ connection:
   title_edit: Connect
   connect: Connect
   browse: Browse…
+  # `edit`, `delete` and `duplicate` label the buttons a hovered profile row
+  # reveals and the rows of the menu a right-click on one opens — the same
+  # commands either way, so the same words. None takes an ellipsis: the form
+  # they act on is already on screen, and none of the three asks anything
+  # before it acts.
   edit: Edit
   delete: Delete
+  duplicate: Duplicate
   # Confirmation button of the platform file picker for the private key.
   select_file: Select
   saved_profiles: Saved profiles
@@ -407,6 +443,10 @@ connection:
   delete_failed_list: "The profile was deleted, but the profile list could not be written (%{error})."
   delete_failed_secret: "The profile was deleted, but its keychain entry could not be removed (%{error})."
   delete_failed_both: "The profile was deleted, but the profile list could not be written (%{list_error}) and its keychain entry could not be removed (%{secret_error})."
+  # Duplicating, which can only fail the one way: the copy is in the list on
+  # screen but the list itself did not reach the disk, so it is gone at the
+  # next start. Worded like the delete above, from the same two halves.
+  duplicate_failed: "The profile was copied, but the profile list could not be written (%{error})."
   # Connecting while something could not be stored: the heading, then one whole
   # sentence per problem, each on a line of its own.
   connect_problems: "Connecting, but not everything could be saved:"
@@ -479,6 +519,38 @@ session:
     local_starting: "Starting %{shell}..."
     local_exited: "%{shell} exited"
     local_failed: "%{shell} could not be started"
+
+# The menu a right-click on the terminal grid opens. Its pane commands — the
+# two splits and the break-out — are not here: they are the same commands the
+# application menu and the tab context menu carry, so they reuse the `menu:`
+# keys rather than saying the same thing a third time. So does the row that
+# reconnects, which reuses `session.reconnect` / `session.restart`, the wording
+# the connection overlay's own button already uses.
+terminal:
+  menu_copy: Copy
+  menu_paste: Paste
+  # Selects the rows the viewport is showing, which is exactly as much as a copy
+  # afterwards can reach — not the whole scrollback.
+  menu_select_all: Select all
+  # Drops the history that has scrolled off the screen. The screen itself, and
+  # the shell on it, are untouched, so this is not a "clear" in the shell sense.
+  menu_clear_scrollback: Clear scrollback
+  # Brings the viewport back down to the live screen. Only offered while it is
+  # somewhere else.
+  menu_scroll_bottom: Scroll to bottom
+  # Closes this pane alone. On an unsplit tab that is the same thing as closing
+  # the tab, which is why the wording names the pane rather than promising one
+  # or the other.
+  menu_close_pane: Close pane
+
+# The menu a right-click in a text field opens. Four rows the whole application
+# shares, which is why they are worded here rather than by the dialogs that put
+# the fields on screen.
+input:
+  menu_cut: Cut
+  menu_copy: Copy
+  menu_paste: Paste
+  menu_select_all: Select all
 
 # The about box. The version, the licence name and the names of the libraries
 # are values, not words, and are never translated.

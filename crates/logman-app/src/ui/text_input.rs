@@ -21,7 +21,9 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::menu::{ContextMenu, MenuEntry};
 use super::theme::theme;
+use crate::i18n::ts;
 
 actions!(
     logman_input,
@@ -66,6 +68,17 @@ const KEY_CONTEXT: &str = "TextInput";
 
 /// Character substituted for every grapheme when the field is masked.
 const MASK_CHAR: char = '\u{2022}';
+
+/// Modifier named in the shortcut hints of the edit menu.
+///
+/// Never translated — it is the name printed on the key — and branched on the
+/// same `cfg` [`TextInput::init`] binds with, so a hint can never name a chord
+/// this field does not answer to.
+const SHORTCUT_MODIFIER: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Ctrl"
+};
 
 /// Callback invoked when the user presses `Enter` inside a [`TextInput`].
 type SubmitHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
@@ -139,6 +152,9 @@ pub struct TextInput {
     masked: bool,
     disabled: bool,
     invalid: bool,
+    /// Where the pointer was when a right-click opened the edit menu. `None`
+    /// while no menu is showing.
+    context: Option<Point<Pixels>>,
     on_submit: Option<SubmitHandler>,
 }
 
@@ -159,6 +175,7 @@ impl TextInput {
             masked: false,
             disabled: false,
             invalid: false,
+            context: None,
             on_submit: None,
         }
     }
@@ -404,6 +421,133 @@ impl TextInput {
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.is_selecting = false;
+    }
+
+    /// Focuses the field and opens the edit menu at the pointer.
+    ///
+    /// The caret and the selection are deliberately left where they are: the
+    /// menu's first two rows are about the selection, so moving it first would
+    /// take away what the user right-clicked to act on.
+    fn on_right_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle);
+        if self.menu_entries(cx).is_empty() {
+            return;
+        }
+        self.context = Some(event.position);
+        cx.notify();
+    }
+
+    /// Puts the edit menu away, if one is open.
+    fn close_context(&mut self, cx: &mut Context<Self>) {
+        if self.context.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Builds the rows of the edit menu, in display order.
+    ///
+    /// A row whose command would refuse is left out rather than shown doing
+    /// nothing — cut and copy over a masked field would leak a password into
+    /// the clipboard and are refused outright, and neither has anything to take
+    /// with an empty selection; select-all has nothing to select in an empty
+    /// field. Every row calls the very handler its key binding calls, so the
+    /// menu adds a way in rather than a second implementation of anything.
+    ///
+    /// # Why this widget holds strings
+    ///
+    /// Everything else under `ui` is handed its text by the view that builds
+    /// it, so that the localised sentences stay with the screens they belong
+    /// to. These four labels are the exception, and translating them here is
+    /// what keeps that rule honest rather than breaking it: a field is created
+    /// at some twenty call sites across the dialogs, none of which has any
+    /// interest in a clipboard, and threading four identical labels through all
+    /// of them would scatter one menu's wording over the whole application
+    /// instead of containing it. The menu is also the same menu in every one of
+    /// those fields — there is nothing for a caller to say about it.
+    fn menu_entries(&self, cx: &mut Context<Self>) -> Vec<MenuEntry> {
+        let this = cx.entity();
+        let has_selection = !self.selected_range.is_empty();
+
+        let mut clipboard = Vec::new();
+        if !self.masked && has_selection {
+            clipboard.push(
+                MenuEntry::new(ts!("input.menu_cut"))
+                    .shortcut(format!("{SHORTCUT_MODIFIER}+X"))
+                    .on_activate({
+                        let this = this.clone();
+                        move |window, cx| {
+                            this.update(cx, |input, cx| input.cut(&Cut, window, cx));
+                        }
+                    }),
+            );
+            clipboard.push(
+                MenuEntry::new(ts!("input.menu_copy"))
+                    .shortcut(format!("{SHORTCUT_MODIFIER}+C"))
+                    .on_activate({
+                        let this = this.clone();
+                        move |window, cx| {
+                            this.update(cx, |input, cx| input.copy(&Copy, window, cx));
+                        }
+                    }),
+            );
+        }
+        clipboard.push(
+            MenuEntry::new(ts!("input.menu_paste"))
+                .shortcut(format!("{SHORTCUT_MODIFIER}+V"))
+                .on_activate({
+                    let this = this.clone();
+                    move |window, cx| {
+                        this.update(cx, |input, cx| input.paste(&Paste, window, cx));
+                    }
+                }),
+        );
+
+        let mut select = Vec::new();
+        if !self.content.is_empty() {
+            select.push(
+                MenuEntry::new(ts!("input.menu_select_all"))
+                    .shortcut(format!("{SHORTCUT_MODIFIER}+A"))
+                    .on_activate(move |window, cx| {
+                        this.update(cx, |input, cx| input.select_all(&SelectAll, window, cx));
+                    }),
+            );
+        }
+
+        let mut entries = Vec::new();
+        for group in [clipboard, select] {
+            if group.is_empty() {
+                continue;
+            }
+            if !entries.is_empty() {
+                entries.push(MenuEntry::separator());
+            }
+            entries.extend(group);
+        }
+        entries
+    }
+
+    /// Builds the menu a right-click on the field opens, if one is open.
+    ///
+    /// Positioned in window coordinates, which is what lets one menu serve a
+    /// field wherever it sits — including inside a modal dialog, where the
+    /// pointer position the field stored is already the position the menu
+    /// wants.
+    fn render_context(&self, cx: &mut Context<Self>) -> Option<ContextMenu> {
+        let position = self.context?;
+        let this = cx.entity();
+        Some(
+            ContextMenu::new("text-input-context")
+                .position(position)
+                .entries(self.menu_entries(cx))
+                .on_dismiss(move |_window, cx| {
+                    this.update(cx, |input, cx| input.close_context(cx));
+                }),
+        )
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -681,6 +825,15 @@ impl Render for TextInput {
         let theme = theme(cx);
         let focused = !self.disabled && self.focus_handle.is_focused(window);
         let disabled = self.disabled;
+        // A menu belongs to the field the right-click focused, so one that has
+        // outlived the focus — a dialog dismissed from under it, a `Tab` to the
+        // next field — is about a click nobody is following up. Dropped here
+        // rather than from a blur subscription because the field is built with
+        // no window to hand; silently, because this frame is being built anyway.
+        if self.context.is_some() && !focused {
+            self.context = None;
+        }
+        let context = self.render_context(cx);
 
         div()
             .key_context(KEY_CONTEXT)
@@ -728,11 +881,16 @@ impl Render for TextInput {
                     .on_action(cx.listener(Self::copy))
                     .on_action(cx.listener(Self::cut))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    // Wired with the rest of the editing gestures, which is what
+                    // leaves a disabled field with no menu at all: there is no
+                    // row on it a read-only field could honour.
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_move(cx.listener(Self::on_mouse_move))
             })
             .child(TextElement { input: cx.entity() })
+            .children(context)
     }
 }
 

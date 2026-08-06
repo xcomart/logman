@@ -33,7 +33,10 @@ tab:
   split_below: 拆分到当前标签页下方
   duplicate_right: 以新连接拆分到右侧
   duplicate_below: 以新连接拆分到下方
+  duplicate: 以新连接复制标签页
   close: 关闭标签页
+  close_others: 关闭其他标签页
+  close_right: 关闭右侧标签页
   tip_list: 所有标签页
   tip_new: "新建会话 (%{shortcut})"
 
@@ -50,12 +53,16 @@ files:
   select_upload: 上传
   select_upload_folder: 上传文件夹
   select_download_folder: 保存
+  menu_open: 打开
   menu_download: 下载…
   menu_rename: 重命名…
   menu_delete: 删除…
   menu_new_folder: 新建文件夹…
   menu_upload: 上传文件…
   menu_upload_folder: 上传文件夹…
+  menu_copy_name: 复制名称
+  menu_copy_path: 复制路径
+  menu_select_all: 全选
   menu_refresh: 刷新
   tip_refresh: 刷新
   tip_new_folder: 新建文件夹
@@ -109,6 +116,7 @@ files:
 empty:
   hint: "按 %{shortcut} 连接到主机。"
   saved_profiles: 已保存的配置
+  menu_edit: 编辑…
 
 statusbar:
   no_session: 无会话
@@ -200,6 +208,7 @@ connection:
   browse: 浏览…
   edit: 编辑
   delete: 删除
+  duplicate: 创建副本
   select_file: 选择
   saved_profiles: 已保存的配置
   empty_list: 还没有保存的配置。填写表单并连接后，连接会自动保存。
@@ -233,6 +242,7 @@ connection:
   delete_failed_list: "配置已删除，但无法写入配置列表（%{error}）。"
   delete_failed_secret: "配置已删除，但无法移除其钥匙串条目（%{error}）。"
   delete_failed_both: "配置已删除，但无法写入配置列表（%{list_error}），也无法移除其钥匙串条目（%{secret_error}）。"
+  duplicate_failed: "配置已复制，但无法写入配置列表（%{error}）。"
   connect_problems: "正在连接，但部分内容未能保存："
   problem_secret_read: "无法读取已保存的密钥信息（%{error}）。"
   problem_profile_save: "无法保存配置（%{error}）。"
@@ -278,6 +288,20 @@ session:
     local_starting: "正在启动 %{shell}..."
     local_exited: "%{shell} 已退出"
     local_failed: "无法启动 %{shell}"
+
+terminal:
+  menu_copy: 复制
+  menu_paste: 粘贴
+  menu_select_all: 全选
+  menu_clear_scrollback: 清除回滚缓冲
+  menu_scroll_bottom: 滚动到底部
+  menu_close_pane: 关闭窗格
+
+input:
+  menu_cut: 剪切
+  menu_copy: 复制
+  menu_paste: 粘贴
+  menu_select_all: 全选
 
 about:
   title: 关于 logman

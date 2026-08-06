@@ -12,8 +12,8 @@ use std::sync::Once;
 
 use gpui::{
     App, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    KeyBinding, KeyDownEvent, MouseButton, MouseUpEvent, PathPromptOptions, Render, ScrollHandle,
-    SharedString, Subscription, Window, actions, div, prelude::*, px, rgb,
+    KeyBinding, KeyDownEvent, MouseButton, MouseUpEvent, PathPromptOptions, Pixels, Point, Render,
+    ScrollHandle, SharedString, Subscription, Window, actions, div, prelude::*, px, rgb,
 };
 use logman_core::{AppSettings, TitlebarStyle};
 use logman_term::TerminalTheme;
@@ -23,9 +23,10 @@ use crate::i18n::{self, ts};
 use crate::theme_editor::{Catalog, CatalogFile, ThemeEditor, ThemeEditorEvent};
 use crate::theme_store;
 use crate::ui::{
-    Button, ButtonVariant, Checkbox, DraggedThumb, SchemePicker, SchemePreview, SchemeSwatch,
-    Scrollbar, ScrollbarAxis, ScrollbarState, Segmented, Select, TextInput, Theme, ThemeRegistry,
-    form_row, hide_later, hide_now, modal, scroll_to, scrolled, theme,
+    Button, ButtonVariant, Checkbox, ContextMenu, DraggedThumb, MenuEntry, SchemePicker,
+    SchemePreview, SchemeSwatch, Scrollbar, ScrollbarAxis, ScrollbarState, Segmented, Select,
+    TextInput, Theme, ThemeRegistry, form_row, hide_later, hide_now, modal, scroll_to, scrolled,
+    theme,
 };
 
 /// The dialog's three scrolling surfaces, and the element id of each one's
@@ -230,6 +231,17 @@ impl Action {
             Self::Import => true,
         }
     }
+
+    /// The actions a context menu over one entry offers, in display order.
+    ///
+    /// Whatever the button row allows for that entry, minus the import: that
+    /// one reads files off the disk and is not something done *to* the entry
+    /// the pointer is on, so a menu about one card has no business carrying it.
+    fn menu_rows(known: bool, custom: bool) -> impl Iterator<Item = Self> {
+        ACTIONS
+            .into_iter()
+            .filter(move |action| *action != Self::Import && action.enabled(known, custom))
+    }
 }
 
 /// State of one picker's management row.
@@ -368,6 +380,17 @@ pub struct SettingsDialog {
     ui_theme_actions: CatalogActions,
     /// State of the management row under the color scheme picker.
     scheme_actions: CatalogActions,
+    /// The scheme a right-click on a swatch opened a context menu for, and
+    /// where the pointer was when it did.
+    ///
+    /// The id is the one the menu was opened on, which opening it also selected
+    /// — so it is what the rows act on either way. Held rather than re-read
+    /// because the actions it offers depend on which scheme it is, and only
+    /// this says which.
+    ///
+    /// There is no twin for the UI-theme picker: that one is a dropdown, and a
+    /// menu inside a popup list is a second overlay fighting the first.
+    scheme_context: Option<(SharedString, Point<Pixels>)>,
     /// The colour editor, while one is open. The dialog renders it *instead of*
     /// the form rather than over it; see [`crate::theme_editor`] for why.
     editor: Option<Entity<ThemeEditor>>,
@@ -493,6 +516,7 @@ impl SettingsDialog {
             base,
             ui_theme_actions: CatalogActions::default(),
             scheme_actions: CatalogActions::default(),
+            scheme_context: None,
             editor: None,
             editor_events: None,
             status: None,
@@ -647,6 +671,7 @@ impl SettingsDialog {
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         self.open_list = None;
+        self.scheme_context = None;
         self.pending_focus = false;
         self.status = None;
         self.editor = None;
@@ -688,6 +713,36 @@ impl SettingsDialog {
             Catalog::Scheme => self.scheme = id.into(),
         }
         cx.notify();
+    }
+
+    /// Opens the context menu of the scheme swatch `id`, with its corner at
+    /// `at`.
+    ///
+    /// The swatch is selected first, the way the file panel selects the row it
+    /// is about to open a menu over: the actions are written against the
+    /// selection — one code path, shared with the buttons — so the menu has to
+    /// make the card it hangs off *be* the selection before it offers anything.
+    ///
+    /// Refused while the row's delete confirmation is up, for the reason the
+    /// buttons are all disabled then: the question can be answered, not walked
+    /// around.
+    fn open_scheme_context(&mut self, id: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.actions(Catalog::Scheme).confirming {
+            return;
+        }
+        let id = SharedString::from(id.to_owned());
+        self.select(Catalog::Scheme, id.clone(), cx);
+        self.scheme_context = Some((id, at));
+        cx.notify();
+    }
+
+    /// Puts the swatch menu away, and says whether there was one to put away.
+    fn close_scheme_context(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.scheme_context.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
     }
 
     /// Runs one of the five management actions against `catalog`.
@@ -1123,15 +1178,18 @@ impl SettingsDialog {
     /// `Escape` dismisses the dialog from anywhere inside it.
     ///
     /// Anything layered on top of the form takes the key first and only undoes
-    /// itself, so that backing out of a list, a question or the colour editor
-    /// does not also throw away the whole form. The editor is checked before
-    /// the dropdowns because it replaces the form outright: while it is up
-    /// there is no list to close.
+    /// itself, so that backing out of a menu, a list, a question or the colour
+    /// editor does not also throw away the whole form. The swatch menu comes
+    /// first because it paints over everything, the editor next because it
+    /// replaces the form outright: while it is up there is no list to close.
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.open || event.keystroke.key != "escape" {
             return;
         }
         cx.stop_propagation();
+        if self.close_scheme_context(cx) {
+            return;
+        }
         if let Some(editor) = self.editor.clone() {
             editor.update(cx, |editor, cx| editor.cancel(cx));
             return;
@@ -1233,6 +1291,42 @@ impl SettingsDialog {
         self.pending_focus = false;
         let handle = self.opacity_input.read(cx).focus_handle(cx);
         window.focus(&handle);
+    }
+
+    /// The open swatch menu, if there is one.
+    ///
+    /// The same commands the management row draws as buttons and the same
+    /// handler behind each, so the two can never mean different things — with
+    /// the one exception of the import, which picks files off the disk rather
+    /// than doing anything to the card that was clicked. A command a built-in
+    /// scheme does not permit is left out rather than shown greyed, which is
+    /// how every other menu in the application is built; the buttons keep
+    /// showing it disabled, because a row of buttons that came and went as the
+    /// selection changed would be worse than one that dims.
+    fn render_scheme_context(&self, cx: &mut Context<Self>) -> Option<ContextMenu> {
+        let (id, position) = self.scheme_context.clone()?;
+        let entry = Catalog::Scheme.entry(&id, cx);
+        let known = entry.is_some();
+        let custom = entry.is_some_and(|entry| !entry.builtin);
+        let this = cx.entity();
+
+        let entries = Action::menu_rows(known, custom)
+            .map(|action| {
+                let this = this.clone();
+                MenuEntry::new(action.label()).on_activate(move |_window, cx| {
+                    this.update(cx, |dialog, cx| dialog.run(Catalog::Scheme, action, cx));
+                })
+            })
+            .collect();
+
+        Some(
+            ContextMenu::new("settings-scheme-context")
+                .position(position)
+                .entries(entries)
+                .on_dismiss(move |_window, cx| {
+                    this.update(cx, |dialog, cx| dialog.close_scheme_context(cx));
+                }),
+        )
     }
 
     /// The row of management buttons drawn under one picker.
@@ -1488,6 +1582,14 @@ impl SettingsDialog {
                     this.update(cx, |dialog, cx| {
                         dialog.scheme = id;
                         cx.notify();
+                    });
+                }
+            })
+            .on_context_menu({
+                let this = this.clone();
+                move |id, position, _window, cx| {
+                    this.update(cx, |dialog, cx| {
+                        dialog.open_scheme_context(id, position, cx);
                     });
                 }
             });
@@ -1785,6 +1887,10 @@ impl Render for SettingsDialog {
                 body,
                 on_dismiss,
             ))
+            // Deferred inside, so it paints over the modal whatever its place
+            // in this list, and positioned in window coordinates — which the
+            // wrapper spans, so the two agree.
+            .children(self.render_scheme_context(cx))
     }
 }
 
@@ -1989,5 +2095,31 @@ mod tests {
         assert!(!Action::Delete.enabled(true, false));
         assert!(Action::Edit.enabled(true, true));
         assert!(Action::Delete.enabled(true, true));
+    }
+
+    #[test]
+    fn a_swatch_menu_leaves_out_the_import_and_whatever_the_entry_refuses() {
+        let rows = |known, custom| Action::menu_rows(known, custom).collect::<Vec<_>>();
+
+        // A built-in scheme is the usual starting point for one of the user's
+        // own, so it can be copied and written out but never rewritten.
+        assert_eq!(rows(true, false), [Action::Duplicate, Action::Export]);
+        assert_eq!(
+            rows(true, true),
+            [
+                Action::Duplicate,
+                Action::Edit,
+                Action::Delete,
+                Action::Export
+            ]
+        );
+        // A settings file naming a scheme whose file has since gone: the menu
+        // comes down to nothing rather than to a row of refusals.
+        assert!(rows(false, false).is_empty());
+        // The import is the one action a menu never carries, however the entry
+        // stands — its own `enabled` is unconditional.
+        for known in [false, true] {
+            assert!(!rows(known, known).contains(&Action::Import));
+        }
     }
 }

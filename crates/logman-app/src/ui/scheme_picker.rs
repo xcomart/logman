@@ -6,7 +6,10 @@
 
 use std::rc::Rc;
 
-use gpui::{App, ElementId, Hsla, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    App, ElementId, Hsla, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window, div,
+    prelude::*, px,
+};
 
 use super::theme::theme;
 
@@ -27,6 +30,10 @@ const DEFAULT_PLACEHOLDER_LABEL: &str = "inherits";
 
 /// Callback fired with the id of the newly picked scheme.
 type SelectHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
+/// Callback fired with the id of the right-clicked scheme, along with the
+/// window-space position of the pointer.
+type ContextHandler = Rc<dyn Fn(&str, Point<Pixels>, &mut Window, &mut App)>;
 
 /// The colors drawn inside one card's preview strip.
 #[derive(Debug, Clone)]
@@ -105,6 +112,7 @@ pub struct SchemePicker {
     columns: usize,
     tab_index: Option<isize>,
     on_select: Option<SelectHandler>,
+    on_context_menu: Option<ContextHandler>,
 }
 
 impl SchemePicker {
@@ -119,6 +127,7 @@ impl SchemePicker {
             columns: DEFAULT_COLUMNS,
             tab_index: None,
             on_select: None,
+            on_context_menu: None,
         }
     }
 
@@ -153,6 +162,21 @@ impl SchemePicker {
         self.on_select = Some(Rc::new(handler));
         self
     }
+
+    /// Sets the callback invoked with the id of the right-clicked card and the
+    /// window-space position of the pointer, for the parent to open a context
+    /// menu at.
+    ///
+    /// Unlike [`SchemePicker::on_select`] this fires for the selected card too:
+    /// what a menu offers is worth asking for about the entry already picked,
+    /// which is exactly the one a management row acts on.
+    pub fn on_context_menu(
+        mut self,
+        handler: impl Fn(&str, Point<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_context_menu = Some(Rc::new(handler));
+        self
+    }
 }
 
 impl RenderOnce for SchemePicker {
@@ -161,6 +185,7 @@ impl RenderOnce for SchemePicker {
         let columns = self.columns;
         let selected = self.selected;
         let on_select = self.on_select;
+        let on_context_menu = self.on_context_menu;
         let container_id = self.id;
         let outer_id = container_id.clone();
         let tab_index = self.tab_index;
@@ -180,6 +205,7 @@ impl RenderOnce for SchemePicker {
                         let is_selected = Some(&entry.id) == selected.as_ref();
                         let handler = on_select.clone().filter(|_| !is_selected);
                         let id = entry.id.clone();
+                        let context_id = entry.id.clone();
 
                         let strip = match &entry.preview {
                             Some(preview) => div()
@@ -246,6 +272,17 @@ impl RenderOnce for SchemePicker {
                             })
                             .when_some(handler, |this, handler| {
                                 this.on_click(move |_, window, cx| handler(&id, window, cx))
+                            })
+                            .when_some(on_context_menu.clone(), |this, handler| {
+                                this.on_mouse_down(
+                                    MouseButton::Right,
+                                    move |event: &MouseDownEvent, window, cx| {
+                                        // The press belongs to this card, not
+                                        // to the form scrolling behind it.
+                                        cx.stop_propagation();
+                                        handler(&context_id, event.position, window, cx);
+                                    },
+                                )
                             })
                             .child(strip)
                             .child(

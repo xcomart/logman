@@ -48,10 +48,10 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{
-    AnyElement, App, AsyncApp, ClickEvent, Context, Div, DragMoveEvent, ElementId, Entity,
-    EntityId, ExternalPaths, FocusHandle, Focusable, Modifiers, MouseButton, MouseDownEvent,
-    MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, SharedString, Subscription,
-    WeakEntity, Window, div, prelude::*, px, relative,
+    AnyElement, App, AsyncApp, ClickEvent, ClipboardItem, Context, Div, DragMoveEvent, ElementId,
+    Entity, EntityId, ExternalPaths, FocusHandle, Focusable, Modifiers, MouseButton,
+    MouseDownEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, SharedString,
+    Subscription, WeakEntity, Window, div, prelude::*, px, relative,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -580,6 +580,18 @@ impl SessionState {
         self.selection().count()
     }
 
+    /// The selected entry, or `None` unless the selection is exactly one.
+    ///
+    /// What every command phrased in the singular asks for: renaming, copying a
+    /// name or a path, and opening a directory all need the one entry the menu
+    /// is speaking about, and none of them means anything over a selection of
+    /// several.
+    fn only_selected(&self) -> Option<&FileEntry> {
+        let mut selection = self.selection();
+        let entry = selection.next()?;
+        selection.next().is_none().then_some(entry)
+    }
+
     /// Replaces the selection with `name` alone, and anchors ranges on it.
     fn select_only(&mut self, name: &str) {
         self.selected.clear();
@@ -921,6 +933,12 @@ impl FilePanel {
         self.states.get_mut(&session)
     }
 
+    /// The same, for the readers that only look.
+    fn showing(&self) -> Option<&SessionState> {
+        let session = self.session.as_ref()?.entity_id();
+        self.states.get(&session)
+    }
+
     /// Puts the listing's bar up whenever it has been scrolled, and starts the
     /// clock that takes it down again.
     fn watch_list_scroll(&mut self, cx: &mut Context<Self>) {
@@ -1206,6 +1224,61 @@ impl FilePanel {
         cx.notify();
     }
 
+    /// Selects every entry of the listing.
+    ///
+    /// The anchor lands on the first entry rather than staying where the last
+    /// click left it, so that a <kbd>Shift</kbd>-click afterwards reads as
+    /// "everything from the top down to here" — which is the only reading a
+    /// selection that starts at the top can be narrowed by.
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.active_state() else {
+            return;
+        };
+        if state.entries.is_empty() {
+            return;
+        }
+        state.selected = state
+            .entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        state.anchor = state.entries.first().map(|entry| entry.name.clone());
+        cx.notify();
+    }
+
+    /// Puts the selected entry's name on the clipboard.
+    ///
+    /// Nothing is said on the status line afterwards: the menu row named the
+    /// act, the clipboard is where the result went, and a line reporting it
+    /// would be the only one the panel writes for something that cannot fail.
+    fn copy_name(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .showing()
+            .and_then(SessionState::only_selected)
+            .map(|entry| entry.name.clone())
+        else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(name));
+    }
+
+    /// Puts the selected entry's whole path on the clipboard.
+    ///
+    /// Built with [`join`], like every other path the panel hands to an
+    /// operation, so what is copied is exactly the string a rename or a
+    /// download would have aimed at — in the spelling the source itself uses
+    /// rather than in this computer's.
+    fn copy_path(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.showing() else {
+            return;
+        };
+        let (Some(directory), Some(entry)) = (state.path.as_deref(), state.only_selected()) else {
+            return;
+        };
+        let path = join(directory, &entry.name);
+        cx.write_to_clipboard(ClipboardItem::new_string(path));
+    }
+
     /// Opens the context menu at `at`, over the row named `name`.
     ///
     /// A right-click on a row that is *not* selected selects it first, the way
@@ -1243,11 +1316,17 @@ impl FilePanel {
         cx.notify();
     }
 
-    /// Puts the open menu away, if there is one.
-    fn close_context(&mut self, cx: &mut Context<Self>) {
-        if self.context.take().is_some() {
-            cx.notify();
+    /// Puts the open menu away, and says whether there was one to put away.
+    ///
+    /// The answer is what lets the workspace layer <kbd>Escape</kbd>: the key
+    /// belongs to this menu while it is up and to whatever is behind the panel
+    /// once it is not, and only the panel knows which of those is the case.
+    pub fn close_context(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.context.take().is_none() {
+            return false;
         }
+        cx.notify();
+        true
     }
 
     /// Opens the dropdown of the breadcrumb piece pressed at `at`.
@@ -2596,6 +2675,10 @@ impl FilePanel {
     /// whose command would be refused is left out rather than shown greyed:
     /// "Rename…" appears only over a selection of exactly one, because renaming
     /// several things to one name is not a thing to offer and then decline.
+    ///
+    /// The listing menus come in three groups, separated in that order: what
+    /// the press was on, what can be taken off it as text, and what acts on the
+    /// listing as a whole. A group left empty contributes no rule of its own.
     fn render_context(
         &self,
         state: Option<&SessionState>,
@@ -2634,34 +2717,71 @@ impl FilePanel {
             }
         };
 
-        let mut entries = Vec::new();
+        // The one selected entry, when there is exactly one. Every row phrased
+        // in the singular hangs off it, and the kind it carries is what tells
+        // an openable directory from a file.
+        let only = state.and_then(SessionState::only_selected);
+
+        let mut primary = Vec::new();
+        let mut clipboard = Vec::new();
         if on_rows && selected > 0 {
+            // What a double-click on the row would have done, said out loud —
+            // and offered only where it would do anything, which is over a
+            // single directory.
+            if let Some(name) = only.filter(|entry| entry.is_dir).map(|entry| &entry.name) {
+                let name = name.clone();
+                primary.push(MenuEntry::new(ts!("files.menu_open")).on_activate({
+                    let this = this.clone();
+                    move |_window, cx| {
+                        let name = name.clone();
+                        this.update(cx, |panel, cx| panel.activate(&name, cx));
+                    }
+                }));
+            }
             let copy_out = key(is_local, "files.menu_download", "files.local.menu_copy_out");
-            entries.push(MenuEntry::new(ts!(copy_out)).on_activate({
+            primary.push(MenuEntry::new(ts!(copy_out)).on_activate({
                 let this = this.clone();
                 move |_window, cx| {
                     this.update(cx, |panel, cx| panel.download(cx));
                 }
             }));
-            if selected == 1 {
-                entries.push(MenuEntry::new(ts!("files.menu_rename")).on_activate({
+            if only.is_some() {
+                primary.push(MenuEntry::new(ts!("files.menu_rename")).on_activate({
                     let this = this.clone();
                     move |_window, cx| {
                         this.update(cx, |panel, cx| panel.begin_rename(cx));
                     }
                 }));
             }
-            entries.push(MenuEntry::new(ts!("files.menu_delete")).on_activate({
+            primary.push(MenuEntry::new(ts!("files.menu_delete")).on_activate({
                 let this = this.clone();
                 move |_window, cx| {
                     this.update(cx, |panel, cx| panel.confirm_delete(cx));
                 }
             }));
+
+            // A group of their own: these two move nothing and ask nothing,
+            // they only hand the entry's name — or the whole path an operation
+            // would have used — to whatever the user pastes into next.
+            if only.is_some() {
+                clipboard.push(MenuEntry::new(ts!("files.menu_copy_name")).on_activate({
+                    let this = this.clone();
+                    move |_window, cx| {
+                        this.update(cx, |panel, cx| panel.copy_name(cx));
+                    }
+                }));
+                clipboard.push(MenuEntry::new(ts!("files.menu_copy_path")).on_activate({
+                    let this = this.clone();
+                    move |_window, cx| {
+                        this.update(cx, |panel, cx| panel.copy_path(cx));
+                    }
+                }));
+            }
         } else {
             // First, the way every file manager orders this menu: creating is
             // the one command here that acts on the directory itself rather
             // than moving something into it.
-            entries.push(MenuEntry::new(ts!("files.menu_new_folder")).on_activate({
+            primary.push(MenuEntry::new(ts!("files.menu_new_folder")).on_activate({
                 let this = this.clone();
                 move |_window, cx| {
                     this.update(cx, |panel, cx| panel.begin_new_folder(cx));
@@ -2686,18 +2806,44 @@ impl FilePanel {
                 ),
             ] {
                 let this = this.clone();
-                entries.push(MenuEntry::new(label).on_activate(move |_window, cx| {
+                primary.push(MenuEntry::new(label).on_activate(move |_window, cx| {
                     this.update(cx, |panel, cx| panel.pick_upload(folders, cx));
                 }));
             }
         }
-        entries.push(MenuEntry::separator());
-        entries.push(MenuEntry::new(ts!("files.menu_refresh")).on_activate({
+
+        // Both of these speak for the listing rather than for whatever the
+        // press landed on, so they are offered from either menu. Selecting
+        // everything is left out once everything already is — there is nothing
+        // for the row to change — and over an empty directory, which has
+        // nothing to select.
+        let listed = state.map_or(0, |state| state.entries.len());
+        let mut whole = Vec::new();
+        if listed > 0 && selected < listed {
+            whole.push(MenuEntry::new(ts!("files.menu_select_all")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |panel, cx| panel.select_all(cx));
+                }
+            }));
+        }
+        whole.push(MenuEntry::new(ts!("files.menu_refresh")).on_activate({
             let this = this.clone();
             move |_window, cx| {
                 this.update(cx, |panel, cx| panel.refresh(cx));
             }
         }));
+
+        let mut entries = Vec::new();
+        for group in [primary, clipboard, whole] {
+            if group.is_empty() {
+                continue;
+            }
+            if !entries.is_empty() {
+                entries.push(MenuEntry::separator());
+            }
+            entries.extend(group);
+        }
 
         Some(
             ContextMenu::new("file-panel-context")
