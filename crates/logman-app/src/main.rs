@@ -227,12 +227,52 @@ const MIN_SPLIT_RATIO: f32 = 0.1;
 /// pushing the panes apart.
 const SPLIT_HANDLE: f32 = 6.;
 
-/// Element id of the tab strip's overlay scroll indicator.
+/// A surface of the workspace that scrolls, and so wears an overlay bar.
 ///
-/// Held here rather than inside [`TabBar`] because a drag of the thumb is
-/// answered by the workspace, and the id is what tells this bar's drag from any
-/// other bar's in the window.
-const TAB_SCROLLBAR: &str = "tab-scrollbar";
+/// Two of them, on different axes and never on screen together in the way that
+/// matters: the tab strip runs sideways once the tabs outgrow it, the empty
+/// state runs down once its buttons outgrow the window. Naming them lets one
+/// set of handlers answer for both instead of one set each — the same shape the
+/// settings dialog uses for its three surfaces.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    /// The tab strip.
+    Tabs,
+    /// The placeholder shown while no session is open.
+    Empty,
+}
+
+impl Surface {
+    /// Which way the surface scrolls, and so which way its bar lies.
+    fn axis(self) -> ScrollbarAxis {
+        match self {
+            Self::Tabs => ScrollbarAxis::Horizontal,
+            Self::Empty => ScrollbarAxis::Vertical,
+        }
+    }
+}
+
+/// Every scrolling surface, with the element id its bar is drawn under.
+///
+/// The ids live here rather than inside the elements they overlay — [`TabBar`]
+/// would be the obvious home for the first — because a drag of a thumb is
+/// answered by the workspace, and the id is what tells one bar's drag from any
+/// other bar's in the window. Iterating this is how the drag and release paths
+/// find which bar an event belongs to.
+const SCROLLBARS: [(&str, Surface); 2] = [
+    ("tab-scrollbar", Surface::Tabs),
+    ("empty-scrollbar", Surface::Empty),
+];
+
+/// Element id of the empty state's scrolling box.
+const EMPTY_STATE: &str = "empty-state";
+
+/// Room left above and below a column that [`centered_scroll`] is scrolling.
+///
+/// Only ever seen once there is scrolling to do — while the column fits, the
+/// automatic margins dwarf it — and there it is what keeps the first and last
+/// buttons off the edges of the body at either end of the travel.
+const SCROLL_MARGIN: f32 = 24.;
 
 /// The divider a drag is currently holding.
 ///
@@ -338,6 +378,14 @@ struct Workspace {
     tab_scroll: ScrollHandle,
     /// Whether the tab strip's overlay scroll indicator is on screen.
     tab_scrollbar: ScrollbarState,
+    /// Vertical scroll of the empty state.
+    ///
+    /// The placeholder is as tall as it has shells and saved profiles to offer,
+    /// which on Windows grows with every WSL distribution installed, so it
+    /// outgrows a short window rather than the other way round.
+    empty_scroll: ScrollHandle,
+    /// Whether the empty state's overlay scroll indicator is on screen.
+    empty_scrollbar: ScrollbarState,
     /// The connection dialog, rendered only while it reports itself open.
     dialog: Entity<ConnectionDialog>,
     /// The settings dialog, rendered only while it reports itself open.
@@ -497,6 +545,8 @@ impl Workspace {
             active: 0,
             tab_scroll: ScrollHandle::new(),
             tab_scrollbar: ScrollbarState::new(),
+            empty_scroll: ScrollHandle::new(),
+            empty_scrollbar: ScrollbarState::new(),
             dialog,
             settings,
             about,
@@ -1771,11 +1821,7 @@ impl Workspace {
             .tabs(tabs)
             .active(self.active)
             .scroll_handle(&self.tab_scroll)
-            .scrollbar(self.tab_scrollbar().on_hover(cx.listener(
-                |workspace, hovered: &bool, _window, cx| {
-                    workspace.hover_tab_scrollbar(*hovered, cx);
-                },
-            )))
+            .scrollbar(self.hovering_scrollbar(SCROLLBARS[0].0, Surface::Tabs, cx))
             .menu_icon(icons::TAB_LIST)
             .new_icon(icons::NEW_TAB)
             // The close button reuses the tab menu's own row: it is the same
@@ -2115,72 +2161,127 @@ impl Workspace {
         }
     }
 
-    /// The tab strip's overlay scroll indicator, as it stands.
+    /// One surface's scroll offset and the state of the bar over it.
+    ///
+    /// The pair is what every handler below works on, and taking it by one
+    /// lookup is what lets them be written once for both surfaces rather than
+    /// once each.
+    fn surface(&mut self, surface: Surface) -> (&ScrollHandle, &mut ScrollbarState) {
+        match surface {
+            Surface::Tabs => (&self.tab_scroll, &mut self.tab_scrollbar),
+            Surface::Empty => (&self.empty_scroll, &mut self.empty_scrollbar),
+        }
+    }
+
+    /// The same pair, for the render paths that only read it.
+    fn surface_ref(&self, surface: Surface) -> (&ScrollHandle, &ScrollbarState) {
+        match surface {
+            Surface::Tabs => (&self.tab_scroll, &self.tab_scrollbar),
+            Surface::Empty => (&self.empty_scroll, &self.empty_scrollbar),
+        }
+    }
+
+    /// One surface's overlay scroll indicator, as it stands.
     ///
     /// Rebuilt on demand rather than kept, because everything it is made of —
-    /// the strip's box, how far it overflows, where it sits — is measured
+    /// the surface's box, how far it overflows, where it sits — is measured
     /// afresh by gpui on every layout pass.
-    fn tab_scrollbar(&self) -> Scrollbar {
-        Scrollbar::for_handle(TAB_SCROLLBAR, ScrollbarAxis::Horizontal, &self.tab_scroll)
-            .fade(self.tab_scrollbar.fade())
+    fn scrollbar(&self, id: &'static str, surface: Surface) -> Scrollbar {
+        let (handle, state) = self.surface_ref(surface);
+        Scrollbar::for_handle(id, surface.axis(), handle).fade(state.fade())
     }
 
-    /// Puts the strip's bar up whenever the strip has moved, and starts the
-    /// clock that takes it down again.
+    /// The same bar, listening for the pointer reaching the edge it rides.
     ///
-    /// Called from `render` because that is where every way of scrolling the
-    /// strip meets: a wheel over the tabs, and the jump that brings a newly
-    /// activated tab back into view.
-    fn watch_tab_scroll(&mut self, cx: &mut Context<Self>) {
-        let scrolled = scrolled(&self.tab_scroll, ScrollbarAxis::Horizontal);
-        if let Some(epoch) = self.tab_scrollbar.moved(scrolled) {
-            hide_later(epoch, cx, |workspace| Some(&mut workspace.tab_scrollbar));
+    /// Only the bars that are drawn need it: the ones the drag path builds are
+    /// there to be measured, and never reach an element tree.
+    fn hovering_scrollbar(
+        &self,
+        id: &'static str,
+        surface: Surface,
+        cx: &mut Context<Self>,
+    ) -> Scrollbar {
+        self.scrollbar(id, surface).on_hover(cx.listener(
+            move |workspace, hovered: &bool, _window, cx| {
+                workspace.hover_scrollbar(surface, *hovered, cx);
+            },
+        ))
+    }
+
+    /// Puts each surface's bar up whenever that surface has moved, and starts
+    /// the clock that takes it down again.
+    ///
+    /// Called from `render` because that is where every way of scrolling them
+    /// meets: a wheel over the tabs or the empty state, and the jump that brings
+    /// a newly activated tab back into view.
+    fn watch_scroll(&mut self, cx: &mut Context<Self>) {
+        for (_, surface) in SCROLLBARS {
+            let (handle, state) = self.surface(surface);
+            let scrolled = scrolled(handle, surface.axis());
+            if let Some(epoch) = state.moved(scrolled) {
+                hide_later(epoch, cx, move |workspace| {
+                    Some(workspace.surface(surface).1)
+                });
+            }
         }
     }
 
-    /// Scrolls the tab strip to wherever its thumb has been dragged.
+    /// Scrolls whichever surface's thumb has been dragged.
     ///
-    /// Every element listening for this drag type hears every such drag, so the
+    /// Every element listening for this drag type hears every such drag, so each
     /// bar checks that the one being dragged is its own before answering.
-    fn drag_tab_scrollbar(&mut self, event: &DragMoveEvent<DraggedThumb>, cx: &mut Context<Self>) {
-        let Some(progress) = self.tab_scrollbar().dragged(event, cx) else {
-            return;
-        };
+    fn drag_scrollbar(&mut self, event: &DragMoveEvent<DraggedThumb>, cx: &mut Context<Self>) {
+        for (id, surface) in SCROLLBARS {
+            let Some(progress) = self.scrollbar(id, surface).dragged(event, cx) else {
+                continue;
+            };
 
-        // Held even when the pointer moved along the other axis and the strip
-        // has not budged: the bar has to stay up for as long as it is being
-        // held, and a still pointer moves nothing to notice.
-        self.tab_scrollbar.hold();
-        scroll_to(&self.tab_scroll, ScrollbarAxis::Horizontal, progress);
-        cx.notify();
+            // Held even when the pointer moved along the other axis and the
+            // surface has not budged: the bar has to stay up for as long as it
+            // is being held, and a still pointer moves nothing to notice.
+            let (handle, state) = self.surface(surface);
+            state.hold();
+            scroll_to(handle, surface.axis(), progress);
+            cx.notify();
+            return;
+        }
     }
 
-    /// Lets go of the strip's thumb, and starts the clock on the bar again.
+    /// Lets go of whichever thumb was being held, and starts its clock again.
     ///
     /// Every mouse release in the window arrives here; all but the one ending a
-    /// drag of this bar find nothing to let go of.
-    fn release_tab_scrollbar(&mut self, cx: &mut Context<Self>) {
-        if let Some(epoch) = self.tab_scrollbar.release() {
-            hide_later(epoch, cx, |workspace| Some(&mut workspace.tab_scrollbar));
-            cx.notify();
+    /// drag of a bar find nothing to let go of.
+    fn release_scrollbars(&mut self, cx: &mut Context<Self>) {
+        for (_, surface) in SCROLLBARS {
+            if let Some(epoch) = self.surface(surface).1.release() {
+                hide_later(epoch, cx, move |workspace| {
+                    Some(workspace.surface(surface).1)
+                });
+                cx.notify();
+            }
         }
     }
 
-    /// Puts the strip's bar up while the pointer rests on the edge it rides, and
-    /// starts it going the moment the pointer leaves.
-    fn hover_tab_scrollbar(&mut self, hovered: bool, cx: &mut Context<Self>) {
+    /// Puts one surface's bar up while the pointer rests on the edge it rides,
+    /// and starts it going the moment the pointer leaves.
+    ///
+    /// Told which surface rather than asked to work it out: each strip carries
+    /// this listener already and knows only its own.
+    fn hover_scrollbar(&mut self, surface: Surface, hovered: bool, cx: &mut Context<Self>) {
+        let state = self.surface(surface).1;
         if hovered {
-            if self.tab_scrollbar.hover_enter() {
+            if state.hover_enter() {
                 cx.notify();
             }
             return;
         }
 
-        if let Some(epoch) = self.tab_scrollbar.hover_leave() {
-            hide_now(self, epoch, cx, |workspace| {
-                Some(&mut workspace.tab_scrollbar)
-            });
-        }
+        let Some(epoch) = state.hover_leave() else {
+            return;
+        };
+        hide_now(self, epoch, cx, move |workspace| {
+            Some(workspace.surface(surface).1)
+        });
     }
 
     /// Renders the placeholder shown while no session is open.
@@ -2241,18 +2342,13 @@ impl Workspace {
 
         let local = self.render_empty_local(cx);
         let shortcut = ts!("empty.hint", shortcut = format!("{SHORTCUT_MODIFIER}+T"));
+        let bar = self.hovering_scrollbar(SCROLLBARS[1].0, Surface::Empty, cx);
 
-        div()
+        let content = div()
             .flex()
             .flex_col()
-            .flex_grow()
-            .min_h_0()
             .items_center()
-            .justify_center()
             .gap(px(14.))
-            // The only fill covering the body while no session is open, so this
-            // is where the window opacity lands on the empty state.
-            .bg(app_settings::window_tint(theme.background, cx))
             .child(
                 div()
                     .text_size(px(30.))
@@ -2278,7 +2374,14 @@ impl Workspace {
                 ),
             )
             .children(local)
-            .children(saved)
+            .children(saved);
+
+        // The fill goes on the box the helper hands back, which is the whole of
+        // the body: the tint has to cover it however little of it the column
+        // reaches, this being the only fill over the body while no session is
+        // open and so where the window opacity lands on the empty state.
+        centered_scroll(EMPTY_STATE, &self.empty_scroll, bar, &theme, content)
+            .bg(app_settings::window_tint(theme.background, cx))
             .into_any_element()
     }
 
@@ -2465,6 +2568,62 @@ impl Workspace {
     }
 }
 
+/// A box that keeps `content` in the middle while it fits, and lets it be
+/// scrolled from the top once it does not.
+///
+/// `justify_center` does the first half and ruins the second. With more content
+/// than room, a centred column hangs off both ends of its box, and scrolling
+/// only ever reaches what lies past the *end* of one — so the head of the column
+/// goes off the top edge and stays there, unreachable. Automatic margins share
+/// out whatever room is spare, which centres the column exactly as `justify_center`
+/// would, and collapse to nothing when there is none, which leaves the column at
+/// the top with all of it below the fold and so all of it reachable.
+///
+/// Three boxes. The outermost is what the overlay bar hangs off, because the
+/// scrolling box cannot hold it — its children are what scroll away underneath
+/// it — and it is what the caller styles, the fill included. Inside it is the
+/// box that scrolls, and inside that the one carrying the margins and the
+/// breathing room that keeps either end of the scroll off the edge.
+fn centered_scroll(
+    id: &'static str,
+    scroll: &ScrollHandle,
+    bar: Scrollbar,
+    theme: &Theme,
+    content: impl IntoElement,
+) -> Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_grow()
+        .min_h_0()
+        .child(
+            div()
+                .id(id)
+                .track_scroll(scroll)
+                .flex()
+                .flex_col()
+                .flex_grow()
+                .min_h_0()
+                .items_center()
+                .overflow_y_scroll()
+                .child(
+                    // `flex_none` so that a column taller than the box overflows
+                    // it — and is scrolled to — rather than being squeezed into
+                    // it, which is what a flex item does by default.
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_none()
+                        .items_center()
+                        .my_auto()
+                        .py(px(SCROLL_MARGIN))
+                        .child(content),
+                ),
+        )
+        .children(bar.render(theme))
+}
+
 /// Renders one node of a pane tree.
 ///
 /// A split becomes a flex box in the direction of its axis, with each child
@@ -2604,7 +2763,7 @@ impl Render for Workspace {
         // Before anything is built, so the panel is already pointed at the
         // active pane's session by the time it renders itself as a child.
         self.sync_file_panel(cx);
-        self.watch_tab_scroll(cx);
+        self.watch_scroll(cx);
         let toolbar = self.render_toolbar(window, cx);
         let body = self.render_body(window, cx);
         let status_bar = self.render_status_bar(cx);
@@ -2660,25 +2819,25 @@ impl Render for Workspace {
             .flex_col()
             .text_color(theme.text)
             .text_size(px(13.))
-            // The tab strip's overlay bar is answered from here rather than
-            // from the strip: gpui hands a drag move to every listener of that
-            // type wherever it sits, and the root is the one element that is
-            // always mounted while a drag of it is in flight.
+            // The overlay bars are answered from here rather than from the
+            // surfaces they ride: gpui hands a drag move to every listener of
+            // that type wherever it sits, and the root is the one element that
+            // is always mounted while a drag of one is in flight.
             .on_drag_move::<DraggedThumb>(cx.listener(
                 move |workspace, event: &DragMoveEvent<DraggedThumb>, _window, cx| {
-                    workspace.drag_tab_scrollbar(event, cx);
+                    workspace.drag_scrollbar(event, cx);
                 },
             ))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|workspace, _: &MouseUpEvent, _window, cx| {
-                    workspace.release_tab_scrollbar(cx);
+                    workspace.release_scrollbars(cx);
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|workspace, _: &MouseUpEvent, _window, cx| {
-                    workspace.release_tab_scrollbar(cx);
+                    workspace.release_scrollbars(cx);
                 }),
             )
             .on_action(cx.listener(Self::new_session_action))
@@ -3226,4 +3385,170 @@ fn main() {
 
         cx.activate(true);
     });
+}
+
+/// What the welcome screen's box does when its column outgrows the window.
+///
+/// Only [`centered_scroll`] is put under test, and only through what its scroll
+/// handle reports: the arrangement is entirely a question of layout, and the
+/// handle is where gpui writes down the answer — the box it measured, and how
+/// far past it the column ran.
+#[cfg(test)]
+mod tests {
+    use std::ops::Deref;
+
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext, point};
+
+    /// Height of the stand-in column.
+    ///
+    /// Nothing about the real welcome screen's contents matters here — only that
+    /// there is a definite height to hold the window against — so the test hands
+    /// the box one plain child rather than rebuilding the screen.
+    const COLUMN: f32 = 400.;
+
+    /// A window tall enough for the column and both its margins, several times
+    /// over.
+    const ROOMY: f32 = 900.;
+
+    /// A window shorter than the column, which is the whole point of the box.
+    const CRAMPED: f32 = 300.;
+
+    /// Wide enough that nothing wraps; the box only scrolls one way.
+    const WIDTH: f32 = 600.;
+
+    /// How far apart two measurements may be and still count as the same, in a
+    /// layout whose lengths are rounded to hundredths of a pixel.
+    const SLACK: f32 = 0.5;
+
+    /// A window holding nothing but the box under test.
+    struct Harness {
+        scroll: ScrollHandle,
+        bar: ScrollbarState,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::dark();
+            let bar = Scrollbar::for_handle(SCROLLBARS[1].0, Surface::Empty.axis(), &self.scroll)
+                .fade(self.bar.fade());
+
+            div().flex().flex_col().size_full().child(centered_scroll(
+                EMPTY_STATE,
+                &self.scroll,
+                bar,
+                &theme,
+                div().flex_none().w(px(320.)).h(px(COLUMN)),
+            ))
+        }
+    }
+
+    /// Opens the harness in a window `height` tall and hands back its handle.
+    ///
+    /// Drawn twice: a bar is built from the box as the previous frame measured
+    /// it, so the opening frame has nothing to build one out of.
+    fn open(cx: &mut TestAppContext, height: f32) -> ScrollHandle {
+        let scroll = ScrollHandle::new();
+        let window = cx.add_window({
+            let scroll = scroll.clone();
+            move |_, _| Harness {
+                scroll,
+                bar: ScrollbarState::new(),
+            }
+        });
+
+        let mut cx = VisualTestContext::from_window(*window.deref(), cx);
+        cx.simulate_resize(size(px(WIDTH), px(height)));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        scroll
+    }
+
+    /// The bar the workspace would draw over the box as it now stands.
+    fn scrollbar(scroll: &ScrollHandle) -> Scrollbar {
+        Scrollbar::for_handle(SCROLLBARS[1].0, Surface::Empty.axis(), scroll)
+    }
+
+    /// With room to spare the column sits in the middle, exactly where
+    /// `justify_center` used to put it, and there is nothing to scroll — so no
+    /// bar is drawn either.
+    #[gpui::test]
+    fn a_column_that_fits_stays_in_the_middle(cx: &mut TestAppContext) {
+        let scroll = open(cx, ROOMY);
+        let box_ = scroll.bounds();
+        let column = scroll
+            .bounds_for_item(0)
+            .expect("the box never measured its column");
+
+        let above = f32::from(column.top() - box_.top());
+        let below = f32::from(box_.bottom() - column.bottom());
+        assert!(
+            (above - below).abs() < SLACK,
+            "the column was not centred: {above} above, {below} below"
+        );
+        assert_eq!(
+            scroll.max_offset().height,
+            px(0.),
+            "a column that fits left something to scroll"
+        );
+        assert!(
+            scrollbar(&scroll).thumb().is_none(),
+            "a box with nothing to scroll drew a bar anyway"
+        );
+    }
+
+    /// The regression: with less room than the column needs, the head of it used
+    /// to be pushed off the top edge and left there. It now starts at the top of
+    /// the box, and everything past the bottom is reachable by scrolling.
+    #[gpui::test]
+    fn a_column_that_does_not_fit_starts_at_the_top(cx: &mut TestAppContext) {
+        let scroll = open(cx, CRAMPED);
+        let box_ = scroll.bounds();
+        let column = scroll
+            .bounds_for_item(0)
+            .expect("the box never measured its column");
+
+        assert!(
+            f32::from(column.top() - box_.top()).abs() < SLACK,
+            "the column did not start at the top of the box: {:?} in {:?}",
+            column,
+            box_
+        );
+        assert!(
+            (f32::from(scroll.max_offset().height)
+                - f32::from(column.size.height - box_.size.height))
+            .abs()
+                < SLACK,
+            "the scrollable range did not cover the whole of the column"
+        );
+        assert!(
+            scrollbar(&scroll).thumb().is_some(),
+            "a box with something to scroll drew no bar"
+        );
+    }
+
+    /// And the far end of that scroll reaches the foot of the column, margin and
+    /// all, rather than stopping short of the last button.
+    #[gpui::test]
+    fn scrolling_to_the_end_reaches_the_foot_of_the_column(cx: &mut TestAppContext) {
+        let scroll = open(cx, CRAMPED);
+        scroll.set_offset(point(px(0.), -scroll.max_offset().height));
+        let box_ = scroll.bounds();
+        let column = scroll
+            .bounds_for_item(0)
+            .expect("the box never measured its column");
+
+        let foot = column.bottom() + scroll.offset().y;
+        assert!(
+            f32::from(foot - box_.bottom()).abs() < SLACK,
+            "the end of the scroll left {:?} of the column below the box",
+            foot - box_.bottom()
+        );
+        assert!(
+            f32::from(column.size.height) > COLUMN + SCROLL_MARGIN,
+            "the column was scrolled to its last button rather than past it"
+        );
+    }
 }
