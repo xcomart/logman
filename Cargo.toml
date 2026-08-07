@@ -81,7 +81,7 @@ proc-macro-error2 = { path = "vendor/proc-macro-error2" }
 [workspace.package]
 version = "0.3.1"
 edition = "2024"
-license = "Apache-2.0"
+license = "MIT"
 authors = ["logman contributors"]
 repository = "https://github.com/xcomart/logman"
 
