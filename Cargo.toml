@@ -108,6 +108,15 @@ tempfile = "3"
 # `O_NONBLOCK` on a pty master, and reading the passwd entry.
 libc = "0.2"
 
+# --- local pty, Windows only ---
+# `alacritty_terminal` does have a ConPTY backend, but it is built around
+# alacritty's own IOCP poller and cannot be driven by a blocking reader thread
+# the way its unix `tty` module can. wezterm's pty crate wraps ConPTY behind
+# plain `Read`/`Write`, which is what `logman-pty`'s driver is shaped for. Its
+# default feature set is empty — the optional `serde_support` would pull serde
+# into a crate that never serialises anything — so nothing needs turning off.
+portable-pty = "0.9"
+
 # --- localization ---
 # `rust-i18n` compiles `crates/logman-app/locales/*.yml` into the binary, so
 # there is no runtime asset to ship; `sys-locale` is only consulted when the
