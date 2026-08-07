@@ -46,6 +46,29 @@ A multi-platform GUI SSH terminal written in Rust, built on
   installed on the machine.
 - **Trust on first use** host key checking, backed by a `known_hosts` file.
 
+## Installing
+
+Prebuilt binaries for Windows, macOS and Linux are attached to every
+[GitHub release](https://github.com/xcomart/logman/releases).
+
+### macOS refuses to open a downloaded copy
+
+The macOS bundle is ad-hoc signed but not notarized — there is no Apple
+Developer account behind it — so Gatekeeper quarantines what the browser
+downloaded and blocks the first launch with "logman.app cannot be opened"
+or claims the app is damaged. The app is fine; the quarantine flag is the
+whole problem. After moving `logman.app` into `/Applications`, clear it:
+
+```bash
+xattr -d com.apple.quarantine /Applications/logman.app
+```
+
+The next launch — and every one after it — opens normally. If running
+unsigned commands from the terminal is not your thing, the long way around
+works too: try to open the app once, then allow it under **System Settings →
+Privacy & Security → Open Anyway**. A copy built from source (below) never
+gets the quarantine flag in the first place.
+
 ## Building
 
 Requires a Rust toolchain (edition 2024, so 1.85 or newer) and a platform
