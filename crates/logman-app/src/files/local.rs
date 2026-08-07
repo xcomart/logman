@@ -171,6 +171,37 @@ impl FileSource for LocalSource {
         .await
     }
 
+    /// Every drive letter Windows currently has mounted, as `C:/`, `D:/`, ….
+    ///
+    /// Windows is the one platform where the default single `/` would be a lie:
+    /// each drive is a tree of its own, and a panel that started on `C:` could
+    /// never reach `D:` by walking upwards. Overridden only here — the unix
+    /// build keeps the default, because there the answer really is one root.
+    ///
+    /// Answered from the kernel's bitmask alone, with no [`std::fs::metadata`]
+    /// call per letter. That is deliberate rather than lazy: touching a floppy
+    /// or optical drive spins the hardware up, which takes seconds per empty
+    /// bay, and the panel is asking this to fill a dropdown that opens under
+    /// the pointer. Whether a listed drive actually has media in it is settled
+    /// by the listing that follows the press, which reports its own failure.
+    ///
+    /// A mask of zero — how [`GetLogicalDrives`] reports its own failure —
+    /// comes back as an empty list rather than an error. The panel reads "fewer
+    /// than two roots" as "nothing to choose between" and falls back to the
+    /// dropdown it has always shown, which is a better answer to a rare API
+    /// failure than a notice about drive letters over a header the user pressed
+    /// to navigate.
+    #[cfg(windows)]
+    async fn roots(&self) -> Result<Vec<String>, FileError> {
+        self.blocking(|| {
+            // SAFETY: the call takes no arguments and writes through no
+            // pointer; it only reads the mask of drive letters in use.
+            let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+            Ok(drive_roots(mask))
+        })
+        .await
+    }
+
     /// Creates `path`, treating "it is already a directory" as success.
     ///
     /// Non-recursive, like the SFTP call and unlike
@@ -285,6 +316,25 @@ impl FileSource for LocalSource {
     fn is_local(&self) -> bool {
         true
     }
+}
+
+/// Turns [`GetLogicalDrives`]' bitmask into the roots the panel navigates by.
+///
+/// Bit 0 is `A:`, bit 1 is `B:`, and so on to bit 25 for `Z:`; every bit above
+/// those is reserved and ignored. Each root keeps its trailing separator,
+/// because `C:` alone names that drive's own current directory rather than its
+/// top — the same distinction [`normalise`] preserves.
+///
+/// Split out from the call so the mapping can be tested against a mask this
+/// machine does not happen to have.
+///
+/// [`GetLogicalDrives`]: windows::Win32::Storage::FileSystem::GetLogicalDrives
+#[cfg(windows)]
+fn drive_roots(mask: u32) -> Vec<String> {
+    (0..26u32)
+        .filter(|letter| mask & (1 << letter) != 0)
+        .map(|letter| format!("{}:/", char::from(b'A' + letter as u8)))
+        .collect()
 }
 
 /// Renders `path` as the [`String`] the panel navigates by.
@@ -782,6 +832,69 @@ mod tests {
     #[gpui::test]
     async fn a_local_source_says_it_is_local(executor: BackgroundExecutor) {
         assert!(LocalSource::new(executor).is_local());
+    }
+
+    /// The trait's default, kept in place on the platform that has one tree.
+    ///
+    /// Worth a test because it is what the panel reads as "there is nothing to
+    /// choose between": overriding it here would silently change what pressing
+    /// the root breadcrumb does on unix.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_unix_source_has_the_one_posix_root(executor: BackgroundExecutor) {
+        let roots = LocalSource::new(executor)
+            .roots()
+            .await
+            .expect("the roots must be readable");
+        assert_eq!(roots, ["/"]);
+    }
+
+    /// The mask, letter for letter, including the bits that are not letters.
+    ///
+    /// Written against a made-up mask rather than the machine's, so that the
+    /// arithmetic is pinned whatever drives happen to be plugged in here.
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_mask_becomes_one_root_per_letter() {
+        // Bits 2 and 3: the third and fourth letters.
+        assert_eq!(drive_roots(0b1100), ["C:/", "D:/"]);
+        assert_eq!(drive_roots(1), ["A:/"]);
+        // Bit 25 is `Z:`, and everything above it is reserved.
+        assert_eq!(drive_roots(1 << 25), ["Z:/"]);
+        assert_eq!(drive_roots(1 << 26), [] as [String; 0]);
+        assert_eq!(drive_roots(u32::MAX).len(), 26);
+        assert_eq!(
+            drive_roots(u32::MAX).last().map(String::as_str),
+            Some("Z:/")
+        );
+        assert!(drive_roots(0).is_empty());
+    }
+
+    /// The roots this machine really reports, which is what the panel offers.
+    ///
+    /// Deliberately thin on specifics — which drives exist is the machine's
+    /// business — but `C:` is on every Windows install, and every answer has to
+    /// be a path the panel can list as it stands.
+    #[cfg(windows)]
+    #[gpui::test]
+    async fn the_roots_of_this_machine_are_its_drive_letters(executor: BackgroundExecutor) {
+        let roots = LocalSource::new(executor)
+            .roots()
+            .await
+            .expect("the drive letters must be readable");
+
+        assert!(roots.iter().any(|root| root == "C:/"), "saw {roots:?}");
+        for root in &roots {
+            assert_eq!(root.len(), 3, "{root} is not a drive root");
+            let mut letters = root.chars();
+            assert!(
+                letters
+                    .next()
+                    .is_some_and(|letter| letter.is_ascii_uppercase())
+            );
+            assert_eq!(letters.next(), Some(':'));
+            assert_eq!(letters.next(), Some('/'));
+        }
     }
 
     /// The spelling the panel is handed, over the three shapes Windows produces:

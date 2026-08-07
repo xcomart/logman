@@ -189,6 +189,28 @@ pub trait FileSource {
     /// because only the UI knows what order the user asked for.
     async fn read_dir(&self, path: &str) -> Result<Vec<FileEntry>, FileError>;
 
+    /// The absolute paths every one of this source's trees starts at.
+    ///
+    /// Exists because a Windows filesystem is not one tree but several, one per
+    /// drive letter, and nothing else on this trait can reach the others: the
+    /// panel walks upwards with `<current>/..`, which stops at `C:/` and has
+    /// nowhere further to go. A source that *does* have somewhere further to go
+    /// says so here, and the panel's root breadcrumb becomes the way across.
+    ///
+    /// The default answers `/` — the single POSIX root — and is what SFTP and
+    /// WSL both use, since a session on either browses one tree whatever the
+    /// machine underneath it is partitioned into. That is a contract and not
+    /// just a convenience: with one root there is nothing to choose between, so
+    /// the panel leaves the root breadcrumb filling its dropdown with that
+    /// root's subdirectories exactly as it always has, and only a source
+    /// reporting two or more changes what pressing it does.
+    ///
+    /// The paths come back spelled as the source spells every other path, so
+    /// they can be listed as they are.
+    async fn roots(&self) -> Result<Vec<String>, FileError> {
+        Ok(vec!["/".to_owned()])
+    }
+
     /// Creates the directory `path`, and succeeds if it already exists.
     ///
     /// Existing-is-fine rather than an error, because a caller reproducing a
