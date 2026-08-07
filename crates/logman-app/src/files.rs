@@ -12,15 +12,20 @@
 //! `chmod`, no `symlink`, because the panel does not offer them and a wider
 //! trait would be a promise every future backend has to keep.
 //!
-//! Two implementations answer it, and they are shaped very differently on
+//! Three implementations answer it, and they are shaped very differently on
 //! purpose. [`SftpSource`] is a forwarding shim — every decision about how SFTP
 //! behaves stays in [`logman_ssh`], and this module only renames things and
 //! folds the error kinds. The local source in [`local`] is the real
 //! implementation of its side: there is no service behind it to delegate to, so
 //! it is where "what does listing a directory on this computer mean?" is
 //! actually answered, and it answers it to match the SFTP shim call for call,
-//! because the panel above branches on neither. It is compiled on unix alone,
-//! for the reason given at its declaration below.
+//! because the panel above branches on neither — including the spelling of the
+//! paths it hands back, which it brings to the POSIX shape the panel does its
+//! arithmetic in whatever the local platform writes. The third, in [`wsl_fs`],
+//! is that same local source seen through a mirror: a WSL tab's shell lives in
+//! a Linux filesystem, and Windows serves that filesystem as a share, so it
+//! answers in the shell's own Linux paths and translates them to
+//! `\\wsl.localhost\<distro>\…` at the edge of every call.
 //!
 //! Three shapes of this interface are worth explaining, because each of them is
 //! a decision rather than an accident:
@@ -51,15 +56,19 @@ use std::path::PathBuf;
 use futures::channel::mpsc::UnboundedSender;
 use logman_ssh::{SftpClient, SftpError};
 
-// Unix only, and gated here rather than inside itself: nothing in it is
-// platform specific, but a build with no pty has no local session to hand one
-// to, and an unreachable implementation is dead code the moment `-D warnings`
-// looks at it. The day a Windows shell arrives, this line is what moves.
-#[cfg(unix)]
+// Compiled everywhere logman is. It was unix only for as long as unix was the
+// only platform with a local shell to hand it to; now that Windows starts one
+// too, both have a session that browses this machine.
 mod local;
+// Windows-only because `\\wsl.localhost` is: it is how Windows reaches a
+// distribution's filesystem, and on Linux itself a distribution is simply this
+// machine, with nothing to reach across.
+#[cfg(windows)]
+mod wsl_fs;
 
-#[cfg(unix)]
 pub use local::LocalSource;
+#[cfg(windows)]
+pub use wsl_fs::WslSource;
 
 /// One entry of a directory listing the panel shows.
 ///
@@ -179,6 +188,28 @@ pub trait FileSource {
     /// The order is whatever the source produced; sorting belongs to the caller,
     /// because only the UI knows what order the user asked for.
     async fn read_dir(&self, path: &str) -> Result<Vec<FileEntry>, FileError>;
+
+    /// The absolute paths every one of this source's trees starts at.
+    ///
+    /// Exists because a Windows filesystem is not one tree but several, one per
+    /// drive letter, and nothing else on this trait can reach the others: the
+    /// panel walks upwards with `<current>/..`, which stops at `C:/` and has
+    /// nowhere further to go. A source that *does* have somewhere further to go
+    /// says so here, and the panel's root breadcrumb becomes the way across.
+    ///
+    /// The default answers `/` — the single POSIX root — and is what SFTP and
+    /// WSL both use, since a session on either browses one tree whatever the
+    /// machine underneath it is partitioned into. That is a contract and not
+    /// just a convenience: with one root there is nothing to choose between, so
+    /// the panel leaves the root breadcrumb filling its dropdown with that
+    /// root's subdirectories exactly as it always has, and only a source
+    /// reporting two or more changes what pressing it does.
+    ///
+    /// The paths come back spelled as the source spells every other path, so
+    /// they can be listed as they are.
+    async fn roots(&self) -> Result<Vec<String>, FileError> {
+        Ok(vec!["/".to_owned()])
+    }
 
     /// Creates the directory `path`, and succeeds if it already exists.
     ///

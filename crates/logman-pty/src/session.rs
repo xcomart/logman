@@ -1,4 +1,4 @@
-//! The local pty session driver.
+//! The local pty session driver for unix.
 //!
 //! [`PtySession::spawn`] moves every blocking operation onto OS threads this
 //! crate owns, so a GUI thread can hold a [`PtySession`] and never block on
@@ -22,74 +22,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use alacritty_terminal::event::{OnResize, WindowSize};
 use alacritty_terminal::tty::{self, Shell};
-use futures::channel::mpsc::{self as async_mpsc, UnboundedReceiver, UnboundedSender};
-use parking_lot::Mutex;
+use futures::channel::mpsc::{self as async_mpsc, UnboundedReceiver};
 
 use crate::config::PtyConfig;
+use crate::driver::{Command, EventSink, READ_BUFFER};
 use crate::event::PtyEvent;
-
-/// Size of a single blocking read from the pty master.
-///
-/// Generous on purpose: a program dumping a large file should be drained in as
-/// few reads — and published as few events — as possible.
-const READ_BUFFER: usize = 32 * 1024;
-
-/// A request sent to the session's control thread.
-enum Command {
-    /// Bytes to write to the pty master.
-    Input(Vec<u8>),
-    /// New terminal size, in columns and rows.
-    Resize(u16, u16),
-    /// Hang up on the shell and wind the session down.
-    Shutdown,
-    /// Posted by the reader thread once the master reports end of stream,
-    /// which is how the control thread learns that the shell is gone.
-    ReaderDone,
-}
-
-impl fmt::Debug for Command {
-    /// Never renders keystrokes: input bytes routinely contain passwords typed
-    /// into local prompts such as `sudo`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Input(data) => write!(f, "Input({} bytes)", data.len()),
-            Self::Resize(cols, rows) => write!(f, "Resize({cols}, {rows})"),
-            Self::Shutdown => f.write_str("Shutdown"),
-            Self::ReaderDone => f.write_str("ReaderDone"),
-        }
-    }
-}
-
-/// The outbound event channel, shared by both worker threads.
-///
-/// Both of them publish, and the promise that nothing follows the terminal
-/// event has to hold across the two. Closing the sink under the same lock that
-/// guards a send is what keeps that promise: once the control thread has
-/// published [`PtyEvent::Exited`], a reader still parked in a `read` can no
-/// longer slip a late [`PtyEvent::Data`] in behind it.
-struct EventSink(Mutex<Option<UnboundedSender<PtyEvent>>>);
-
-impl EventSink {
-    fn new(sender: UnboundedSender<PtyEvent>) -> Self {
-        Self(Mutex::new(Some(sender)))
-    }
-
-    /// Publishes an event, unless the session has already ended.
-    fn emit(&self, event: PtyEvent) {
-        if let Some(sender) = self.0.lock().as_ref() {
-            let _ = sender.unbounded_send(event);
-        }
-    }
-
-    /// Publishes the terminal event and closes the stream.
-    fn close(&self, last: PtyEvent) {
-        let mut sender = self.0.lock();
-        if let Some(sender) = sender.as_ref() {
-            let _ = sender.unbounded_send(last);
-        }
-        *sender = None;
-    }
-}
 
 /// A live (or recently ended) local shell running on its own threads.
 ///

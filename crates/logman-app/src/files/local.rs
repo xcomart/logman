@@ -14,8 +14,11 @@
 //! non-empty one refused by `remove_dir`. The panel treats the two identically,
 //! so a difference here would surface up there as a bug rather than as a choice.
 //!
-//! Nothing below is unix specific — see the gate in the parent module for why
-//! it is compiled there anyway.
+//! Nothing below is written twice for two platforms: every call is `std::fs`,
+//! which is as cross-platform as this crate needs. The one place the platform
+//! shows through is how a path is *spelled* on the way out — see
+//! [`path_string`] — because the panel above does path arithmetic on strings
+//! and expects one spelling whichever source produced them.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -168,6 +171,37 @@ impl FileSource for LocalSource {
         .await
     }
 
+    /// Every drive letter Windows currently has mounted, as `C:/`, `D:/`, ….
+    ///
+    /// Windows is the one platform where the default single `/` would be a lie:
+    /// each drive is a tree of its own, and a panel that started on `C:` could
+    /// never reach `D:` by walking upwards. Overridden only here — the unix
+    /// build keeps the default, because there the answer really is one root.
+    ///
+    /// Answered from the kernel's bitmask alone, with no [`std::fs::metadata`]
+    /// call per letter. That is deliberate rather than lazy: touching a floppy
+    /// or optical drive spins the hardware up, which takes seconds per empty
+    /// bay, and the panel is asking this to fill a dropdown that opens under
+    /// the pointer. Whether a listed drive actually has media in it is settled
+    /// by the listing that follows the press, which reports its own failure.
+    ///
+    /// A mask of zero — how [`GetLogicalDrives`] reports its own failure —
+    /// comes back as an empty list rather than an error. The panel reads "fewer
+    /// than two roots" as "nothing to choose between" and falls back to the
+    /// dropdown it has always shown, which is a better answer to a rare API
+    /// failure than a notice about drive letters over a header the user pressed
+    /// to navigate.
+    #[cfg(windows)]
+    async fn roots(&self) -> Result<Vec<String>, FileError> {
+        self.blocking(|| {
+            // SAFETY: the call takes no arguments and writes through no
+            // pointer; it only reads the mask of drive letters in use.
+            let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+            Ok(drive_roots(mask))
+        })
+        .await
+    }
+
     /// Creates `path`, treating "it is already a directory" as success.
     ///
     /// Non-recursive, like the SFTP call and unlike
@@ -240,8 +274,9 @@ impl FileSource for LocalSource {
     /// Both ends are this computer, so this is a plain copy — see [`copy_file`]
     /// for what it refuses and why. The destination is spelled with
     /// [`Path::join`] rather than by pasting a `/` in: it is a path on *this*
-    /// filesystem and has to be usable as one, and on the platforms a local
-    /// session exists at all the two spellings are identical anyway.
+    /// filesystem and has to be usable as one, whatever separator the platform
+    /// prefers. The path handed *back* is not that spelling but the panel's,
+    /// because it goes through [`path_string`] like every other answer here.
     async fn copy_in(
         &self,
         local: PathBuf,
@@ -283,16 +318,83 @@ impl FileSource for LocalSource {
     }
 }
 
+/// Turns [`GetLogicalDrives`]' bitmask into the roots the panel navigates by.
+///
+/// Bit 0 is `A:`, bit 1 is `B:`, and so on to bit 25 for `Z:`; every bit above
+/// those is reserved and ignored. Each root keeps its trailing separator,
+/// because `C:` alone names that drive's own current directory rather than its
+/// top — the same distinction [`normalise`] preserves.
+///
+/// Split out from the call so the mapping can be tested against a mask this
+/// machine does not happen to have.
+///
+/// [`GetLogicalDrives`]: windows::Win32::Storage::FileSystem::GetLogicalDrives
+#[cfg(windows)]
+fn drive_roots(mask: u32) -> Vec<String> {
+    (0..26u32)
+        .filter(|letter| mask & (1 << letter) != 0)
+        .map(|letter| format!("{}:/", char::from(b'A' + letter as u8)))
+        .collect()
+}
+
 /// Renders `path` as the [`String`] the panel navigates by.
+///
+/// The single point where a real [`Path`] becomes a path the panel holds, which
+/// is why the platform's spelling is settled here and nowhere else.
 ///
 /// A path that is not valid UTF-8 is refused rather than made lossy: the panel
 /// joins, splits and compares these as strings, and a lossy spelling would name
 /// a different file than the one it was read from — which is fine until a delete
 /// is aimed at it.
 fn path_string(path: &Path) -> Result<String, FileError> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
+    path.to_str().map(normalise).ok_or_else(|| {
         FileError::Path(format!("{} is not a name that can be used", path.display()))
     })
+}
+
+/// Leaves `path` exactly as the filesystem spelled it.
+///
+/// POSIX paths are already the shape the panel expects, so there is nothing to
+/// do — the counterpart below explains what "the shape the panel expects" is
+/// and why the other platform has to be brought to it.
+#[cfg(unix)]
+fn normalise(path: &str) -> String {
+    path.to_owned()
+}
+
+/// Rewrites a Windows path into the one spelling the panel understands.
+///
+/// Two changes, both of them only ever *out* of `std::fs` and never back into
+/// it:
+///
+/// * **the verbatim prefix goes.** [`canonicalize`](std::fs::canonicalize) —
+///   which is how `realpath` answers, and so how every `..` the panel walks is
+///   resolved — returns `\\?\C:\Users\ada`. That prefix is an instruction to the
+///   kernel to skip path parsing, not part of the name: showing it would put
+///   four characters of noise at the head of every breadcrumb row, and the
+///   `\\?\UNC\server\share` form of it would hide the fact that the path is a
+///   network share at all. The UNC form therefore becomes `\\server\share`
+///   rather than losing its leading separators, because those *are* part of the
+///   name.
+/// * **separators become `/`.** The panel splits paths on `/`, joins with `/`
+///   and folds breadcrumbs on `/`, because SFTP paths are POSIX on the wire and
+///   that arithmetic was written for them. Bringing local paths to the same
+///   spelling is what lets one panel drive both without branching, and it costs
+///   nothing on the way back: every Windows API — and so every `std::fs` call
+///   below — accepts `/` as a separator, so the strings the panel hands back are
+///   usable as paths exactly as they are.
+#[cfg(windows)]
+fn normalise(path: &str) -> String {
+    // `\\?\UNC\server\share` and `\\server\share` name the same place, so the
+    // marker is swapped for the two separators rather than simply dropped.
+    let plain = match path.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(share) => format!(r"\\{share}"),
+            None => rest.to_owned(),
+        },
+        None => path.to_owned(),
+    };
+    plain.replace('\\', "/")
 }
 
 /// Streams `from` onto `to`, announcing the running byte count.
@@ -317,46 +419,72 @@ fn path_string(path: &Path) -> Result<String, FileError> {
 ///
 /// An existing destination *file* is truncated and overwritten, which is what
 /// the SFTP side does and what the panel promises.
+///
+/// Shared with the WSL source rather than reimplemented there: both ends of a
+/// copy it performs are `std::fs` paths on this machine — one of them merely
+/// spelled as a `\\wsl.localhost` share — so every refusal and every progress
+/// message above is as true of it as it is here.
 fn copy_file(
     from: &Path,
     to: &Path,
     progress: Option<&UnboundedSender<u64>>,
 ) -> Result<(), FileError> {
+    copy_file_as(
+        from,
+        to,
+        &from.display().to_string(),
+        &to.display().to_string(),
+        progress,
+    )
+}
+
+/// [`copy_file`], with each end named as the panel spells it.
+///
+/// The paths a copy is *performed* on and the paths a failure is *reported*
+/// with are the same thing here and are not for the WSL source, whose files are
+/// reached through a `\\wsl.localhost` share and named by the Linux path the
+/// user actually typed. Two extra arguments rather than two implementations:
+/// everything a copy does, refuses and announces is identical, and only the
+/// spelling in the sentence differs.
+pub(super) fn copy_file_as(
+    from: &Path,
+    to: &Path,
+    from_name: &str,
+    to_name: &str,
+    progress: Option<&UnboundedSender<u64>>,
+) -> Result<(), FileError> {
     // Follows a link, matching the upload planner: dragging a symbolic link
     // into the panel means its target, which is what the shell would read too.
     let source = std::fs::metadata(from)
-        .map_err(|error| FileError::Local(format!("could not read {}: {error}", from.display())))?;
+        .map_err(|error| FileError::Local(format!("could not read {from_name}: {error}")))?;
     if source.is_dir() {
         return Err(FileError::Local(format!(
-            "{} is a directory, not a file",
-            from.display()
+            "{from_name} is a directory, not a file"
         )));
     }
     if is_same_file(from, to) {
         return Err(FileError::Local(format!(
-            "{} and {} are the same file",
-            from.display(),
-            to.display()
+            "{from_name} and {to_name} are the same file"
         )));
     }
 
     let mut reader = std::fs::File::open(from)
-        .map_err(|error| FileError::Local(format!("could not open {}: {error}", from.display())))?;
+        .map_err(|error| FileError::Local(format!("could not open {from_name}: {error}")))?;
     let mut writer = std::fs::File::create(to)
-        .map_err(|error| FileError::Local(format!("could not create {}: {error}", to.display())))?;
+        .map_err(|error| FileError::Local(format!("could not create {to_name}: {error}")))?;
 
     let mut buffer = vec![0u8; COPY_CHUNK];
     let mut moved = 0u64;
     loop {
-        let read = reader.read(&mut buffer).map_err(|error| {
-            FileError::Local(format!("could not read {}: {error}", from.display()))
-        })?;
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| FileError::Local(format!("could not read {from_name}: {error}")))?;
         if read == 0 {
             break;
         }
-        writer.write_all(&buffer[..read]).map_err(|error| {
-            FileError::Local(format!("could not write {}: {error}", to.display()))
-        })?;
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|error| FileError::Local(format!("could not write {to_name}: {error}")))?;
         moved = moved.saturating_add(read as u64);
         // Unchecked on purpose: a receiver that has gone away means the panel
         // stopped watching, never that the copy should stop.
@@ -366,10 +494,7 @@ fn copy_file(
     }
 
     writer.flush().map_err(|error| {
-        FileError::Local(format!(
-            "could not finish writing {}: {error}",
-            to.display()
-        ))
+        FileError::Local(format!("could not finish writing {to_name}: {error}"))
     })?;
     Ok(())
 }
@@ -406,10 +531,12 @@ mod tests {
     }
 
     /// The path `path` spelled the way the panel passes it around.
+    ///
+    /// The source's own renderer rather than a plain `to_str`, so that the
+    /// expectations below are written in the spelling the panel actually sees —
+    /// which on Windows is not the one [`Path`] produces.
     fn text(path: &Path) -> String {
-        path.to_str()
-            .expect("the temporary path must be UTF-8")
-            .to_owned()
+        path_string(path).expect("the temporary path must be usable")
     }
 
     /// A file of `size` bytes with a recognisable, non-repeating body, so that a
@@ -438,10 +565,45 @@ mod tests {
         assert_eq!(counts.last().copied(), Some(size), "saw {counts:?}");
     }
 
+    /// The two rows every listing is made of, and the two facts the panel draws
+    /// them from: a directory can be entered, and a file has a size to show.
+    ///
+    /// Kept apart from the symbolic link test below because that one cannot run
+    /// on Windows — creating a link there needs a privilege the machine running
+    /// the tests may not have — and this half of the contract is the half that
+    /// must hold on every platform a local session exists on.
+    #[gpui::test]
+    async fn a_listing_separates_directories_from_files(executor: BackgroundExecutor) {
+        let root = tempfile::tempdir().expect("the temporary tree must be created");
+        let source = LocalSource::new(executor);
+
+        std::fs::create_dir(root.path().join("logs")).expect("the directory must be created");
+        let body = write_file(&root.path().join("notes.txt"), 12);
+
+        let entries = source
+            .read_dir(&text(root.path()))
+            .await
+            .expect("the listing must succeed");
+        assert_eq!(entries.len(), 2, "saw {entries:?}");
+
+        let logs = find(&entries, "logs");
+        assert!(logs.is_dir && !logs.is_symlink);
+
+        let notes = find(&entries, "notes.txt");
+        assert!(!notes.is_dir && !notes.is_symlink);
+        assert_eq!(notes.size, body.len() as u64);
+    }
+
     /// A listing has to describe four things the panel draws differently, and
     /// the two link cases are the ones worth pinning: a link to a directory is
     /// enterable, and a link to nothing at all must not be — while both keep the
     /// badge that says they are links.
+    ///
+    /// Unix only, and not because the code under it is: creating a symbolic
+    /// link on Windows requires developer mode or an elevated process, so a
+    /// test that made one would fail on the setup rather than on the behaviour
+    /// it is about.
+    #[cfg(unix)]
     #[gpui::test]
     async fn a_listing_separates_directories_files_and_both_kinds_of_link(
         executor: BackgroundExecutor,
@@ -670,5 +832,85 @@ mod tests {
     #[gpui::test]
     async fn a_local_source_says_it_is_local(executor: BackgroundExecutor) {
         assert!(LocalSource::new(executor).is_local());
+    }
+
+    /// The trait's default, kept in place on the platform that has one tree.
+    ///
+    /// Worth a test because it is what the panel reads as "there is nothing to
+    /// choose between": overriding it here would silently change what pressing
+    /// the root breadcrumb does on unix.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_unix_source_has_the_one_posix_root(executor: BackgroundExecutor) {
+        let roots = LocalSource::new(executor)
+            .roots()
+            .await
+            .expect("the roots must be readable");
+        assert_eq!(roots, ["/"]);
+    }
+
+    /// The mask, letter for letter, including the bits that are not letters.
+    ///
+    /// Written against a made-up mask rather than the machine's, so that the
+    /// arithmetic is pinned whatever drives happen to be plugged in here.
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_mask_becomes_one_root_per_letter() {
+        // Bits 2 and 3: the third and fourth letters.
+        assert_eq!(drive_roots(0b1100), ["C:/", "D:/"]);
+        assert_eq!(drive_roots(1), ["A:/"]);
+        // Bit 25 is `Z:`, and everything above it is reserved.
+        assert_eq!(drive_roots(1 << 25), ["Z:/"]);
+        assert_eq!(drive_roots(1 << 26), [] as [String; 0]);
+        assert_eq!(drive_roots(u32::MAX).len(), 26);
+        assert_eq!(
+            drive_roots(u32::MAX).last().map(String::as_str),
+            Some("Z:/")
+        );
+        assert!(drive_roots(0).is_empty());
+    }
+
+    /// The roots this machine really reports, which is what the panel offers.
+    ///
+    /// Deliberately thin on specifics — which drives exist is the machine's
+    /// business — but `C:` is on every Windows install, and every answer has to
+    /// be a path the panel can list as it stands.
+    #[cfg(windows)]
+    #[gpui::test]
+    async fn the_roots_of_this_machine_are_its_drive_letters(executor: BackgroundExecutor) {
+        let roots = LocalSource::new(executor)
+            .roots()
+            .await
+            .expect("the drive letters must be readable");
+
+        assert!(roots.iter().any(|root| root == "C:/"), "saw {roots:?}");
+        for root in &roots {
+            assert_eq!(root.len(), 3, "{root} is not a drive root");
+            let mut letters = root.chars();
+            assert!(
+                letters
+                    .next()
+                    .is_some_and(|letter| letter.is_ascii_uppercase())
+            );
+            assert_eq!(letters.next(), Some(':'));
+            assert_eq!(letters.next(), Some('/'));
+        }
+    }
+
+    /// The spelling the panel is handed, over the three shapes Windows produces:
+    /// an ordinary path, the verbatim form `canonicalize` answers `realpath`
+    /// with, and the verbatim form of a network share — whose leading
+    /// separators are part of the name and must survive.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_path_reaches_the_panel_with_no_prefix_and_forward_slashes() {
+        assert_eq!(normalise(r"C:\Users\ada"), "C:/Users/ada");
+        assert_eq!(normalise(r"\\?\C:\Users\ada"), "C:/Users/ada");
+        assert_eq!(normalise(r"\\?\UNC\build\share\logs"), "//build/share/logs");
+        // A drive root keeps its separator: `C:` alone names that drive's own
+        // current directory, which is a different place.
+        assert_eq!(normalise(r"\\?\C:\"), "C:/");
+        // Already in the panel's spelling, and so left alone.
+        assert_eq!(normalise("C:/Users/ada"), "C:/Users/ada");
     }
 }

@@ -15,20 +15,18 @@ path = "src/main.rs"
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
-# Used only by `src/caption.rs`, to colour the DWM title bar from the app theme.
-# `windows` is pinned to the same 0.61 gpui already links, so this adds no
-# second copy of the bindings to the tree; `raw-window-handle` is how gpui hands
-# out the `HWND`.
+# Two callers, both of them Windows-only behaviour the rest of the tree has no
+# equivalent of: `src/caption.rs` colours the DWM title bar from the app theme,
+# and `src/files/local.rs` asks the kernel which drive letters exist so the file
+# panel can offer them. `windows` is pinned to the same 0.61 gpui already links,
+# so this adds no second copy of the bindings to the tree; `raw-window-handle`
+# is how gpui hands out the `HWND`.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_Graphics_Dwm"] }
+windows = { version = "0.61", features = [
+    "Win32_Graphics_Dwm",
+    "Win32_Storage_FileSystem",
+] }
 raw-window-handle = "0.6"
-
-# The local-shell transport, behind `src/session.rs`'s local target. Unix-only
-# because a pty is: `logman-pty` compiles to nothing at all elsewhere, and the
-# feature is gated on `cfg(unix)` all the way up to the connection dialog, so a
-# Windows build simply has no local terminal in it.
-[target.'cfg(unix)'.dependencies]
-logman-pty.workspace = true
 
 # Used only by `src/caption.rs`, to pin the AppKit title bar to the app theme.
 # `objc` matches the 0.2 gpui already links on macOS, so the Objective-C runtime
@@ -40,6 +38,12 @@ raw-window-handle = "0.6"
 
 [dependencies]
 logman-core.workspace = true
+# The local-shell transport, behind `src/session.rs`'s local target. Not gated
+# on a platform any more: the crate carries a pty backend for unix and a ConPTY
+# one for Windows behind one API, so the local target compiles everywhere the
+# application does. What still differs is the shell it starts — the login shell
+# on unix, one the user picks on Windows — and that lives in `src/session.rs`.
+logman-pty.workspace = true
 logman-ssh.workspace = true
 logman-term.workspace = true
 
