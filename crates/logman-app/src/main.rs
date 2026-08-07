@@ -72,6 +72,10 @@ use i18n::ts;
 use icons::Icons;
 use pane_tree::{Axis, PaneId, PaneNode, PaneTree, SplitId};
 use session::{Session, SessionStatus};
+// Only the welcome screen's shell buttons name one of these, and only Windows
+// has that choice to offer.
+#[cfg(windows)]
+use session::LocalFilesystem;
 use settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use terminal_view::{PaneFocused, TerminalView};
 use ui::{
@@ -604,20 +608,19 @@ impl Workspace {
     /// takes nothing because unix has one local shell to start. Here there are
     /// several, so the caller — a button on the welcome screen — says which:
     /// `label` names it for the tab strip, `command` is the command line that
-    /// starts it, and `browses_this_machine` says whether the shell it starts
-    /// stands on this machine's own filesystem or on a WSL distribution's.
+    /// starts it, and `filesystem` says whether the shell it starts stands on
+    /// this machine's own filesystem or in a named WSL distribution's.
     #[cfg(windows)]
     fn open_local_command(
         &mut self,
         label: SharedString,
         command: Vec<String>,
-        browses_this_machine: bool,
+        filesystem: LocalFilesystem,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         log::info!("opening a local session running {}", command.join(" "));
-        let session =
-            cx.new(|cx| Session::new_local_command(label, command, browses_this_machine, cx));
+        let session = cx.new(|cx| Session::new_local_command(label, command, filesystem, cx));
         self.adopt_session(session, window, cx);
     }
 
@@ -2300,27 +2303,25 @@ impl Workspace {
             let local = ts!("connection.local.name");
             // Every button is the same button but for its five parts, so it is
             // built once here rather than three times below. The last of them —
-            // whether the shell stands on this machine's filesystem — is what
-            // decides whether the session opens a file panel at all.
+            // which filesystem the shell stands in — is what decides which
+            // filesystem the session's file panel browses.
             let row = |id: ElementId,
                        text: String,
                        label: SharedString,
                        command: Vec<String>,
-                       browses_this_machine: bool| {
+                       filesystem: LocalFilesystem| {
                 let this = this.clone();
                 Button::new(id, text)
                     .variant(ButtonVariant::Secondary)
                     .full_width(true)
                     .on_click(move |_, window, cx| {
-                        let (label, command) = (label.clone(), command.clone());
+                        // Cloned per press rather than moved: the handler is
+                        // kept for the life of the button and may be pressed
+                        // again, opening a second tab on the same shell.
+                        let (label, command, filesystem) =
+                            (label.clone(), command.clone(), filesystem.clone());
                         this.update(cx, |workspace, cx| {
-                            workspace.open_local_command(
-                                label,
-                                command,
-                                browses_this_machine,
-                                window,
-                                cx,
-                            )
+                            workspace.open_local_command(label, command, filesystem, window, cx)
                         });
                     })
                     .into_any_element()
@@ -2335,23 +2336,23 @@ impl Workspace {
                     format!("{local}  ·  PowerShell"),
                     "PowerShell".into(),
                     vec!["powershell.exe".to_owned(), "-NoLogo".to_owned()],
-                    true,
+                    LocalFilesystem::ThisMachine,
                 ),
                 row(
                     "empty-local-cmd".into(),
                     format!("{local}  ·  cmd"),
                     "cmd".into(),
                     vec!["cmd.exe".to_owned()],
-                    true,
+                    LocalFilesystem::ThisMachine,
                 ),
             ];
 
             // Labelled `WSL · <distro>` rather than as another local terminal:
             // the shell these open is a Linux one on its own filesystem, which
             // is a different place to be than the two above — and the same
-            // difference is what the `false` below carries into the session, so
-            // that the file panel does not offer to browse this machine's disk
-            // on behalf of a shell that is not standing on it.
+            // difference is what the last argument carries into the session, so
+            // that its file panel browses the distribution the shell is
+            // standing in rather than this machine's disk.
             rows.extend(self.wsl_distros.iter().enumerate().map(|(index, distro)| {
                 row(
                     ("empty-local-wsl", index).into(),
@@ -2368,7 +2369,9 @@ impl Workspace {
                         "--cd".to_owned(),
                         "~".to_owned(),
                     ],
-                    false,
+                    LocalFilesystem::Wsl {
+                        distro: distro.clone(),
+                    },
                 )
             }));
 

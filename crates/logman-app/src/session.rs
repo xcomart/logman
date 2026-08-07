@@ -34,6 +34,10 @@ use logman_term::{TerminalModel, TerminalTheme};
 
 use crate::app_settings;
 use crate::files::{FileSource, LocalSource, SftpSource};
+// The one source with no counterpart on the other platform: a WSL distribution
+// exists to be reached from Windows, and nowhere else.
+#[cfg(windows)]
+use crate::files::WslSource;
 use crate::i18n::ts;
 use crate::ui::TabStatus;
 use crate::verifier::host_key_verifier;
@@ -165,14 +169,43 @@ enum Target {
         /// — so the welcome screen names the one it wants here, and a
         /// reconnect or a duplicate starts that same one again.
         command: Option<Vec<String>>,
-        /// Whether the filesystem this shell sees is the one this process sees.
+        /// Which filesystem the shell on the other end is standing in.
         ///
-        /// True of every shell that runs directly on this machine, and false of
-        /// a WSL one: that is a Linux shell on a Linux filesystem, and the
-        /// directory it reports over `OSC 7` names a place in *that* tree. Read
-        /// by [`Session::files`], which is the only thing the difference
-        /// changes — everything else about a WSL tab is an ordinary local pty.
-        browses_this_machine: bool,
+        /// Read by [`Session::files`], which is the only thing it changes:
+        /// everything else about a WSL tab is an ordinary local pty.
+        filesystem: LocalFilesystem,
+    },
+}
+
+/// The filesystem a local shell browses.
+///
+/// A shell started on this machine is not necessarily standing in this
+/// machine's filesystem. A WSL one is a Linux shell in a Linux tree, and the
+/// directory it reports over `OSC 7` — `/home/ada` — names nothing in the
+/// Windows tree this process sees; the two are reached by different means and
+/// spell their paths differently, so which of them a session is looking at is
+/// carried rather than guessed at.
+///
+/// A variant rather than the `bool` this started as, because the WSL answer is
+/// not merely "not this machine": browsing the distribution takes its *name*,
+/// and the only place that name is known is the button the user pressed.
+#[derive(Debug, Clone)]
+pub enum LocalFilesystem {
+    /// The filesystem this process itself sees.
+    ///
+    /// Every shell that runs directly here — the login shell on unix,
+    /// PowerShell and `cmd` on Windows.
+    ThisMachine,
+    /// A WSL distribution's own Linux filesystem, browsed over its share.
+    ///
+    /// Windows-only for the same reason the distributions themselves are: on
+    /// Linux there is no `wsl.exe` to start a shell with, and so no session
+    /// that could carry this.
+    #[cfg(windows)]
+    Wsl {
+        /// The distribution's name, as `wsl.exe -l -q` reports it — which is
+        /// also the share name its filesystem is reached under.
+        distro: String,
     },
 }
 
@@ -279,7 +312,13 @@ impl Session {
     pub fn new_local(cx: &mut Context<Self>) -> Self {
         // The login shell runs on this machine's own filesystem; unix has no
         // local shell that does not.
-        Self::new_local_in(SharedString::from(login_shell_name()), None, None, true, cx)
+        Self::new_local_in(
+            SharedString::from(login_shell_name()),
+            None,
+            None,
+            LocalFilesystem::ThisMachine,
+            cx,
+        )
     }
 
     /// Builds a session running `command` on this machine, and starts it
@@ -292,17 +331,18 @@ impl Session {
     /// the plain name of the shell rather than the command line, which is an
     /// implementation detail the user never typed.
     ///
-    /// `browses_this_machine` separates the shells that run *here* from a WSL
-    /// one, which runs on a Linux filesystem of its own; only the caller knows
-    /// which of the two it just built a command line for.
+    /// `filesystem` separates the shells that run *here* from a WSL one, which
+    /// runs on a Linux filesystem of its own; only the caller knows which of
+    /// the two it just built a command line for, and — for a WSL one — which
+    /// distribution's filesystem that is.
     #[cfg(windows)]
     pub fn new_local_command(
         label: SharedString,
         command: Vec<String>,
-        browses_this_machine: bool,
+        filesystem: LocalFilesystem,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_local_in(label, None, Some(command), browses_this_machine, cx)
+        Self::new_local_in(label, None, Some(command), filesystem, cx)
     }
 
     /// The shared body of the local constructors, starting the shell in `cwd`.
@@ -314,14 +354,14 @@ impl Session {
         shell: SharedString,
         cwd: Option<PathBuf>,
         command: Option<Vec<String>>,
-        browses_this_machine: bool,
+        filesystem: LocalFilesystem,
         cx: &mut Context<Self>,
     ) -> Self {
         let target = Target::Local {
             shell,
             cwd: cwd.or_else(home_dir),
             command,
-            browses_this_machine,
+            filesystem,
         };
         let mut session = Self::build(target, SessionOverrides::default(), cx);
         session.start(cx);
@@ -427,10 +467,10 @@ impl Session {
     /// carrying a live shell to browse one over.
     ///
     /// An SSH session browses the server over SFTP; a local one browses this
-    /// computer. Which of the two the caller gets is the only thing that differs
-    /// — both are [`FileSource`]s, and the file panel above is written against
-    /// the trait and never asks. The one local session with nothing to browse is
-    /// a WSL tab, for the reason given at its arm.
+    /// computer, or — for a WSL tab — the distribution its shell is standing in.
+    /// Which of the three the caller gets is the only thing that differs: all
+    /// are [`FileSource`]s, and the file panel above is written against the
+    /// trait and never asks.
     ///
     /// Both arms are gated on [`SessionStatus::Connected`], and for the same
     /// reason rather than for two: **the panel shows what the session is
@@ -444,37 +484,41 @@ impl Session {
     /// directory beside it would say the session was further along than it is.
     /// Once a session ends, both sources are gone with the transport.
     ///
-    /// Cheap on both sides: the SFTP source only clones a request channel — the
-    /// channel itself is opened lazily on the first request and then reused —
-    /// and the local one only clones the executor handle it does its blocking
-    /// work on.
+    /// Cheap on all three sides, and it has to be: this is called on every
+    /// terminal notification, which is every time the shell produces output.
+    /// The SFTP source only clones a request channel — the channel itself is
+    /// opened lazily on the first request and then reused — and the two local
+    /// ones only clone the executor handle they do their blocking work on, plus
+    /// a distribution name. Nothing here may probe a filesystem or start a
+    /// process; the sources do that inside the work they hand to the executor.
     pub fn files(&self, cx: &App) -> Option<Arc<dyn FileSource>> {
         match (&self.status, &self.transport) {
             (SessionStatus::Connected, Some(Transport::Ssh(ssh))) => {
                 Some(Arc::new(SftpSource::new(ssh.sftp())))
             }
-            // The pty handle itself is not needed: the shell's filesystem is
-            // this process's filesystem, reachable without going through it.
-            // What the session decides is *whether* there is one to browse.
-            //
-            // A WSL tab is the one local session where that answer is no. It is
-            // an ordinary pty running an ordinary command, but the shell on the
-            // other end lives in a Linux filesystem, and the directory it
-            // reports over `OSC 7` — `/home/ada` — names nothing on the Windows
-            // filesystem this process sees. A panel opened on it would follow
-            // the shell into directories that do not exist, which is worse than
-            // no panel at all; mapping those paths through `\\wsl.localhost` is
-            // the work that would change this answer.
-            (SessionStatus::Connected, Some(Transport::Local(_))) => matches!(
-                self.target,
+            // The pty handle itself is not needed in either local arm: the
+            // shell's filesystem is reachable without going through it, and
+            // what the session contributes is only *which* filesystem that is.
+            (SessionStatus::Connected, Some(Transport::Local(_))) => match &self.target {
                 Target::Local {
-                    browses_this_machine: true,
+                    filesystem: LocalFilesystem::ThisMachine,
                     ..
-                }
-            )
-            .then(|| {
-                Arc::new(LocalSource::new(cx.background_executor().clone())) as Arc<dyn FileSource>
-            }),
+                } => Some(Arc::new(LocalSource::new(cx.background_executor().clone()))
+                    as Arc<dyn FileSource>),
+                // A WSL tab's shell lives in a Linux filesystem, so its panel
+                // does too: the source below answers in the same `/home/ada`
+                // the shell prints and reaches the files behind those paths
+                // through the distribution's `\\wsl.localhost` share.
+                #[cfg(windows)]
+                Target::Local {
+                    filesystem: LocalFilesystem::Wsl { distro },
+                    ..
+                } => Some(Arc::new(WslSource::new(
+                    cx.background_executor().clone(),
+                    distro.clone(),
+                )) as Arc<dyn FileSource>),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -579,13 +623,13 @@ impl Session {
             Target::Local {
                 shell,
                 command,
-                browses_this_machine,
+                filesystem,
                 ..
             } => {
                 let (shell, command) = (shell.clone(), command.clone());
-                let browses_this_machine = *browses_this_machine;
+                let filesystem = filesystem.clone();
                 let cwd = self.local_start_dir();
-                cx.new(|cx| Self::new_local_in(shell, cwd, command, browses_this_machine, cx))
+                cx.new(|cx| Self::new_local_in(shell, cwd, command, filesystem, cx))
             }
         }
     }

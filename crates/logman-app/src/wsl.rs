@@ -19,7 +19,11 @@ use std::process::Command;
 /// sees the result of — would be a black rectangle appearing over the welcome
 /// screen at startup. Spelled out rather than pulled from the `windows` crate
 /// so that this module needs no bindings at all.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+///
+/// Shared with the WSL file source, which starts `wsl.exe` for a reason the
+/// user did not ask about either — and would flash the same rectangle over the
+/// file panel every time it did.
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Distributions `wsl.exe` lists that no user opens a shell in.
 ///

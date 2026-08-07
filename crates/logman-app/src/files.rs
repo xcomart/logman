@@ -12,7 +12,7 @@
 //! `chmod`, no `symlink`, because the panel does not offer them and a wider
 //! trait would be a promise every future backend has to keep.
 //!
-//! Two implementations answer it, and they are shaped very differently on
+//! Three implementations answer it, and they are shaped very differently on
 //! purpose. [`SftpSource`] is a forwarding shim — every decision about how SFTP
 //! behaves stays in [`logman_ssh`], and this module only renames things and
 //! folds the error kinds. The local source in [`local`] is the real
@@ -21,7 +21,11 @@
 //! actually answered, and it answers it to match the SFTP shim call for call,
 //! because the panel above branches on neither — including the spelling of the
 //! paths it hands back, which it brings to the POSIX shape the panel does its
-//! arithmetic in whatever the local platform writes.
+//! arithmetic in whatever the local platform writes. The third, in [`wsl_fs`],
+//! is that same local source seen through a mirror: a WSL tab's shell lives in
+//! a Linux filesystem, and Windows serves that filesystem as a share, so it
+//! answers in the shell's own Linux paths and translates them to
+//! `\\wsl.localhost\<distro>\…` at the edge of every call.
 //!
 //! Three shapes of this interface are worth explaining, because each of them is
 //! a decision rather than an accident:
@@ -56,8 +60,15 @@ use logman_ssh::{SftpClient, SftpError};
 // only platform with a local shell to hand it to; now that Windows starts one
 // too, both have a session that browses this machine.
 mod local;
+// Windows-only because `\\wsl.localhost` is: it is how Windows reaches a
+// distribution's filesystem, and on Linux itself a distribution is simply this
+// machine, with nothing to reach across.
+#[cfg(windows)]
+mod wsl_fs;
 
 pub use local::LocalSource;
+#[cfg(windows)]
+pub use wsl_fs::WslSource;
 
 /// One entry of a directory listing the panel shows.
 ///

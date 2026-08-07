@@ -369,46 +369,72 @@ fn normalise(path: &str) -> String {
 ///
 /// An existing destination *file* is truncated and overwritten, which is what
 /// the SFTP side does and what the panel promises.
+///
+/// Shared with the WSL source rather than reimplemented there: both ends of a
+/// copy it performs are `std::fs` paths on this machine — one of them merely
+/// spelled as a `\\wsl.localhost` share — so every refusal and every progress
+/// message above is as true of it as it is here.
 fn copy_file(
     from: &Path,
     to: &Path,
     progress: Option<&UnboundedSender<u64>>,
 ) -> Result<(), FileError> {
+    copy_file_as(
+        from,
+        to,
+        &from.display().to_string(),
+        &to.display().to_string(),
+        progress,
+    )
+}
+
+/// [`copy_file`], with each end named as the panel spells it.
+///
+/// The paths a copy is *performed* on and the paths a failure is *reported*
+/// with are the same thing here and are not for the WSL source, whose files are
+/// reached through a `\\wsl.localhost` share and named by the Linux path the
+/// user actually typed. Two extra arguments rather than two implementations:
+/// everything a copy does, refuses and announces is identical, and only the
+/// spelling in the sentence differs.
+pub(super) fn copy_file_as(
+    from: &Path,
+    to: &Path,
+    from_name: &str,
+    to_name: &str,
+    progress: Option<&UnboundedSender<u64>>,
+) -> Result<(), FileError> {
     // Follows a link, matching the upload planner: dragging a symbolic link
     // into the panel means its target, which is what the shell would read too.
     let source = std::fs::metadata(from)
-        .map_err(|error| FileError::Local(format!("could not read {}: {error}", from.display())))?;
+        .map_err(|error| FileError::Local(format!("could not read {from_name}: {error}")))?;
     if source.is_dir() {
         return Err(FileError::Local(format!(
-            "{} is a directory, not a file",
-            from.display()
+            "{from_name} is a directory, not a file"
         )));
     }
     if is_same_file(from, to) {
         return Err(FileError::Local(format!(
-            "{} and {} are the same file",
-            from.display(),
-            to.display()
+            "{from_name} and {to_name} are the same file"
         )));
     }
 
     let mut reader = std::fs::File::open(from)
-        .map_err(|error| FileError::Local(format!("could not open {}: {error}", from.display())))?;
+        .map_err(|error| FileError::Local(format!("could not open {from_name}: {error}")))?;
     let mut writer = std::fs::File::create(to)
-        .map_err(|error| FileError::Local(format!("could not create {}: {error}", to.display())))?;
+        .map_err(|error| FileError::Local(format!("could not create {to_name}: {error}")))?;
 
     let mut buffer = vec![0u8; COPY_CHUNK];
     let mut moved = 0u64;
     loop {
-        let read = reader.read(&mut buffer).map_err(|error| {
-            FileError::Local(format!("could not read {}: {error}", from.display()))
-        })?;
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| FileError::Local(format!("could not read {from_name}: {error}")))?;
         if read == 0 {
             break;
         }
-        writer.write_all(&buffer[..read]).map_err(|error| {
-            FileError::Local(format!("could not write {}: {error}", to.display()))
-        })?;
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|error| FileError::Local(format!("could not write {to_name}: {error}")))?;
         moved = moved.saturating_add(read as u64);
         // Unchecked on purpose: a receiver that has gone away means the panel
         // stopped watching, never that the copy should stop.
@@ -418,10 +444,7 @@ fn copy_file(
     }
 
     writer.flush().map_err(|error| {
-        FileError::Local(format!(
-            "could not finish writing {}: {error}",
-            to.display()
-        ))
+        FileError::Local(format!("could not finish writing {to_name}: {error}"))
     })?;
     Ok(())
 }
