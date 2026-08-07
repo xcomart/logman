@@ -150,9 +150,12 @@ enum Target {
         shell: SharedString,
         /// Directory the shell is started in; `None` means the app's own.
         ///
-        /// Set by [`Session::duplicate`] so that a split of a local pane opens
-        /// where the original shell is, and kept so that a restart lands in the
-        /// same place the session originally started in.
+        /// Normally the user's home directory — the application's own working
+        /// directory is `/` when macOS launches it from the Finder, which is
+        /// no place to open a shell. Set by [`Session::duplicate`] so that a
+        /// split of a local pane opens where the original shell is, and kept
+        /// so that a restart lands in the same place the session originally
+        /// started in.
         cwd: Option<PathBuf>,
     },
 }
@@ -266,11 +269,15 @@ impl Session {
     }
 
     /// [`Session::new_local`], starting the shell in `cwd`.
+    ///
+    /// With no directory of its own the shell opens in the user's home, not in
+    /// the application's working directory: a GUI app launched from the Finder
+    /// runs in `/`, which no terminal drops its user into.
     #[cfg(unix)]
     fn new_local_in(cwd: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let target = Target::Local {
             shell: SharedString::from(login_shell_name()),
-            cwd,
+            cwd: cwd.or_else(home_dir),
         };
         let mut session = Self::build(target, SessionOverrides::default(), cx);
         session.start(cx);
@@ -533,7 +540,7 @@ impl Session {
     /// has since been removed, or — if the prompt is misconfigured — something
     /// that is not a path at all. A pty that cannot enter its working directory
     /// fails to start, so anything doubtful falls back to `None` and lets the
-    /// new shell open wherever the application itself is.
+    /// new shell open in the user's home directory.
     #[cfg(unix)]
     fn local_start_dir(&self) -> Option<PathBuf> {
         let cwd = self.cwd()?;
@@ -747,6 +754,13 @@ impl Session {
             transport.send_input(reply);
         }
     }
+}
+
+/// The user's home directory, or `None` for an account that has none — the
+/// pty then falls back to the application's own working directory.
+#[cfg(unix)]
+fn home_dir() -> Option<PathBuf> {
+    directories::UserDirs::new().map(|dirs| dirs.home_dir().to_owned())
 }
 
 #[cfg(test)]
