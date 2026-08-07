@@ -2,32 +2,102 @@
   <!--
     logman app icon.
 
-    A terminal prompt on a One Dark tile, in the application's own palette:
-    the chevron in accent blue (#61afef), the cursor in green (#98c379), and
-    the small dot echoing the "connected" status dot in the tab strip.
-    Master file; assets/icon.ico is rasterized from this.
+    A terminal prompt on a One Dark tile — the same raised plate its sibling
+    rudbman wears, so the two sit on a taskbar as one family.
+
+    The subject stays the pair every developer reads as "terminal": the
+    prompt chevron and the block cursor, `>_` drawn large. It is logman's own
+    palette doing its own jobs — the chevron in accent blue (#61afef), the
+    cursor in the green (#98c379) a connected session's status dot wears.
+    The little standalone dot of the old flat icon is gone: at 16 px the mark
+    has room for the glyph and nothing else, and the cursor already carries
+    the green.
+
+    The modelling follows rudbman's icon exactly, because the light does: one
+    source, above and a little to the left. Both strokes of the glyph take a
+    diagonal gradient — lit where they face that light, falling to a darker
+    edge away from it — which is what turns a flat stroke into a rounded bar.
+    Over each sits a thin translucent highlight along the lit edge, seating
+    the bevel, and under both lies a blurred offset copy in the tile's own
+    dark: the glyph floats in front of the plate rather than standing on it,
+    so its shadow is a cast silhouette, not rudbman's floor pool. Every
+    overlay is translucent; below about 24 px they dissolve and the two
+    silhouettes are all that is left, which is exactly what that size needs.
+
+    The plate is rudbman's, verbatim: the steep One Dark gradient, the dark
+    crease that cuts the tile out of the backdrop, and the embossed ring
+    whose own gradient — lit grey at the top, shadowed at the base — is the
+    same overhead light catching the frame. That file's comment records the
+    reasoning; this one only borrows the result, returning the loan of the
+    flat plate rudbman's began from.
+
+    Master file. `assets/icon-128.png`, `icon-256.png`, `icon.ico` and
+    `icon.icns` are all rasterised from this one by `assets/render.py`, each
+    size drawn from the vector rather than scaled down from a larger bitmap.
+    Edit this, then re-run that script; do not edit the raster files.
   -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#262b33"/>
-      <stop offset="1" stop-color="#1b1f24"/>
+      <stop offset="0" stop-color="#3a4150"/>
+      <stop offset="0.55" stop-color="#242933"/>
+      <stop offset="1" stop-color="#15181d"/>
     </linearGradient>
+    <!-- the border ring is itself the emboss: lit on top, in shadow below -->
+    <linearGradient id="ring" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8b97ae"/>
+      <stop offset="0.5" stop-color="#5b6474"/>
+      <stop offset="1" stop-color="#343a44"/>
+    </linearGradient>
+    <!-- round-shading across the chevron's bar, lit end toward the light -->
+    <linearGradient id="chevron" x1="58" y1="66" x2="154" y2="196"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7fc3f8"/>
+      <stop offset="0.45" stop-color="#61afef"/>
+      <stop offset="1" stop-color="#2e5e8f"/>
+    </linearGradient>
+    <!-- the cursor's bar under the same light -->
+    <linearGradient id="cursor" x1="144" y1="146" x2="210" y2="182"
+                    gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#b9dd96"/>
+      <stop offset="0.5" stop-color="#98c379"/>
+      <stop offset="1" stop-color="#6e9550"/>
+    </linearGradient>
+    <filter id="blur5" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+    <filter id="blur2" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="2"/>
+    </filter>
   </defs>
 
-  <!-- tile -->
-  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
-  <rect x="11" y="11" width="234" height="234" rx="53" fill="none"
-        stroke="#4b5263" stroke-opacity="0.55" stroke-width="4"/>
+  <!-- tile: dark crease at the edge, then one embossed ring of constant width -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"
+        stroke="#0c0e11" stroke-width="2"/>
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="none"
+        stroke="url(#ring)" stroke-width="5"/>
 
-  <!-- prompt chevron -->
-  <path d="M 74 88 L 124 128 L 74 168" fill="none" stroke="#61afef"
-        stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- the cast shadow that floats the glyph in front of the plate -->
+  <g fill="none" stroke="#06090c" opacity="0.45" filter="url(#blur5)"
+     transform="translate(7,10)">
+    <path d="M 70 82 L 128 128 L 70 174" stroke-width="30"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="144" y="148" width="66" height="28" rx="13" stroke="none"
+          fill="#06090c"/>
+  </g>
 
-  <!-- block cursor -->
-  <rect x="140" y="150" width="58" height="22" rx="10" fill="#98c379"/>
+  <!-- prompt chevron: a rounded bar shaded around its girth -->
+  <path d="M 70 82 L 128 128 L 70 174" fill="none" stroke="url(#chevron)"
+        stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- bevel highlight along the arm facing the light; endpoints inset so the
+       thin stroke's caps stay inside the fat one's -->
+  <path d="M 76 85 L 124 122" fill="none" stroke="#ffffff" stroke-opacity="0.30"
+        stroke-width="6" stroke-linecap="round" filter="url(#blur2)"/>
 
-  <!-- connected-session dot, same green as the tab status dot -->
-  <circle cx="194" cy="64" r="13" fill="#98c379"/>
-  <circle cx="194" cy="64" r="13" fill="none" stroke="#1b1f24"
-          stroke-opacity="0.35" stroke-width="3"/>
+  <!-- block cursor, in the connected-session green -->
+  <rect x="144" y="148" width="66" height="28" rx="13" fill="url(#cursor)"/>
+  <!-- its lit top edge, the same bevel the chevron wears. A rect rather than
+       a stroked line: a horizontal line has a zero-height bounding box, and
+       resvg refuses to filter a zero-sized shape, dropping the highlight. -->
+  <rect x="152" y="151" width="50" height="4.5" rx="2.25" fill="#ffffff"
+        fill-opacity="0.35" filter="url(#blur2)"/>
 </svg>

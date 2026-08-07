@@ -57,7 +57,7 @@ use gpui::{
     AnyElement, App, Application, Bounds, Context, Div, DragMoveEvent, ElementId, Entity, EntityId,
     FocusHandle, Focusable, KeyBinding, Menu, MenuItem, MouseButton, MouseDownEvent, MouseUpEvent,
     Pixels, Point, ScrollHandle, SharedString, Stateful, Subscription, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, div,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, div, img,
     prelude::*, px, relative, size,
 };
 use logman_core::{SessionProfile, TitlebarStyle, WindowSettings};
@@ -1682,12 +1682,12 @@ impl Workspace {
         // *empty* title bar as far as the window is concerned, so a press on
         // them has to reach the drag area underneath and move the window.
         let title = custom.then(|| {
-            // Tinted like the other icons of the row rather than painted in the
-            // shipped icon's own colours: that icon draws its mark on a dark
-            // tile, which a dark theme's title bar swallowed whole. See
-            // [`icons::LOGO`].
-            let icon =
-                (!cfg!(target_os = "macos")).then(|| icons::icon(icons::LOGO, px(16.), theme.icon));
+            // The shipped icon in its own colours, not a theme-tinted sprite:
+            // the current icon's embossed ring keeps its tile legible on dark
+            // chrome, which is what used to force the tinted stand-in. See
+            // [`icons::APP_ICON`].
+            let icon = (!cfg!(target_os = "macos"))
+                .then(|| img(icons::APP_ICON).w(px(16.)).h(px(16.)).flex_none());
             div()
                 .flex()
                 .flex_row()
