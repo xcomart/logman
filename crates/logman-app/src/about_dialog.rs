@@ -27,7 +27,7 @@ const REPOSITORY_LABEL: &str = "github.com/xcomart/logman";
 
 /// Licence the application is distributed under. A licence identifier, so it
 /// reads the same in every language.
-const LICENSE: &str = "Apache-2.0";
+const LICENSE: &str = "MIT";
 
 /// Emitted by [`AboutDialog`] when the user closes it.
 pub enum AboutDialogEvent {
