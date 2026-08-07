@@ -71,8 +71,13 @@ jobs:
       #
       # The bundle is ad-hoc signed (`codesign --sign -`): no Apple Developer
       # account, no secrets, and no identity in the signature. That is not
-      # notarization and it does not satisfy Gatekeeper, so the first launch of
-      # a downloaded copy still needs right-click -> Open. What it buys is one
+      # notarization and it does not satisfy Gatekeeper, so a downloaded copy
+      # arrives quarantined and the first launch is refused. Since macOS 15
+      # right-click -> Open no longer bypasses that for unnotarized apps;
+      # what works is `xattr -d com.apple.quarantine /Applications/logman.app`,
+      # or System Settings -> Privacy & Security -> Open Anyway after one
+      # failed launch — the README's Installing section walks users through
+      # both. What it buys is one
       # signature over the bundle as a whole, sealing the Info.plist we just
       # wrote where the linker's own ad-hoc signature covers the executable
       # alone: from here nothing in the bundle can change without
