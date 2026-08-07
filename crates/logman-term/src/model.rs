@@ -330,6 +330,22 @@ impl TerminalModel {
         self.term.scroll_display(Scroll::Bottom);
     }
 
+    /// Forget the scrollback, keeping the live screen.
+    ///
+    /// The rows that have already scrolled off the screen go; the ones the user
+    /// is looking at — prompt, cursor and all — stay exactly where they are.
+    /// That is the difference from [`TerminalModel::reset`], which throws the
+    /// screen away too: this is a housekeeping command aimed at the history, not
+    /// a fresh start, so the title and the working directory are left alone as
+    /// well. Neither describes the output, and the remote shell has no way of
+    /// knowing it should announce them again.
+    ///
+    /// The viewport lands back at the bottom, because whatever offset it held
+    /// counted from a history that no longer exists.
+    pub fn clear_scrollback(&mut self) {
+        self.term.grid_mut().clear_history();
+    }
+
     /// Replace the color palette. Existing content is re-colored on the next
     /// [`TerminalModel::snapshot`].
     pub fn set_theme(&mut self, theme: TerminalTheme) {
@@ -572,6 +588,31 @@ mod tests {
         assert_ne!(bottom.lines[0].text(), scrolled.lines[0].text());
         assert_eq!(bottom.lines[0].text(), scrolled.lines[2].text());
         assert_eq!(bottom.lines[1].text(), scrolled.lines[3].text());
+    }
+
+    #[test]
+    fn clearing_the_scrollback_keeps_the_screen_and_snaps_to_the_bottom() {
+        let mut term = model(20, 5);
+        for i in 0..30 {
+            term.feed(format!("line {i}\r\n").as_bytes());
+        }
+        term.feed(b"\x1b]0;logman\x07");
+        let screen = term.snapshot().text();
+        assert!(term.snapshot().total_scrollback > 0);
+
+        // Scrolled away from the bottom first, so the snap back is observable.
+        term.scroll_lines(4);
+        assert_eq!(term.snapshot().display_offset, 4);
+
+        term.clear_scrollback();
+
+        let after = term.snapshot();
+        assert_eq!(after.total_scrollback, 0);
+        assert_eq!(after.display_offset, 0);
+        assert_eq!(after.text(), screen);
+        // Neither of these describes the output that was dropped.
+        assert_eq!(term.title(), Some("logman"));
+        assert_eq!(term.size(), (20, 5));
     }
 
     #[test]

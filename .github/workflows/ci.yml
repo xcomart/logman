@@ -31,7 +31,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Native libraries gpui links against on Linux. The crate graph binds
       # xkbcommon (+ its X11 half), wayland-client and fontconfig; fontconfig's

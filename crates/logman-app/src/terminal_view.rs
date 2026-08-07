@@ -47,12 +47,15 @@ use logman_term::{
     encode_key, encode_paste,
 };
 
-use crate::app_settings;
 use crate::i18n::ts;
 use crate::session::{Session, SessionStatus};
 use crate::ui::{
-    Button, ButtonVariant, DraggedThumb, Scrollbar, ScrollbarAxis, ScrollbarState, hide_later,
-    theme,
+    Button, ButtonVariant, ContextMenu, DraggedThumb, MenuEntry, Scrollbar, ScrollbarAxis,
+    ScrollbarState, hide_later, hide_now, theme,
+};
+use crate::{
+    BreakOutPane, CloseSession, DuplicateSplitBelow, DuplicateSplitRight, PANE_SHORTCUT_MODIFIER,
+    SHORTCUT_MODIFIER, app_settings,
 };
 
 actions!(
@@ -67,6 +70,24 @@ actions!(
 
 /// Key context the terminal bindings are scoped to.
 const KEY_CONTEXT: &str = "Terminal";
+
+/// Name of the copy chord as the context menu prints it.
+///
+/// Never translated — it is what is printed on the keys — and branched on the
+/// same `cfg` [`TerminalView::init`] binds with, so the hint and the binding
+/// cannot drift apart.
+const COPY_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "Cmd+C"
+} else {
+    "Ctrl+Shift+C"
+};
+
+/// Name of the paste chord, on the same terms as [`COPY_SHORTCUT`].
+const PASTE_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "Cmd+V"
+} else {
+    "Ctrl+Shift+V"
+};
 
 /// Terminal font size used before the session's effective settings are known.
 ///
@@ -294,6 +315,9 @@ pub struct TerminalView {
     scroll_residual: f32,
     /// Text an IME is composing; drawn locally and never sent until committed.
     preedit: Preedit,
+    /// Where the pointer was when a right-click opened the pane's context menu.
+    /// `None` while no menu is showing.
+    context: Option<Point<Pixels>>,
     /// Geometry recorded by the last paint.
     geometry: Option<Geometry>,
     /// Whether the scrollback's overlay scroll indicator is on screen.
@@ -314,8 +338,15 @@ impl TerminalView {
         let observer = cx.observe(&session, |_, _, cx| cx.notify());
         let focus_handle = cx.focus_handle();
         let blur = cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            // The context menu goes with the focus for the same reason: a
+            // right-click takes the focus before it opens one, so a menu that
+            // outlived the focus is about a click nobody is following up — and
+            // its pane commands would act on whichever pane took over.
+            let stale = this.context.take().is_some();
             if this.preedit.is_active() {
                 this.preedit.clear();
+                cx.notify();
+            } else if stale {
                 cx.notify();
             }
         });
@@ -328,6 +359,7 @@ impl TerminalView {
             selecting: false,
             scroll_residual: 0.,
             preedit: Preedit::default(),
+            context: None,
             geometry: None,
             scrollbar: ScrollbarState::new(),
             _observer: observer,
@@ -526,6 +558,21 @@ impl TerminalView {
         }
     }
 
+    /// Puts the bar up while the pointer rests on the edge it rides, and starts
+    /// it going the moment the pointer leaves.
+    fn hover_scrollbar(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            if self.scrollbar.hover_enter() {
+                cx.notify();
+            }
+            return;
+        }
+
+        if let Some(epoch) = self.scrollbar.hover_leave() {
+            hide_now(self, epoch, cx, |view| Some(&mut view.scrollbar));
+        }
+    }
+
     /// Focuses the grid and starts a selection drag.
     fn on_mouse_down(
         &mut self,
@@ -539,6 +586,70 @@ impl TerminalView {
         self.selecting = self.anchor.is_some();
         self.selection = None;
         cx.notify();
+    }
+
+    /// Focuses the grid and opens its context menu at the pointer.
+    ///
+    /// Focus first, exactly as the left button takes it: the pane commands in
+    /// the menu are dispatched as actions and the workspace answers them for
+    /// whichever pane holds the keyboard, so the pane that was clicked has to be
+    /// that pane before any row can run.
+    ///
+    /// Nothing else about the click is consumed — no caret moves and, crucially,
+    /// the selection stands, because copying it is the first thing the menu
+    /// offers.
+    fn on_right_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle);
+        cx.emit(PaneFocused);
+        self.context = Some(event.position);
+        cx.notify();
+    }
+
+    /// Puts the context menu away, if one is open.
+    fn close_context(&mut self, cx: &mut Context<Self>) {
+        if self.context.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Selects every cell of the visible grid.
+    ///
+    /// The viewport, not the whole scrollback: a selection is addressed in
+    /// viewport rows, so this is exactly as much as a copy afterwards can
+    /// reach — the rows on screen, and whatever the viewport is scrolled to.
+    fn select_visible(&mut self, cx: &mut Context<Self>) {
+        let (cols, rows) = self.session.read(cx).terminal().size();
+        self.anchor = None;
+        self.selecting = false;
+        self.selection = Some((
+            CellPos { line: 0, col: 0 },
+            CellPos {
+                line: rows.saturating_sub(1),
+                col: cols.saturating_sub(1),
+            },
+        ));
+        cx.notify();
+    }
+
+    /// Forgets the scrollback of this pane, leaving the screen alone.
+    fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
+        self.session.update(cx, |session, cx| {
+            session.terminal_mut().clear_scrollback();
+            cx.notify();
+        });
+    }
+
+    /// Brings the viewport back to the bottom of the scrollback.
+    fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.session.update(cx, |session, cx| {
+            session.terminal_mut().scroll_to_bottom();
+            cx.notify();
+        });
     }
 
     /// Extends an in-flight selection.
@@ -622,6 +733,141 @@ impl TerminalView {
         let bytes = encode_paste(&text, modes);
         self.session
             .update(cx, |session, cx| session.send_input(bytes, cx));
+    }
+
+    /// Builds the menu a right-click on the grid opens, if one is open.
+    ///
+    /// Three groups of rows, separated in that order: the clipboard, the
+    /// scrollback, and the pane itself. The first two act on this view and call
+    /// straight into it; the third dispatches the same actions the keyboard
+    /// shortcuts do, which the workspace answers for whichever pane holds the
+    /// focus — the one that was just right-clicked.
+    ///
+    /// The pane commands are the one place this menu keeps a row it cannot
+    /// promise, against the convention everywhere else that an inapplicable row
+    /// is left out. A pane can see neither the tab tree it sits in nor how much
+    /// room a split would have: whether a tab has a second pane to break out,
+    /// and whether a split would leave a usable grid, are questions only the
+    /// workspace can answer. It does answer them — `break_out_active_pane`
+    /// returns on an unsplit tab and `duplicate_split` refuses a pane that is
+    /// too small, both with a log line and no other effect — so the worst a
+    /// click on one of these rows can do is nothing at all. That is a better
+    /// trade than a menu whose contents change with a tab the pane cannot see.
+    fn render_context(&self, cx: &mut Context<Self>) -> Option<ContextMenu> {
+        let position = self.context?;
+        let this = cx.entity();
+
+        let session = self.session.read(cx);
+        let scrolled = session.terminal().scroll_position().display_offset > 0;
+        let live = session.status().is_live();
+        let local = session.is_local();
+
+        let mut clipboard = Vec::new();
+        if self.selection.is_some() {
+            clipboard.push(
+                MenuEntry::new(ts!("terminal.menu_copy"))
+                    .shortcut(COPY_SHORTCUT)
+                    .on_activate({
+                        let this = this.clone();
+                        move |window, cx| {
+                            this.update(cx, |view, cx| {
+                                view.copy_selection(&CopySelection, window, cx);
+                            });
+                        }
+                    }),
+            );
+        }
+        clipboard.push(
+            MenuEntry::new(ts!("terminal.menu_paste"))
+                .shortcut(PASTE_SHORTCUT)
+                .on_activate({
+                    let this = this.clone();
+                    move |window, cx| {
+                        this.update(cx, |view, cx| {
+                            view.paste_clipboard(&PasteClipboard, window, cx);
+                        });
+                    }
+                }),
+        );
+        clipboard.push(
+            MenuEntry::new(ts!("terminal.menu_select_all")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |view, cx| view.select_visible(cx));
+                }
+            }),
+        );
+
+        let mut scrollback = vec![
+            MenuEntry::new(ts!("terminal.menu_clear_scrollback")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |view, cx| view.clear_scrollback(cx));
+                }
+            }),
+        ];
+        if scrolled {
+            scrollback.push(
+                MenuEntry::new(ts!("terminal.menu_scroll_bottom")).on_activate({
+                    let this = this.clone();
+                    move |_window, cx| {
+                        this.update(cx, |view, cx| view.scroll_to_bottom(cx));
+                    }
+                }),
+            );
+        }
+
+        let mut pane = vec![
+            MenuEntry::new(ts!("menu.duplicate_right"))
+                .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+D"))
+                .on_activate(|window, cx| {
+                    window.dispatch_action(Box::new(DuplicateSplitRight), cx)
+                }),
+            MenuEntry::new(ts!("menu.duplicate_below"))
+                .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+S"))
+                .on_activate(|window, cx| {
+                    window.dispatch_action(Box::new(DuplicateSplitBelow), cx)
+                }),
+            MenuEntry::new(ts!("menu.break_out_pane"))
+                .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+B"))
+                .on_activate(|window, cx| window.dispatch_action(Box::new(BreakOutPane), cx)),
+        ];
+        if !live {
+            // The overlay covering the grid carries the same command, worded the
+            // same way: a local shell is started again, not reconnected to.
+            let label = if local {
+                ts!("session.restart")
+            } else {
+                ts!("session.reconnect")
+            };
+            let session = self.session.clone();
+            pane.push(MenuEntry::new(label).on_activate(move |_window, cx| {
+                session.update(cx, |session, cx| session.reconnect(cx));
+            }));
+        }
+
+        let close = vec![
+            MenuEntry::new(ts!("terminal.menu_close_pane"))
+                .shortcut(format!("{SHORTCUT_MODIFIER}+W"))
+                .on_activate(|window, cx| window.dispatch_action(Box::new(CloseSession), cx)),
+        ];
+
+        let mut entries = Vec::new();
+        for group in [clipboard, scrollback, pane, close] {
+            if !entries.is_empty() {
+                entries.push(MenuEntry::separator());
+            }
+            entries.extend(group);
+        }
+
+        Some(
+            ContextMenu::new("terminal-context")
+                .position(position)
+                .entries(entries)
+                .on_dismiss(move |_window, cx| {
+                    this.update(cx, |view, cx| view.close_context(cx));
+                }),
+        )
     }
 
     /// Builds the connection overlay shown while the session is not live.
@@ -905,11 +1151,15 @@ impl Render for TerminalView {
         // text and the cursor stay opaque; only this base fill carries the alpha.
         let background = app_settings::window_tint(background, cx);
         let overlay = self.render_overlay(&status, cx);
+        let context = self.render_context(cx);
         let position = self.session.read(cx).terminal().scroll_position();
         self.watch_scroll(position, cx);
-        let scrollbar = self
-            .scrollbar(position)
-            .and_then(|bar| bar.render(&theme(cx)));
+        let scrollbar = self.scrollbar(position).and_then(|bar| {
+            bar.on_hover(cx.listener(|view, hovered: &bool, _window, cx| {
+                view.hover_scrollbar(*hovered, cx);
+            }))
+            .render(&theme(cx))
+        });
         let element = TerminalElement {
             view: cx.entity(),
             session: self.session.clone(),
@@ -929,6 +1179,7 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -953,6 +1204,9 @@ impl Render for TerminalView {
                 ),
             )
             .children(overlay)
+            // Deferred inside, so it paints above the grid and the connection
+            // overlay whatever its place in this list.
+            .children(context)
     }
 }
 

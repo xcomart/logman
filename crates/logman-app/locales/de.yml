@@ -33,7 +33,10 @@ tab:
   split_below: Unter aktuellem Tab teilen
   duplicate_right: Rechts mit neuer Verbindung teilen
   duplicate_below: Unten mit neuer Verbindung teilen
+  duplicate: Tab duplizieren
   close: Tab schließen
+  close_others: Andere Tabs schließen
+  close_right: Tabs rechts davon schließen
   tip_list: Alle Tabs
   tip_new: "Neue Sitzung (%{shortcut})"
 
@@ -50,12 +53,16 @@ files:
   select_upload: Hochladen
   select_upload_folder: Ordner hochladen
   select_download_folder: Speichern
+  menu_open: Öffnen
   menu_download: Herunterladen…
   menu_rename: Umbenennen…
   menu_delete: Löschen…
   menu_new_folder: Neuer Ordner…
   menu_upload: Dateien hochladen…
   menu_upload_folder: Ordner hochladen…
+  menu_copy_name: Namen kopieren
+  menu_copy_path: Pfad kopieren
+  menu_select_all: Alles auswählen
   menu_refresh: Aktualisieren
   tip_refresh: Aktualisieren
   tip_new_folder: Neuer Ordner
@@ -109,6 +116,7 @@ files:
 empty:
   hint: Drücken Sie %{shortcut}, um sich mit einem Host zu verbinden.
   saved_profiles: Gespeicherte Profile
+  menu_edit: Bearbeiten…
 
 statusbar:
   no_session: keine Sitzung
@@ -200,6 +208,7 @@ connection:
   browse: Durchsuchen…
   edit: Bearbeiten
   delete: Löschen
+  duplicate: Duplizieren
   select_file: Auswählen
   saved_profiles: Gespeicherte Profile
   empty_list: Noch keine gespeicherten Profile. Füllen Sie das Formular aus und verbinden Sie sich — die Verbindung wird automatisch gespeichert.
@@ -233,6 +242,7 @@ connection:
   delete_failed_list: "Das Profil wurde gelöscht, aber die Profilliste konnte nicht geschrieben werden (%{error})."
   delete_failed_secret: "Das Profil wurde gelöscht, aber sein Eintrag im Schlüsselbund konnte nicht entfernt werden (%{error})."
   delete_failed_both: "Das Profil wurde gelöscht, aber die Profilliste konnte nicht geschrieben werden (%{list_error}) und sein Eintrag im Schlüsselbund konnte nicht entfernt werden (%{secret_error})."
+  duplicate_failed: "Das Profil wurde kopiert, aber die Profilliste konnte nicht geschrieben werden (%{error})."
   connect_problems: "Verbindung wird hergestellt, aber es konnte nicht alles gespeichert werden:"
   problem_secret_read: "Das gespeicherte Geheimnis konnte nicht gelesen werden (%{error})."
   problem_profile_save: "Das Profil konnte nicht gespeichert werden (%{error})."
@@ -278,6 +288,20 @@ session:
     local_starting: "%{shell} wird gestartet..."
     local_exited: "%{shell} wurde beendet"
     local_failed: "%{shell} konnte nicht gestartet werden"
+
+terminal:
+  menu_copy: Kopieren
+  menu_paste: Einfügen
+  menu_select_all: Alles auswählen
+  menu_clear_scrollback: Verlauf löschen
+  menu_scroll_bottom: Nach unten scrollen
+  menu_close_pane: Bereich schließen
+
+input:
+  menu_cut: Ausschneiden
+  menu_copy: Kopieren
+  menu_paste: Einfügen
+  menu_select_all: Alles auswählen
 
 about:
   title: Über logman

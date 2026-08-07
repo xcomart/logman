@@ -33,7 +33,10 @@ tab:
   split_below: Diviser sous l'onglet actuel
   duplicate_right: Diviser à droite avec une nouvelle connexion
   duplicate_below: Diviser en dessous avec une nouvelle connexion
+  duplicate: Dupliquer l'onglet
   close: Fermer l'onglet
+  close_others: Fermer les autres onglets
+  close_right: Fermer les onglets à droite
   tip_list: Tous les onglets
   tip_new: "Nouvelle session (%{shortcut})"
 
@@ -50,12 +53,16 @@ files:
   select_upload: Envoyer
   select_upload_folder: Envoyer un dossier
   select_download_folder: Enregistrer
+  menu_open: Ouvrir
   menu_download: Télécharger…
   menu_rename: Renommer…
   menu_delete: Supprimer…
   menu_new_folder: Nouveau dossier…
   menu_upload: Envoyer des fichiers…
   menu_upload_folder: Envoyer un dossier…
+  menu_copy_name: Copier le nom
+  menu_copy_path: Copier le chemin
+  menu_select_all: Tout sélectionner
   menu_refresh: Actualiser
   tip_refresh: Actualiser
   tip_new_folder: Nouveau dossier
@@ -109,6 +116,7 @@ files:
 empty:
   hint: Appuyez sur %{shortcut} pour vous connecter à un hôte.
   saved_profiles: Profils enregistrés
+  menu_edit: Modifier…
 
 statusbar:
   no_session: aucune session
@@ -200,6 +208,7 @@ connection:
   browse: Parcourir…
   edit: Modifier
   delete: Supprimer
+  duplicate: Dupliquer
   select_file: Sélectionner
   saved_profiles: Profils enregistrés
   empty_list: "Aucun profil enregistré pour l'instant. Remplissez le formulaire et connectez-vous : la connexion est enregistrée automatiquement."
@@ -233,6 +242,7 @@ connection:
   delete_failed_list: "Le profil a été supprimé, mais la liste des profils n'a pas pu être écrite (%{error})."
   delete_failed_secret: "Le profil a été supprimé, mais son entrée dans le trousseau n'a pas pu être retirée (%{error})."
   delete_failed_both: "Le profil a été supprimé, mais la liste des profils n'a pas pu être écrite (%{list_error}) et son entrée dans le trousseau n'a pas pu être retirée (%{secret_error})."
+  duplicate_failed: "Le profil a été copié, mais la liste des profils n'a pas pu être écrite (%{error})."
   connect_problems: "Connexion en cours, mais tout n'a pas pu être enregistré :"
   problem_secret_read: "Le secret enregistré n'a pas pu être lu (%{error})."
   problem_profile_save: "Le profil n'a pas pu être enregistré (%{error})."
@@ -278,6 +288,20 @@ session:
     local_starting: "Démarrage de %{shell}..."
     local_exited: "%{shell} s'est terminé"
     local_failed: "Impossible de démarrer %{shell}"
+
+terminal:
+  menu_copy: Copier
+  menu_paste: Coller
+  menu_select_all: Tout sélectionner
+  menu_clear_scrollback: Effacer l'historique
+  menu_scroll_bottom: Aller en bas
+  menu_close_pane: Fermer le volet
+
+input:
+  menu_cut: Couper
+  menu_copy: Copier
+  menu_paste: Coller
+  menu_select_all: Tout sélectionner
 
 about:
   title: À propos de logman

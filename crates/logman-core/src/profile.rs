@@ -161,6 +161,23 @@ impl SessionProfile {
     }
 }
 
+/// `name` without a trailing `(n)` written by [`ProfileStore::duplicate`].
+///
+/// Only a run of digits in brackets after a single space is taken off, so a
+/// name that ends in brackets of its own — `db (replica)` — is left whole.
+fn strip_copy_suffix(name: &str) -> &str {
+    let Some(head) = name.strip_suffix(')') else {
+        return name;
+    };
+    let Some((base, digits)) = head.rsplit_once(" (") else {
+        return name;
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return name;
+    }
+    base
+}
+
 /// Collection of saved [`SessionProfile`]s, persisted as JSON.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ProfileStore {
@@ -250,6 +267,48 @@ impl ProfileStore {
     pub fn remove(&mut self, id: Uuid) -> Option<SessionProfile> {
         let index = self.profiles.iter().position(|p| p.id == id)?;
         Some(self.profiles.remove(index))
+    }
+
+    /// Copy the profile `id` into a second entry, placed right after it, and
+    /// return the copy.
+    ///
+    /// The copy is a profile in its own right: a fresh [`SessionProfile::id`],
+    /// and therefore no keychain entry of its own, which is why `save_secret`
+    /// starts out `false` however the original had it. Leaving it `true` would
+    /// have the copy claim a stored secret that does not exist and cannot be
+    /// found under its id.
+    ///
+    /// The name is made distinct with a `(2)`, `(3)`… suffix that skips the
+    /// names already in use. That is a courtesy to whoever reads the list, not
+    /// an invariant: identity here is the id, nothing stops two profiles
+    /// sharing a name, and a suffix already on the source name is replaced
+    /// rather than added to — so duplicating a copy yields `(3)` rather than
+    /// `(2) (2)`.
+    ///
+    /// Nothing is written to disk; call [`ProfileStore::save`] afterwards, the
+    /// same way a caller does after [`ProfileStore::remove`].
+    pub fn duplicate(&mut self, id: Uuid) -> Option<SessionProfile> {
+        let index = self.profiles.iter().position(|p| p.id == id)?;
+        let mut copy = self.profiles[index].clone();
+        copy.id = Uuid::new_v4();
+        copy.save_secret = false;
+        copy.name = self.free_name(&copy.name);
+        self.profiles.insert(index + 1, copy.clone());
+        Some(copy)
+    }
+
+    /// The first `name (n)` no stored profile answers to, counting from two.
+    ///
+    /// `name` is taken apart first, so the suffix counts copies of the original
+    /// rather than accumulating on every round.
+    fn free_name(&self, name: &str) -> String {
+        let base = strip_copy_suffix(name);
+        (2..)
+            .map(|n| format!("{base} ({n})"))
+            .find(|candidate| self.profiles.iter().all(|p| &p.name != candidate))
+            // The range is unbounded and every store is finite, so a name is
+            // always found; `unwrap_or` only spares the caller an `expect`.
+            .unwrap_or_else(|| base.to_owned())
     }
 
     /// Number of stored profiles.
@@ -397,6 +456,62 @@ mod tests {
         assert!(store.is_empty());
         assert_eq!(store.remove(profile.id), None);
         assert_eq!(store.get(profile.id), None);
+    }
+
+    #[test]
+    fn a_duplicate_is_a_profile_of_its_own_next_to_the_original() {
+        let mut store = ProfileStore::default();
+        let mut original = sample("web-01");
+        original.save_secret = true;
+        store.upsert(original.clone());
+        store.upsert(sample("tail"));
+
+        let copy = store.duplicate(original.id).expect("the copy is made");
+
+        assert_ne!(copy.id, original.id);
+        assert_eq!(copy.host, original.host);
+        assert_eq!(copy.username, original.username);
+        // The secret lives under the original's id, so the copy has none.
+        assert!(!copy.save_secret);
+        // Right after the original, not appended past everything else.
+        let names: Vec<&str> = store.profiles().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["web-01", "web-01 (2)", "tail"]);
+    }
+
+    #[test]
+    fn a_duplicate_skips_the_names_already_taken() {
+        let mut store = ProfileStore::default();
+        let original = sample("web-01");
+        store.upsert(original.clone());
+        store.upsert(sample("web-01 (2)"));
+        store.upsert(sample("web-01 (3)"));
+
+        let copy = store.duplicate(original.id).expect("the copy is made");
+        assert_eq!(copy.name, "web-01 (4)");
+
+        // Duplicating a copy counts from the original's name rather than
+        // stacking a second suffix on top of the first.
+        let second = store.duplicate(copy.id).expect("the copy is duplicated");
+        assert_eq!(second.name, "web-01 (5)");
+    }
+
+    #[test]
+    fn brackets_that_are_part_of_the_name_survive_a_duplicate() {
+        let mut store = ProfileStore::default();
+        let original = sample("db (replica)");
+        store.upsert(original.clone());
+
+        let copy = store.duplicate(original.id).expect("the copy is made");
+        assert_eq!(copy.name, "db (replica) (2)");
+    }
+
+    #[test]
+    fn duplicating_an_unknown_id_changes_nothing() {
+        let mut store = ProfileStore::default();
+        store.upsert(sample("only"));
+
+        assert_eq!(store.duplicate(Uuid::new_v4()), None);
+        assert_eq!(store.len(), 1);
     }
 
     #[test]

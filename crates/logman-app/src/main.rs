@@ -50,13 +50,14 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 use gpui::{
     AnyElement, App, Application, Bounds, Context, Div, DragMoveEvent, ElementId, Entity, EntityId,
-    FocusHandle, Focusable, KeyBinding, Menu, MenuItem, MouseButton, MouseUpEvent, Pixels, Point,
-    ScrollHandle, SharedString, Stateful, Subscription, TitlebarOptions, Window,
+    FocusHandle, Focusable, KeyBinding, Menu, MenuItem, MouseButton, MouseDownEvent, MouseUpEvent,
+    Pixels, Point, ScrollHandle, SharedString, Stateful, Subscription, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, actions, div,
     prelude::*, px, relative, size,
 };
 use logman_core::{SessionProfile, TitlebarStyle, WindowSettings};
 use logman_ssh::SshAuth;
+use uuid::Uuid;
 
 use about_dialog::{AboutDialog, AboutDialogEvent};
 use caption::apply_caption_theme;
@@ -71,7 +72,7 @@ use terminal_view::{PaneFocused, TerminalView};
 use ui::{
     Button, ButtonVariant, ContextMenu, DraggedThumb, MenuButton, MenuEntry, Scrollbar,
     ScrollbarAxis, ScrollbarState, TabBar, TabItem, Theme, ThemeRegistry, WindowControlIcons,
-    WindowControls, hide_later, scroll_to, scrolled, set_theme, theme, tooltip_label,
+    WindowControls, hide_later, hide_now, scroll_to, scrolled, set_theme, theme, tooltip_label,
 };
 
 actions!(
@@ -353,6 +354,14 @@ struct Workspace {
     /// The tab a right-click opened a context menu for, and where the pointer
     /// was when it did. `None` while no tab menu is showing.
     tab_context: Option<(usize, Point<Pixels>)>,
+    /// The saved profile a right-click on the empty state opened a context menu
+    /// for, and where the pointer was when it did.
+    ///
+    /// The profile is held by id rather than by its place in the list: the menu
+    /// outlives the frame that opened it, and the row it hangs off can have
+    /// moved — or gone — by the time a row of the menu is activated, which is
+    /// exactly what duplicating and deleting from it do.
+    empty_context: Option<(Uuid, Point<Pixels>)>,
     /// Title bar style currently *on the window*.
     ///
     /// Starts as the style the window was created with and is re-set whenever
@@ -461,6 +470,7 @@ impl Workspace {
             menu_open: false,
             tab_menu_open: false,
             tab_context: None,
+            empty_context: None,
             titlebar,
             _dialog_events: dialog_events,
             _settings_events: settings_events,
@@ -644,6 +654,22 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Takes the tab at `index` out of the strip and hangs up everything in it.
+    ///
+    /// The half of closing a tab that is the same however many tabs are going.
+    /// It deliberately leaves [`Workspace::active`], the strip scroll and the
+    /// focus alone: which tab should be active afterwards depends on how many
+    /// more are still about to be removed, so only the caller can decide it.
+    ///
+    /// `index` must be in range; every caller has already checked it.
+    fn retire_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let tab = self.tabs.remove(index);
+        for session in tab.sessions(cx) {
+            self.forget_panel_session(session.entity_id(), cx);
+            session.update(cx, |session, cx| session.disconnect(cx));
+        }
+    }
+
     /// Disconnects and removes the tab at `index`, panes and all.
     ///
     /// This is the tab strip's close button: a tab that was split closes as a
@@ -653,11 +679,7 @@ impl Workspace {
             return;
         }
 
-        let tab = self.tabs.remove(index);
-        for session in tab.sessions(cx) {
-            self.forget_panel_session(session.entity_id(), cx);
-            session.update(cx, |session, cx| session.disconnect(cx));
-        }
+        self.retire_tab(index, cx);
 
         // Removing a tab in front of the active one shifts it down a slot.
         if index < self.active {
@@ -666,6 +688,85 @@ impl Workspace {
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);
         }
+        self.reveal_active_tab();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Closes every tab except the one at `index`.
+    ///
+    /// The survivor is the only tab left, so it is also the active one however
+    /// the strip stood before: whichever tab held the focus is either this one
+    /// or gone.
+    fn close_other_tabs(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+
+        // Back to front, so that removing a tab never moves one that is still
+        // to be visited.
+        for other in (0..self.tabs.len()).rev() {
+            if other != index {
+                self.retire_tab(other, cx);
+            }
+        }
+
+        self.active = 0;
+        self.reveal_active_tab();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Closes every tab after the one at `index`.
+    ///
+    /// A tab in front of the clicked one keeps the focus if it had it — nothing
+    /// it was showing has gone anywhere. Only an active tab that was itself
+    /// closed hands the focus over, and it hands it to the clicked tab, which is
+    /// the nearest one still standing.
+    fn close_tabs_right(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index + 1 >= self.tabs.len() {
+            return;
+        }
+
+        for other in (index + 1..self.tabs.len()).rev() {
+            self.retire_tab(other, cx);
+        }
+
+        if self.active > index {
+            self.active = index;
+        }
+        self.reveal_active_tab();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Opens a second connection to the target of the tab at `index`, in a tab
+    /// of its own right after it.
+    ///
+    /// The tab-sized counterpart of [`Workspace::duplicate_split`], and it takes
+    /// the credentials the same way — through [`Session::duplicate`], the only
+    /// place that can read them. What differs is where the new session lands and
+    /// therefore what can refuse it: a split has to fit beside the pane it comes
+    /// from, while a new tab is given the whole body and can always be had.
+    ///
+    /// Which pane of a split source tab is duplicated is the one its label
+    /// already names — the active one — so the tab that appears is a second
+    /// connection to whatever the strip said the tab was.
+    fn duplicate_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+
+        let session = tab.active_view().read(cx).session().clone();
+        log::info!("opening a second session to {}", session.read(cx).title());
+
+        let session = session.update(cx, |session, cx| session.duplicate(cx));
+        let view = cx.new(|cx| TerminalView::new(session.clone(), window, cx));
+        let leaf = self.new_pane(view, session, window, cx);
+
+        let at = index + 1;
+        self.tabs.insert(at, SessionTab::single(leaf));
+        self.active = at;
         self.reveal_active_tab();
         self.focus_active(window, cx);
         cx.notify();
@@ -1001,6 +1102,7 @@ impl Workspace {
         self.menu_open = false;
         self.tab_menu_open = false;
         self.tab_context = None;
+        self.empty_context = None;
         if self.dialog.read(cx).is_open() {
             self.dialog.update(cx, |dialog, cx| dialog.close(cx));
         }
@@ -1049,6 +1151,43 @@ impl Workspace {
         let id = profile.id;
         self.dialog
             .update(cx, |dialog, cx| dialog.open_profile(id, cx));
+        cx.notify();
+    }
+
+    /// Shows the connection dialog with the saved profile `id` loaded into the
+    /// form, ready to be changed.
+    ///
+    /// The sibling of [`Workspace::open_profile`], for the other thing a saved
+    /// profile can be asked for: that one is on its way to a session and only
+    /// shows the form when something is missing, while this one is the form.
+    fn edit_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.close_overlays(cx);
+        self.dialog
+            .update(cx, |dialog, cx| dialog.edit_profile(id, cx));
+        cx.notify();
+    }
+
+    /// Copies the saved profile `id` and shows the copy in the list.
+    ///
+    /// Routed through the dialog rather than through a store of the workspace's
+    /// own, because there is only one store: the dialog holds it, and the empty
+    /// state lists what the dialog holds.
+    ///
+    /// The same goes for [`Workspace::delete_profile`] below — one deletion, one
+    /// code path — and with it goes the dialog's message strip, which is where
+    /// either of them says that the list could not be written. From here that
+    /// message has nowhere to appear; the log line the storage layer writes is
+    /// what is left of it.
+    fn duplicate_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.dialog
+            .update(cx, |dialog, cx| dialog.duplicate_profile(id, cx));
+        cx.notify();
+    }
+
+    /// Forgets the saved profile `id`, keychain entry and all.
+    fn delete_profile(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.dialog
+            .update(cx, |dialog, cx| dialog.delete_profile(id, cx));
         cx.notify();
     }
 
@@ -1137,6 +1276,29 @@ impl Workspace {
     /// Puts the tab context menu away, if one is open.
     fn close_tab_context(&mut self, cx: &mut Context<Self>) {
         if self.tab_context.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Opens the context menu of the saved profile `id`, with its corner at
+    /// `at`.
+    ///
+    /// Guarded like [`Workspace::open_tab_context`], and for the same reasons:
+    /// a modal outranks the empty state behind it, while the two dropdowns are
+    /// simply mutually exclusive with this menu.
+    fn open_empty_context(&mut self, id: Uuid, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.dialog_open(cx) {
+            return;
+        }
+        self.menu_open = false;
+        self.tab_menu_open = false;
+        self.empty_context = Some((id, at));
+        cx.notify();
+    }
+
+    /// Puts the empty state's context menu away, if one is open.
+    fn close_empty_context(&mut self, cx: &mut Context<Self>) {
+        if self.empty_context.take().is_some() {
             cx.notify();
         }
     }
@@ -1254,9 +1416,18 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // The dropdown menus paint above everything else, so they are dismissed
-        // first.
+        // first. The file panel's menu is one of them even though the panel
+        // owns it: it is drawn over the window like the rest, and the key
+        // reaches this handler rather than the panel, which binds nothing.
         if self.tab_context.is_some() {
             self.close_tab_context(cx);
+            return;
+        }
+        if self.empty_context.is_some() {
+            self.close_empty_context(cx);
+            return;
+        }
+        if self.panel.update(cx, |panel, cx| panel.close_context(cx)) {
             return;
         }
         if self.menu_open {
@@ -1540,7 +1711,11 @@ impl Workspace {
             .tabs(tabs)
             .active(self.active)
             .scroll_handle(&self.tab_scroll)
-            .scrollbar(self.tab_scrollbar())
+            .scrollbar(self.tab_scrollbar().on_hover(cx.listener(
+                |workspace, hovered: &bool, _window, cx| {
+                    workspace.hover_tab_scrollbar(*hovered, cx);
+                },
+            )))
             .menu_icon(icons::TAB_LIST)
             .new_icon(icons::NEW_TAB)
             // The close button reuses the tab menu's own row: it is the same
@@ -1597,6 +1772,10 @@ impl Workspace {
     ///
     /// A row whose command would be refused is left out rather than shown doing
     /// nothing, so the menu can come down to nothing but "close this tab".
+    ///
+    /// The rows come in three groups, separated in that order: rearranging the
+    /// panes of the strip, opening a connection, and closing tabs. A group whose
+    /// every row was left out contributes no rule of its own.
     fn render_tab_context(&self, cx: &mut Context<Self>) -> Option<ContextMenu> {
         let (index, position) = self.tab_context?;
         // The strip and the stored index are a frame apart: a tab can be gone by
@@ -1604,12 +1783,13 @@ impl Workspace {
         let tab = self.tabs.get(index)?;
         let this = cx.entity();
 
-        let mut entries = Vec::new();
+        let mut splits = Vec::new();
+        let mut break_out = Vec::new();
         if index == self.active {
             // A split that would leave an unusably small pane is refused, so the
             // row asking for it is left out rather than offered and ignored.
             if self.can_split_active(Axis::Horizontal, cx) {
-                entries.push(
+                splits.push(
                     MenuEntry::new(ts!("tab.duplicate_right"))
                         .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+D"))
                         .on_activate(|window, cx| {
@@ -1618,7 +1798,7 @@ impl Workspace {
                 );
             }
             if self.can_split_active(Axis::Vertical, cx) {
-                entries.push(
+                splits.push(
                     MenuEntry::new(ts!("tab.duplicate_below"))
                         .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+S"))
                         .on_activate(|window, cx| {
@@ -1626,18 +1806,14 @@ impl Workspace {
                         }),
                 );
             }
-            if !entries.is_empty() {
-                entries.push(MenuEntry::separator());
-            }
             if tab.panes.leaf_count() > 1 {
-                entries.push(
+                break_out.push(
                     MenuEntry::new(ts!("menu.break_out_pane"))
                         .shortcut(format!("{PANE_SHORTCUT_MODIFIER}+Shift+B"))
                         .on_activate(|window, cx| {
                             window.dispatch_action(Box::new(BreakOutPane), cx)
                         }),
                 );
-                entries.push(MenuEntry::separator());
             }
         } else {
             // A split that would leave an unusably small pane is refused, so the
@@ -1650,22 +1826,77 @@ impl Workspace {
                     continue;
                 }
                 let this = this.clone();
-                entries.push(MenuEntry::new(label).on_activate(move |window, cx| {
+                splits.push(MenuEntry::new(label).on_activate(move |window, cx| {
                     this.update(cx, |workspace, cx| {
                         workspace.merge_tab_into_active(index, axis, window, cx);
                     });
                 }));
             }
-            if !entries.is_empty() {
-                entries.push(MenuEntry::separator());
-            }
         }
-        entries.push(MenuEntry::new(ts!("tab.close")).on_activate({
+
+        // Both rows speak for the session the tab label already names, which on
+        // a split tab is the active pane's rather than the tab's first.
+        let session = tab.active_view().read(cx).session().read(cx);
+        let mut connect = vec![MenuEntry::new(ts!("tab.duplicate")).on_activate({
+            let this = this.clone();
+            move |window, cx| {
+                this.update(cx, |workspace, cx| {
+                    workspace.duplicate_tab(index, window, cx);
+                });
+            }
+        })];
+        if !session.status().is_live() {
+            // The same command the connection overlay's button carries, worded
+            // the way that button words it: a local shell is started again, not
+            // reconnected to.
+            let label = if session.is_local() {
+                ts!("session.restart")
+            } else {
+                ts!("session.reconnect")
+            };
+            let session = tab.active_view().read(cx).session().clone();
+            connect.push(MenuEntry::new(label).on_activate(move |_window, cx| {
+                session.update(cx, |session, cx| session.reconnect(cx));
+            }));
+        }
+
+        let mut close = vec![MenuEntry::new(ts!("tab.close")).on_activate({
             let this = this.clone();
             move |window, cx| {
                 this.update(cx, |workspace, cx| workspace.close_tab(index, window, cx));
             }
-        }));
+        })];
+        if self.tabs.len() > 1 {
+            close.push(MenuEntry::new(ts!("tab.close_others")).on_activate({
+                let this = this.clone();
+                move |window, cx| {
+                    this.update(cx, |workspace, cx| {
+                        workspace.close_other_tabs(index, window, cx);
+                    });
+                }
+            }));
+        }
+        if index + 1 < self.tabs.len() {
+            close.push(MenuEntry::new(ts!("tab.close_right")).on_activate({
+                let this = this.clone();
+                move |window, cx| {
+                    this.update(cx, |workspace, cx| {
+                        workspace.close_tabs_right(index, window, cx);
+                    });
+                }
+            }));
+        }
+
+        let mut entries = Vec::new();
+        for group in [splits, break_out, connect, close] {
+            if group.is_empty() {
+                continue;
+            }
+            if !entries.is_empty() {
+                entries.push(MenuEntry::separator());
+            }
+            entries.extend(group);
+        }
 
         Some(
             ContextMenu::new("tab-context")
@@ -1673,6 +1904,66 @@ impl Workspace {
                 .entries(entries)
                 .on_dismiss(move |_window, cx| {
                     this.update(cx, |workspace, cx| workspace.close_tab_context(cx));
+                }),
+        )
+    }
+
+    /// Renders the context menu of an empty-state profile row, if one is open.
+    ///
+    /// Four rows and no conditions on them: every saved profile can be
+    /// connected to, edited, copied and forgotten, whatever it holds. What can
+    /// go is the profile itself — the store is re-read whenever the dialog
+    /// opens, and this menu can outlive the row that opened it — in which case
+    /// there is nothing left for the menu to speak for and it draws nothing.
+    fn render_empty_context(&self, cx: &mut Context<Self>) -> Option<ContextMenu> {
+        let (id, position) = self.empty_context?;
+        let profile = self
+            .dialog
+            .read(cx)
+            .profiles()
+            .into_iter()
+            .find(|profile| profile.id == id)?;
+        let this = cx.entity();
+
+        let entries = vec![
+            MenuEntry::new(ts!("connection.connect")).on_activate({
+                let this = this.clone();
+                move |window, cx| {
+                    let profile = profile.clone();
+                    this.update(cx, |workspace, cx| {
+                        workspace.open_profile(&profile, window, cx);
+                    });
+                }
+            }),
+            // The ellipsis the dialog's own Edit button does without: from here
+            // the form is not on screen yet, so this row promises it.
+            MenuEntry::new(ts!("empty.menu_edit")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |workspace, cx| workspace.edit_profile(id, cx));
+                }
+            }),
+            MenuEntry::new(ts!("connection.duplicate")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |workspace, cx| workspace.duplicate_profile(id, cx));
+                }
+            }),
+            MenuEntry::separator(),
+            MenuEntry::new(ts!("connection.delete")).on_activate({
+                let this = this.clone();
+                move |_window, cx| {
+                    this.update(cx, |workspace, cx| workspace.delete_profile(id, cx));
+                }
+            }),
+        ];
+
+        Some(
+            ContextMenu::new("empty-profile-context")
+                .position(position)
+                .entries(entries)
+                .on_dismiss(move |_window, cx| {
+                    this.update(cx, |workspace, cx| workspace.close_empty_context(cx));
                 }),
         )
     }
@@ -1815,6 +2106,23 @@ impl Workspace {
         }
     }
 
+    /// Puts the strip's bar up while the pointer rests on the edge it rides, and
+    /// starts it going the moment the pointer leaves.
+    fn hover_tab_scrollbar(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            if self.tab_scrollbar.hover_enter() {
+                cx.notify();
+            }
+            return;
+        }
+
+        if let Some(epoch) = self.tab_scrollbar.hover_leave() {
+            hide_now(self, epoch, cx, |workspace| {
+                Some(&mut workspace.tab_scrollbar)
+            });
+        }
+    }
+
     /// Renders the placeholder shown while no session is open.
     fn render_empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
@@ -1823,17 +2131,38 @@ impl Workspace {
 
         let saved = (!profiles.is_empty()).then(|| {
             let rows = profiles.into_iter().enumerate().map(|(index, profile)| {
-                let this = this.clone();
                 let id = ElementId::from(("saved-profile", index));
                 let label = format!("{}  ·  {}", profile.name, profile.label());
-                Button::new(id, label)
+                let profile_id = profile.id;
+                let button = Button::new(id, label)
                     .variant(ButtonVariant::Ghost)
                     .full_width(true)
-                    .on_click(move |_, window, cx| {
-                        this.update(cx, |workspace, cx| {
-                            workspace.open_profile(&profile, window, cx)
-                        });
+                    .on_click({
+                        let this = this.clone();
+                        move |_, window, cx| {
+                            this.update(cx, |workspace, cx| {
+                                workspace.open_profile(&profile, window, cx)
+                            });
+                        }
+                    });
+
+                // The right-click is answered by a wrapper rather than by the
+                // button, which takes clicks and nothing else: a `Button` is
+                // the application's one push control and has no business
+                // growing a menu hook for the single place that wants one.
+                div()
+                    .id(ElementId::from(("saved-profile-row", index)))
+                    .w_full()
+                    .on_mouse_down(MouseButton::Right, {
+                        let this = this.clone();
+                        move |event: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.update(cx, |workspace, cx| {
+                                workspace.open_empty_context(profile_id, event.position, cx);
+                            });
+                        }
                     })
+                    .child(button)
             });
 
             div()
@@ -2132,6 +2461,10 @@ impl Render for Workspace {
         let body = self.render_body(window, cx);
         let status_bar = self.render_status_bar(cx);
         let tab_context = self.render_tab_context(cx);
+        // Only ever open over the empty state, which is what the body draws
+        // while there is no tab; a session opened from the menu itself takes
+        // the state — and with `close_overlays`, the menu — off the screen.
+        let empty_context = self.render_empty_context(cx);
         let dialog = self
             .dialog
             .read(cx)
@@ -2218,6 +2551,7 @@ impl Render for Workspace {
             // Deferred inside, so it paints above the three bands whatever its
             // place in this list.
             .children(tab_context)
+            .children(empty_context)
             .children(dialog)
             .children(settings)
             .children(about);

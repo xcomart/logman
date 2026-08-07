@@ -33,7 +33,10 @@ tab:
   split_below: Dividir debajo de la actual
   duplicate_right: Dividir a la derecha con una conexión nueva
   duplicate_below: Dividir debajo con una conexión nueva
+  duplicate: Duplicar pestaña
   close: Cerrar pestaña
+  close_others: Cerrar las demás pestañas
+  close_right: Cerrar las pestañas de la derecha
   tip_list: Todas las pestañas
   tip_new: "Nueva sesión (%{shortcut})"
 
@@ -50,12 +53,16 @@ files:
   select_upload: Subir
   select_upload_folder: Subir carpeta
   select_download_folder: Guardar
+  menu_open: Abrir
   menu_download: Descargar…
   menu_rename: Cambiar nombre…
   menu_delete: Eliminar…
   menu_new_folder: Nueva carpeta…
   menu_upload: Subir archivos…
   menu_upload_folder: Subir carpeta…
+  menu_copy_name: Copiar nombre
+  menu_copy_path: Copiar ruta
+  menu_select_all: Seleccionar todo
   menu_refresh: Actualizar
   tip_refresh: Actualizar
   tip_new_folder: Nueva carpeta
@@ -109,6 +116,7 @@ files:
 empty:
   hint: Pulsa %{shortcut} para conectarte a un host.
   saved_profiles: Perfiles guardados
+  menu_edit: Editar…
 
 statusbar:
   no_session: sin sesión
@@ -200,6 +208,7 @@ connection:
   browse: Examinar…
   edit: Editar
   delete: Eliminar
+  duplicate: Duplicar
   select_file: Seleccionar
   saved_profiles: Perfiles guardados
   empty_list: "Aún no hay perfiles guardados. Rellena el formulario y conéctate: la conexión se guarda automáticamente."
@@ -233,6 +242,7 @@ connection:
   delete_failed_list: "El perfil se eliminó, pero no se pudo escribir la lista de perfiles (%{error})."
   delete_failed_secret: "El perfil se eliminó, pero no se pudo quitar su entrada del llavero (%{error})."
   delete_failed_both: "El perfil se eliminó, pero no se pudo escribir la lista de perfiles (%{list_error}) ni quitar su entrada del llavero (%{secret_error})."
+  duplicate_failed: "El perfil se copió, pero no se pudo escribir la lista de perfiles (%{error})."
   connect_problems: "Conectando, pero no se pudo guardar todo:"
   problem_secret_read: "No se pudo leer el secreto guardado (%{error})."
   problem_profile_save: "No se pudo guardar el perfil (%{error})."
@@ -278,6 +288,20 @@ session:
     local_starting: "Iniciando %{shell}..."
     local_exited: "%{shell} ha terminado"
     local_failed: "No se pudo iniciar %{shell}"
+
+terminal:
+  menu_copy: Copiar
+  menu_paste: Pegar
+  menu_select_all: Seleccionar todo
+  menu_clear_scrollback: Borrar el historial
+  menu_scroll_bottom: Ir al final
+  menu_close_pane: Cerrar el panel
+
+input:
+  menu_cut: Cortar
+  menu_copy: Copiar
+  menu_paste: Pegar
+  menu_select_all: Seleccionar todo
 
 about:
   title: Acerca de logman
