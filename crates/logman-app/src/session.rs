@@ -4,28 +4,31 @@
 //! and spawns a pump that drains transport events onto the UI thread, so the
 //! whole type is single threaded and never blocks a render.
 //!
-//! Two transports can drive it: an SSH connection to a remote host, and — on
-//! unix only — a login shell on this machine. They are deliberately one type
-//! rather than two: every tab, pane and view in the shell is written against
-//! `Entity<Session>`, so a second session type would have to be threaded
-//! through all of them. What differs between the two lives in the private
-//! [`Target`] and [`Transport`] enums instead, and the public surface answers
-//! for both.
+//! Two transports can drive it: an SSH connection to a remote host, and a shell
+//! on this machine — the login shell on unix, and whichever of PowerShell,
+//! `cmd` or a WSL distribution the user picked on Windows. They are
+//! deliberately one type rather than two: every tab, pane and view in the shell
+//! is written against `Entity<Session>`, so a second session type would have to
+//! be threaded through all of them. What differs between the two lives in the
+//! private [`Target`] and [`Transport`] enums instead, and the public surface
+//! answers for both.
 //!
 //! Credentials are kept for reconnection but are deliberately unreachable from
 //! the outside: there is no accessor for them, and the hand written
 //! [`Debug`](std::fmt::Debug) implementation omits them entirely.
 
 use std::fmt;
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::StreamExt;
 use gpui::{App, AppContext, Context, Entity, SharedString, Task};
 use logman_core::{EffectiveTerminal, SessionOverrides, SessionProfile};
+use logman_pty::{PtyConfig, PtyEvent, PtySession};
+// The one part of the pty surface that is not cross-platform: Windows has no
+// login shell to name, and picks its command from the welcome screen instead.
 #[cfg(unix)]
-use logman_pty::{PtyConfig, PtyEvent, PtySession, login_shell_name};
+use logman_pty::login_shell_name;
 use logman_ssh::{SshAuth, SshConfig, SshEvent, SshSession, TunnelForward};
 use logman_term::{TerminalModel, TerminalTheme};
 
@@ -48,7 +51,6 @@ const INITIAL_ROWS: u16 = 24;
 /// English, like every other `reason` reaching [`SessionStatus`]: those come
 /// from the SSH layer verbatim, and the wording around them is what the locale
 /// translates.
-#[cfg(unix)]
 const LOCAL_EXIT_REASON: &str = "the local shell exited";
 
 /// Classification put on a [`SessionStatus::Failed`] raised by the local pty.
@@ -56,7 +58,6 @@ const LOCAL_EXIT_REASON: &str = "the local shell exited";
 /// The SSH kinds name the *stage* that failed because a remote connection has
 /// several of them; starting a local shell has one, so this names the subsystem
 /// and leaves what went wrong entirely to the transport's own message.
-#[cfg(unix)]
 const LOCAL_FAILURE_KIND: &str = "local shell";
 
 /// Where a [`Session`] currently is in its life cycle.
@@ -140,13 +141,14 @@ enum Target {
         /// Never rendered, logged or otherwise exposed.
         auth: SshAuth,
     },
-    /// The user's login shell on this machine.
-    #[cfg(unix)]
+    /// A shell on this machine.
     Local {
-        /// Name of that shell, resolved once when the session is created.
+        /// What to call that shell in the tab strip and the status bar.
         ///
-        /// Cached rather than looked up per frame: it cannot change under a
-        /// running session, and the lookup reads the passwd database.
+        /// Resolved once when the session is created rather than looked up per
+        /// frame: on unix it cannot change under a running session and the
+        /// lookup reads the passwd database, and on Windows it is simply the
+        /// name of the button the user pressed.
         shell: SharedString,
         /// Directory the shell is started in; `None` means the app's own.
         ///
@@ -157,6 +159,14 @@ enum Target {
         /// so that a restart lands in the same place the session originally
         /// started in.
         cwd: Option<PathBuf>,
+        /// The command line to run, or `None` for the platform's default.
+        ///
+        /// `None` is what unix always uses: the pty starts the user's login
+        /// shell, which is the only local shell that platform offers. Windows
+        /// has several — PowerShell, `cmd`, one per installed WSL distribution
+        /// — so the welcome screen names the one it wants here, and a
+        /// reconnect or a duplicate starts that same one again.
+        command: Option<Vec<String>>,
     },
 }
 
@@ -168,7 +178,6 @@ enum Transport {
     /// A connected — or still connecting — SSH session.
     Ssh(SshSession),
     /// A local shell on its own pty.
-    #[cfg(unix)]
     Local(PtySession),
 }
 
@@ -177,7 +186,6 @@ impl Transport {
     fn send_input(&self, bytes: Vec<u8>) {
         match self {
             Self::Ssh(ssh) => ssh.send_input(bytes),
-            #[cfg(unix)]
             Self::Local(pty) => pty.send_input(bytes),
         }
     }
@@ -186,7 +194,6 @@ impl Transport {
     fn resize(&self, cols: u16, rows: u16) {
         match self {
             Self::Ssh(ssh) => ssh.resize(cols, rows),
-            #[cfg(unix)]
             Self::Local(pty) => pty.resize(cols, rows),
         }
     }
@@ -198,7 +205,6 @@ impl Transport {
     fn close(self) {
         match self {
             Self::Ssh(ssh) => ssh.disconnect(),
-            #[cfg(unix)]
             Self::Local(pty) => pty.shutdown(),
         }
     }
@@ -265,19 +271,42 @@ impl Session {
     /// of its own.
     #[cfg(unix)]
     pub fn new_local(cx: &mut Context<Self>) -> Self {
-        Self::new_local_in(None, cx)
+        Self::new_local_in(SharedString::from(login_shell_name()), None, None, cx)
     }
 
-    /// [`Session::new_local`], starting the shell in `cwd`.
+    /// Builds a session running `command` on this machine, and starts it
+    /// straight away.
+    ///
+    /// The Windows counterpart of [`Session::new_local`], and the reason the
+    /// two are not one call: there is no single local shell to start here, so
+    /// the caller — the welcome screen — says which one it means. `label` is
+    /// what the tab is called until the shell sets a title of its own, and is
+    /// the plain name of the shell rather than the command line, which is an
+    /// implementation detail the user never typed.
+    #[cfg(windows)]
+    pub fn new_local_command(
+        label: SharedString,
+        command: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_local_in(label, None, Some(command), cx)
+    }
+
+    /// The shared body of the local constructors, starting the shell in `cwd`.
     ///
     /// With no directory of its own the shell opens in the user's home, not in
     /// the application's working directory: a GUI app launched from the Finder
     /// runs in `/`, which no terminal drops its user into.
-    #[cfg(unix)]
-    fn new_local_in(cwd: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+    fn new_local_in(
+        shell: SharedString,
+        cwd: Option<PathBuf>,
+        command: Option<Vec<String>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let target = Target::Local {
-            shell: SharedString::from(login_shell_name()),
+            shell,
             cwd: cwd.or_else(home_dir),
+            command,
         };
         let mut session = Self::build(target, SessionOverrides::default(), cx);
         session.start(cx);
@@ -340,7 +369,6 @@ impl Session {
     pub fn label(&self) -> SharedString {
         match &self.target {
             Target::Ssh { profile, .. } => SharedString::from(profile.label()),
-            #[cfg(unix)]
             Target::Local { shell, .. } => shell.clone(),
         }
     }
@@ -353,7 +381,6 @@ impl Session {
     pub fn is_local(&self) -> bool {
         match &self.target {
             Target::Ssh { .. } => false,
-            #[cfg(unix)]
             Target::Local { .. } => true,
         }
     }
@@ -365,7 +392,6 @@ impl Session {
             Some(title) if !title.trim().is_empty() => SharedString::from(title.to_owned()),
             _ => match &self.target {
                 Target::Ssh { profile, .. } => SharedString::from(profile.name.clone()),
-                #[cfg(unix)]
                 Target::Local { shell, .. } => shell.clone(),
             },
         }
@@ -407,8 +433,8 @@ impl Session {
     /// and the local one only clones the executor handle it does its blocking
     /// work on.
     pub fn files(&self, cx: &App) -> Option<Arc<dyn FileSource>> {
-        // Read only by the local arm below, which does not exist off unix: a
-        // build with no pty has no local session to browse from.
+        // Read only by the local arm below, which does not exist off unix: see
+        // the arm itself for why a Windows local session browses nothing.
         #[cfg(not(unix))]
         let _ = cx;
         match (&self.status, &self.transport) {
@@ -418,6 +444,15 @@ impl Session {
             // The pty handle itself is not needed: the shell's filesystem is
             // this process's filesystem, reachable without going through it.
             // What the session decides is *whether* there is one to browse.
+            //
+            // Unix only, unlike the rest of the local transport. Two reasons,
+            // either of which would be enough: the panel's path arithmetic is
+            // written for POSIX paths throughout, and a WSL session — one of
+            // the local shells Windows offers — reports a Linux path in its
+            // `OSC 7` that names nothing on the Windows filesystem beside it,
+            // so the panel would follow the shell into directories that do not
+            // exist. A Windows local session is a terminal and nothing more
+            // until both are answered.
             #[cfg(unix)]
             (SessionStatus::Connected, Some(Transport::Local(_))) => {
                 Some(Arc::new(LocalSource::new(cx.background_executor().clone())))
@@ -520,10 +555,13 @@ impl Session {
                 let (profile, auth) = ((**profile).clone(), auth.clone());
                 cx.new(|cx| Self::new(profile, auth, cx))
             }
-            #[cfg(unix)]
-            Target::Local { .. } => {
+            // The command comes along with the directory: a duplicate of a
+            // WSL tab has to open that same distribution, not the default
+            // shell of the platform.
+            Target::Local { shell, command, .. } => {
+                let (shell, command) = (shell.clone(), command.clone());
                 let cwd = self.local_start_dir();
-                cx.new(|cx| Self::new_local_in(cwd, cx))
+                cx.new(|cx| Self::new_local_in(shell, cwd, command, cx))
             }
         }
     }
@@ -541,7 +579,11 @@ impl Session {
     /// that is not a path at all. A pty that cannot enter its working directory
     /// fails to start, so anything doubtful falls back to `None` and lets the
     /// new shell open in the user's home directory.
-    #[cfg(unix)]
+    ///
+    /// The same two tests also do the work no third one has to on Windows: a
+    /// WSL shell reports a Linux path such as `/home/ada`, which `is_absolute`
+    /// rejects there, so a duplicated WSL tab quietly starts where a fresh one
+    /// would rather than in a directory the pty could never enter.
     fn local_start_dir(&self) -> Option<PathBuf> {
         let cwd = self.cwd()?;
         let path = Path::new(cwd);
@@ -610,11 +652,14 @@ impl Session {
                 });
                 (Transport::Ssh(ssh), pump)
             }
-            #[cfg(unix)]
-            Target::Local { cwd, .. } => {
+            Target::Local { cwd, command, .. } => {
                 let mut config = PtyConfig::new(cols, rows);
                 config.term = effective.term;
                 config.cwd = cwd.clone();
+                // `None` here is not "nothing to run" but "run the platform's
+                // own default", which is exactly what a unix local session
+                // wants and what the pty layer already does.
+                config.command = command.clone();
 
                 let (pty, mut events) = PtySession::spawn(config);
                 let pump = cx.spawn(async move |this, cx| {
@@ -691,7 +736,6 @@ impl Session {
     /// A shell that exits is a plain disconnect rather than a failure — the
     /// user typed `exit` — and the shell that could not be started at all is
     /// the only thing the pty layer reports as an error.
-    #[cfg(unix)]
     fn on_pty_event(&mut self, event: PtyEvent, cx: &mut Context<Self>) {
         match event {
             PtyEvent::Ready => self.on_transport_ready(),
@@ -758,7 +802,6 @@ impl Session {
 
 /// The user's home directory, or `None` for an account that has none — the
 /// pty then falls back to the application's own working directory.
-#[cfg(unix)]
 fn home_dir() -> Option<PathBuf> {
     directories::UserDirs::new().map(|dirs| dirs.home_dir().to_owned())
 }
