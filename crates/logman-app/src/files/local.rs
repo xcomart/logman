@@ -14,8 +14,11 @@
 //! non-empty one refused by `remove_dir`. The panel treats the two identically,
 //! so a difference here would surface up there as a bug rather than as a choice.
 //!
-//! Nothing below is unix specific — see the gate in the parent module for why
-//! it is compiled there anyway.
+//! Nothing below is written twice for two platforms: every call is `std::fs`,
+//! which is as cross-platform as this crate needs. The one place the platform
+//! shows through is how a path is *spelled* on the way out — see
+//! [`path_string`] — because the panel above does path arithmetic on strings
+//! and expects one spelling whichever source produced them.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -240,8 +243,9 @@ impl FileSource for LocalSource {
     /// Both ends are this computer, so this is a plain copy — see [`copy_file`]
     /// for what it refuses and why. The destination is spelled with
     /// [`Path::join`] rather than by pasting a `/` in: it is a path on *this*
-    /// filesystem and has to be usable as one, and on the platforms a local
-    /// session exists at all the two spellings are identical anyway.
+    /// filesystem and has to be usable as one, whatever separator the platform
+    /// prefers. The path handed *back* is not that spelling but the panel's,
+    /// because it goes through [`path_string`] like every other answer here.
     async fn copy_in(
         &self,
         local: PathBuf,
@@ -285,14 +289,62 @@ impl FileSource for LocalSource {
 
 /// Renders `path` as the [`String`] the panel navigates by.
 ///
+/// The single point where a real [`Path`] becomes a path the panel holds, which
+/// is why the platform's spelling is settled here and nowhere else.
+///
 /// A path that is not valid UTF-8 is refused rather than made lossy: the panel
 /// joins, splits and compares these as strings, and a lossy spelling would name
 /// a different file than the one it was read from — which is fine until a delete
 /// is aimed at it.
 fn path_string(path: &Path) -> Result<String, FileError> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
+    path.to_str().map(normalise).ok_or_else(|| {
         FileError::Path(format!("{} is not a name that can be used", path.display()))
     })
+}
+
+/// Leaves `path` exactly as the filesystem spelled it.
+///
+/// POSIX paths are already the shape the panel expects, so there is nothing to
+/// do — the counterpart below explains what "the shape the panel expects" is
+/// and why the other platform has to be brought to it.
+#[cfg(unix)]
+fn normalise(path: &str) -> String {
+    path.to_owned()
+}
+
+/// Rewrites a Windows path into the one spelling the panel understands.
+///
+/// Two changes, both of them only ever *out* of `std::fs` and never back into
+/// it:
+///
+/// * **the verbatim prefix goes.** [`canonicalize`](std::fs::canonicalize) —
+///   which is how `realpath` answers, and so how every `..` the panel walks is
+///   resolved — returns `\\?\C:\Users\ada`. That prefix is an instruction to the
+///   kernel to skip path parsing, not part of the name: showing it would put
+///   four characters of noise at the head of every breadcrumb row, and the
+///   `\\?\UNC\server\share` form of it would hide the fact that the path is a
+///   network share at all. The UNC form therefore becomes `\\server\share`
+///   rather than losing its leading separators, because those *are* part of the
+///   name.
+/// * **separators become `/`.** The panel splits paths on `/`, joins with `/`
+///   and folds breadcrumbs on `/`, because SFTP paths are POSIX on the wire and
+///   that arithmetic was written for them. Bringing local paths to the same
+///   spelling is what lets one panel drive both without branching, and it costs
+///   nothing on the way back: every Windows API — and so every `std::fs` call
+///   below — accepts `/` as a separator, so the strings the panel hands back are
+///   usable as paths exactly as they are.
+#[cfg(windows)]
+fn normalise(path: &str) -> String {
+    // `\\?\UNC\server\share` and `\\server\share` name the same place, so the
+    // marker is swapped for the two separators rather than simply dropped.
+    let plain = match path.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(share) => format!(r"\\{share}"),
+            None => rest.to_owned(),
+        },
+        None => path.to_owned(),
+    };
+    plain.replace('\\', "/")
 }
 
 /// Streams `from` onto `to`, announcing the running byte count.
@@ -406,10 +458,12 @@ mod tests {
     }
 
     /// The path `path` spelled the way the panel passes it around.
+    ///
+    /// The source's own renderer rather than a plain `to_str`, so that the
+    /// expectations below are written in the spelling the panel actually sees —
+    /// which on Windows is not the one [`Path`] produces.
     fn text(path: &Path) -> String {
-        path.to_str()
-            .expect("the temporary path must be UTF-8")
-            .to_owned()
+        path_string(path).expect("the temporary path must be usable")
     }
 
     /// A file of `size` bytes with a recognisable, non-repeating body, so that a
@@ -438,10 +492,45 @@ mod tests {
         assert_eq!(counts.last().copied(), Some(size), "saw {counts:?}");
     }
 
+    /// The two rows every listing is made of, and the two facts the panel draws
+    /// them from: a directory can be entered, and a file has a size to show.
+    ///
+    /// Kept apart from the symbolic link test below because that one cannot run
+    /// on Windows — creating a link there needs a privilege the machine running
+    /// the tests may not have — and this half of the contract is the half that
+    /// must hold on every platform a local session exists on.
+    #[gpui::test]
+    async fn a_listing_separates_directories_from_files(executor: BackgroundExecutor) {
+        let root = tempfile::tempdir().expect("the temporary tree must be created");
+        let source = LocalSource::new(executor);
+
+        std::fs::create_dir(root.path().join("logs")).expect("the directory must be created");
+        let body = write_file(&root.path().join("notes.txt"), 12);
+
+        let entries = source
+            .read_dir(&text(root.path()))
+            .await
+            .expect("the listing must succeed");
+        assert_eq!(entries.len(), 2, "saw {entries:?}");
+
+        let logs = find(&entries, "logs");
+        assert!(logs.is_dir && !logs.is_symlink);
+
+        let notes = find(&entries, "notes.txt");
+        assert!(!notes.is_dir && !notes.is_symlink);
+        assert_eq!(notes.size, body.len() as u64);
+    }
+
     /// A listing has to describe four things the panel draws differently, and
     /// the two link cases are the ones worth pinning: a link to a directory is
     /// enterable, and a link to nothing at all must not be — while both keep the
     /// badge that says they are links.
+    ///
+    /// Unix only, and not because the code under it is: creating a symbolic
+    /// link on Windows requires developer mode or an elevated process, so a
+    /// test that made one would fail on the setup rather than on the behaviour
+    /// it is about.
+    #[cfg(unix)]
     #[gpui::test]
     async fn a_listing_separates_directories_files_and_both_kinds_of_link(
         executor: BackgroundExecutor,
@@ -670,5 +759,22 @@ mod tests {
     #[gpui::test]
     async fn a_local_source_says_it_is_local(executor: BackgroundExecutor) {
         assert!(LocalSource::new(executor).is_local());
+    }
+
+    /// The spelling the panel is handed, over the three shapes Windows produces:
+    /// an ordinary path, the verbatim form `canonicalize` answers `realpath`
+    /// with, and the verbatim form of a network share — whose leading
+    /// separators are part of the name and must survive.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_path_reaches_the_panel_with_no_prefix_and_forward_slashes() {
+        assert_eq!(normalise(r"C:\Users\ada"), "C:/Users/ada");
+        assert_eq!(normalise(r"\\?\C:\Users\ada"), "C:/Users/ada");
+        assert_eq!(normalise(r"\\?\UNC\build\share\logs"), "//build/share/logs");
+        // A drive root keeps its separator: `C:` alone names that drive's own
+        // current directory, which is a different place.
+        assert_eq!(normalise(r"\\?\C:\"), "C:/");
+        // Already in the panel's spelling, and so left alone.
+        assert_eq!(normalise("C:/Users/ada"), "C:/Users/ada");
     }
 }

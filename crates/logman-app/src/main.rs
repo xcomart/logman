@@ -604,17 +604,20 @@ impl Workspace {
     /// takes nothing because unix has one local shell to start. Here there are
     /// several, so the caller — a button on the welcome screen — says which:
     /// `label` names it for the tab strip, `command` is the command line that
-    /// starts it.
+    /// starts it, and `browses_this_machine` says whether the shell it starts
+    /// stands on this machine's own filesystem or on a WSL distribution's.
     #[cfg(windows)]
     fn open_local_command(
         &mut self,
         label: SharedString,
         command: Vec<String>,
+        browses_this_machine: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         log::info!("opening a local session running {}", command.join(" "));
-        let session = cx.new(|cx| Session::new_local_command(label, command, cx));
+        let session =
+            cx.new(|cx| Session::new_local_command(label, command, browses_this_machine, cx));
         self.adopt_session(session, window, cx);
     }
 
@@ -2295,9 +2298,15 @@ impl Workspace {
         {
             let this = cx.entity();
             let local = ts!("connection.local.name");
-            // Every button is the same button but for its four parts, so it is
-            // built once here rather than three times below.
-            let row = |id: ElementId, text: String, label: SharedString, command: Vec<String>| {
+            // Every button is the same button but for its five parts, so it is
+            // built once here rather than three times below. The last of them —
+            // whether the shell stands on this machine's filesystem — is what
+            // decides whether the session opens a file panel at all.
+            let row = |id: ElementId,
+                       text: String,
+                       label: SharedString,
+                       command: Vec<String>,
+                       browses_this_machine: bool| {
                 let this = this.clone();
                 Button::new(id, text)
                     .variant(ButtonVariant::Secondary)
@@ -2305,7 +2314,13 @@ impl Workspace {
                     .on_click(move |_, window, cx| {
                         let (label, command) = (label.clone(), command.clone());
                         this.update(cx, |workspace, cx| {
-                            workspace.open_local_command(label, command, window, cx)
+                            workspace.open_local_command(
+                                label,
+                                command,
+                                browses_this_machine,
+                                window,
+                                cx,
+                            )
                         });
                     })
                     .into_any_element()
@@ -2320,18 +2335,23 @@ impl Workspace {
                     format!("{local}  ·  PowerShell"),
                     "PowerShell".into(),
                     vec!["powershell.exe".to_owned(), "-NoLogo".to_owned()],
+                    true,
                 ),
                 row(
                     "empty-local-cmd".into(),
                     format!("{local}  ·  cmd"),
                     "cmd".into(),
                     vec!["cmd.exe".to_owned()],
+                    true,
                 ),
             ];
 
             // Labelled `WSL · <distro>` rather than as another local terminal:
             // the shell these open is a Linux one on its own filesystem, which
-            // is a different place to be than the two above.
+            // is a different place to be than the two above — and the same
+            // difference is what the `false` below carries into the session, so
+            // that the file panel does not offer to browse this machine's disk
+            // on behalf of a shell that is not standing on it.
             rows.extend(self.wsl_distros.iter().enumerate().map(|(index, distro)| {
                 row(
                     ("empty-local-wsl", index).into(),
@@ -2348,6 +2368,7 @@ impl Workspace {
                         "--cd".to_owned(),
                         "~".to_owned(),
                     ],
+                    false,
                 )
             }));
 

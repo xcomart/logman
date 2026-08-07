@@ -123,8 +123,9 @@ const CRUMB_CHAR: f32 = 6.4;
 /// budget too small for the root and a leaf to survive it.
 const MIN_PATH_CHARS: usize = 12;
 
-/// Label of the piece standing for the filesystem root. Punctuation, never
-/// translated — and the one label that carries its own separator.
+/// Label of the piece standing for the root of a POSIX filesystem. Punctuation,
+/// never translated — and, with the `C:/` a drive root spells itself, one of the
+/// two labels that carry their own separator.
 const ROOT_CRUMB: &str = "/";
 
 /// Label of the piece standing for everything the header could not fit.
@@ -429,8 +430,9 @@ struct CrumbTarget {
 
 /// One directory on the way to the listed one, as the header draws it.
 struct Crumb {
-    /// Text drawn for the piece: a directory name, `/` for the root, or an
-    /// ellipsis for the pieces the header had no room for.
+    /// Text drawn for the piece: a directory name, a root — `/`, or `C:/` on a
+    /// drive of this machine — or an ellipsis for the pieces the header had no
+    /// room for.
     label: SharedString,
     /// What a press on the piece offers.
     menu: CrumbMenu,
@@ -458,9 +460,12 @@ impl Crumb {
     /// which stands for several directories rather than for one.
     fn path(&self) -> Option<String> {
         match &self.menu {
-            // The root is its own parent, so its path *is* the directory it
-            // lists; every other piece hangs off the one it lists.
-            CrumbMenu::Siblings(directory) if self.label.as_ref() == ROOT_CRUMB => {
+            // A root is its own parent, so its path *is* the directory it
+            // lists; every other piece hangs off the one it lists. Recognised
+            // by its trailing separator rather than by comparing against `/`,
+            // which is the same test `needs_separator` makes and the one that
+            // also covers a drive root such as `C:/`.
+            CrumbMenu::Siblings(directory) if !needs_separator(&self.label) => {
                 Some(directory.clone())
             }
             CrumbMenu::Siblings(directory) => Some(join(directory, &self.label)),
@@ -2471,7 +2476,7 @@ impl FilePanel {
         let path = state.path.as_deref().unwrap_or_default();
         let mut rows: Vec<AnyElement> = Vec::with_capacity(state.entries.len() + 1);
 
-        if path != "/" && !path.is_empty() {
+        if !is_root(path) && !path.is_empty() {
             rows.push(self.render_row(
                 ElementId::from("file-row-parent"),
                 PARENT_NAME,
@@ -3672,23 +3677,71 @@ fn fold_budget(width: f32) -> usize {
     chars.max(MIN_PATH_CHARS)
 }
 
+/// The `C:` at the head of `path`, when it has one.
+///
+/// A session running a shell on Windows browses paths whose root is a drive
+/// rather than a bare slash, and the header has to know: splitting `C:/Users/ada`
+/// on `/` alone would make `C:` an ordinary piece hanging off `/`, and pressing
+/// it would navigate to `/C:`, which names nothing on any filesystem.
+///
+/// Decided from the shape of the path rather than from `cfg!(windows)`, because
+/// the panel holds paths of both kinds at once — the tab beside a local one may
+/// be an SSH session, and *those* paths are POSIX and absolute whatever the
+/// server runs on. That is also why the two can never be confused: a POSIX
+/// absolute path begins with `/`, which is not a letter, so nothing an SFTP
+/// source produces can be read as a drive.
+fn drive_prefix(path: &str) -> Option<&str> {
+    let mut chars = path.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() || chars.next()? != ':' {
+        return None;
+    }
+    // `C:` or `C:/…` and nothing else: `C:logs` is relative to that drive's own
+    // current directory, which is not a shape the panel is ever handed.
+    match chars.next() {
+        None | Some('/') => Some(&path[..2]),
+        Some(_) => None,
+    }
+}
+
+/// Whether `path` is a filesystem root, and so has no parent to walk up to.
+///
+/// Two spellings of one idea, for the same reason [`drive_prefix`] exists: `/`
+/// on a POSIX source, `C:/` on a drive of this machine.
+fn is_root(path: &str) -> bool {
+    match drive_prefix(path) {
+        Some(drive) => &path[drive.len()..] == ROOT_CRUMB,
+        None => path == ROOT_CRUMB,
+    }
+}
+
 /// Breaks `path` into the pieces the header draws.
 ///
 /// `/srv/app/logs` becomes `/`, `srv`, `app`, `logs`, each carrying the
 /// directory whose subdirectories could take its place. What does not fit in
 /// `budget` is folded away by [`fold`].
 ///
-/// Remote paths are POSIX and absolute whatever the server runs on, so this
-/// splits on `/` and nothing else; anything relative — which the panel never
-/// produces — is read as if it hung off the root.
+/// Paths are absolute and separated by `/` — remote ones because SFTP is POSIX
+/// on the wire whatever the server runs on, local ones because the local source
+/// spells them that way on the way out — so this splits on `/` and nothing else;
+/// anything relative, which the panel never produces, is read as if it hung off
+/// the root.
+///
+/// The root the pieces hang off is not always `/`, which is the one thing this
+/// does not take on faith: see [`drive_prefix`].
 fn crumbs(path: &str, budget: usize) -> Vec<Crumb> {
+    let (root, rest) = match drive_prefix(path) {
+        Some(drive) => (format!("{drive}/"), &path[drive.len()..]),
+        None => (ROOT_CRUMB.to_owned(), path),
+    };
+
     let mut crumbs = vec![Crumb {
-        label: SharedString::new_static(ROOT_CRUMB),
-        menu: CrumbMenu::Siblings(ROOT_CRUMB.to_owned()),
+        label: SharedString::from(root.clone()),
+        menu: CrumbMenu::Siblings(root.clone()),
     }];
 
-    let mut directory = ROOT_CRUMB.to_owned();
-    for name in path.split('/').filter(|name| !name.is_empty()) {
+    let mut directory = root;
+    for name in rest.split('/').filter(|name| !name.is_empty()) {
         crumbs.push(Crumb {
             label: SharedString::from(name.to_owned()),
             menu: CrumbMenu::Siblings(directory.clone()),
@@ -3704,8 +3757,9 @@ fn crumbs(path: &str, budget: usize) -> Vec<Crumb> {
 /// The tail is what a header is for: `/srv/app/releases/2026-07-30/logs` says
 /// where you are and `/srv/app/releases/2026-07…` does not, so the pieces are
 /// kept from the *back* — the leaf always, then as many of its ancestors as
-/// fit. The root survives whatever the budget, at one character; it is the one
-/// destination reachable from nowhere else in the row.
+/// fit. The root survives whatever the budget, at the one or three characters it
+/// spells itself with; it is the one destination reachable from nowhere else in
+/// the row.
 ///
 /// The folded pieces are not lost: they become the rows of the ellipsis's own
 /// dropdown, which is the only reason a piece may be dropped at all.
@@ -3714,10 +3768,13 @@ fn fold(crumbs: Vec<Crumb>, budget: usize) -> Vec<Crumb> {
         return crumbs;
     }
 
-    // The root and the ellipsis are one character each, and every kept piece
-    // costs its own text plus the separator drawn in front of it — the same
-    // arithmetic `crumb_width` does, over the row this is about to build.
-    let mut spent = ROOT_CRUMB.chars().count() + FOLD_CRUMB.chars().count();
+    // The root — whose own width is `/` or `C:/`, so it is read off the row
+    // rather than assumed — and the ellipsis, then every kept piece at its own
+    // text plus the separator drawn in front of it: the same arithmetic
+    // `crumb_width` does, over the row this is about to build. Neither of the
+    // first two is preceded by a separator, because a root label ends in one.
+    let root_width = crumbs.first().map_or(0, |root| root.label.chars().count());
+    let mut spent = root_width + FOLD_CRUMB.chars().count();
     let mut kept = 0;
     for crumb in crumbs.iter().skip(1).rev() {
         let cost = crumb.label.chars().count() + CRUMB_SEPARATOR.chars().count();
@@ -3787,8 +3844,8 @@ fn crumb_width(crumbs: &[Crumb]) -> usize {
 
 /// Whether a piece drawn after `label` needs a separator of its own.
 ///
-/// Only the root does not ask for one: its label *is* a slash, and a second one
-/// after it would read as `//`.
+/// Only a root does not ask for one: its label already ends in a slash — `/`
+/// itself, or `C:/` on a drive — and a second one after it would read as `//`.
 fn needs_separator(label: &str) -> bool {
     !label.ends_with('/')
 }
@@ -3993,6 +4050,79 @@ mod tests {
         // Pressing a row of the leaf's menu must land beside the leaf, not
         // inside it.
         assert_eq!(crumbs[3].path().as_deref(), Some("/srv/app/logs"));
+    }
+
+    /// A local Windows session hands the panel `C:/Users/ada`, whose root is the
+    /// drive. Reading `C:` as an ordinary piece would hang it off `/` and send
+    /// every press on it to `/C:`, which names nothing.
+    #[test]
+    fn a_drive_path_roots_itself_at_the_drive() {
+        let crumbs = crumbs("C:/Users/ada", budget());
+        assert_eq!(labels(&crumbs), ["C:/", "Users", "ada"]);
+
+        let parents: Vec<Option<&str>> = crumbs.iter().map(sibling_of).collect();
+        assert_eq!(parents, [Some("C:/"), Some("C:/"), Some("C:/Users")]);
+
+        // Every piece has to be a path the source can be asked for, which the
+        // drive root is only if it kept its separator.
+        assert_eq!(crumbs[0].path().as_deref(), Some("C:/"));
+        assert_eq!(crumbs[1].path().as_deref(), Some("C:/Users"));
+        assert_eq!(crumbs[2].path().as_deref(), Some("C:/Users/ada"));
+
+        // The drive alone is a whole row, and the one with no parent above it.
+        let alone = super::crumbs("C:/", budget());
+        assert_eq!(labels(&alone), ["C:/"]);
+        assert_eq!(alone[0].path().as_deref(), Some("C:/"));
+        assert!(is_root("C:/") && is_root("/"));
+        assert!(!is_root("C:/Users") && !is_root("/srv"));
+    }
+
+    /// A drive root is two characters wider than `/`, so the fold has to spend
+    /// them: a row folded as if the root cost one would come back over budget.
+    #[test]
+    fn a_long_drive_path_folds_around_the_drive() {
+        let path = "C:/Users/ada/AppData/Local/Programs/logman/releases/today";
+        let crumbs = crumbs(path, budget());
+
+        assert_eq!(labels(&crumbs).first(), Some(&"C:/"));
+        assert_eq!(labels(&crumbs).get(1), Some(&"\u{2026}"));
+        assert_eq!(labels(&crumbs).last(), Some(&"today"));
+        assert!(
+            crumb_width(&crumbs) <= budget(),
+            "the folded row is still {} characters wide",
+            crumb_width(&crumbs)
+        );
+
+        // The folded pieces stay reachable, and by paths that start at the
+        // drive rather than at a root the machine does not have.
+        let CrumbMenu::Folded(folded) = &crumbs[1].menu else {
+            panic!("the second piece must carry the folded ancestors");
+        };
+        assert_eq!(
+            folded.first().map(|target| target.path.as_str()),
+            Some("C:/Users")
+        );
+        assert!(
+            folded.iter().all(|target| target.path.starts_with("C:/")),
+            "a folded piece left the drive"
+        );
+    }
+
+    /// The drive test is a *shape* test, not a platform one, so the shapes that
+    /// only look like drives have to stay ordinary pieces — a POSIX path can
+    /// hold a `:` anywhere, including in its first name.
+    #[test]
+    fn only_an_absolute_drive_is_read_as_one() {
+        assert_eq!(drive_prefix("C:/Users"), Some("C:"));
+        assert_eq!(drive_prefix("c:"), Some("c:"));
+        // Relative to that drive's own current directory, which the panel never
+        // holds — and would be a path this header could not walk.
+        assert_eq!(drive_prefix("C:logs"), None);
+        // POSIX paths, one of which begins with a name containing a colon.
+        assert_eq!(drive_prefix("/srv/app"), None);
+        assert_eq!(drive_prefix("/C:/app"), None);
+        assert_eq!(drive_prefix("1:/app"), None);
+        assert_eq!(drive_prefix(""), None);
     }
 
     /// The budget follows the panel's edge: dragging it wider must never fold

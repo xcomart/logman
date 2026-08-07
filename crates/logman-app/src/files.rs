@@ -19,8 +19,9 @@
 //! implementation of its side: there is no service behind it to delegate to, so
 //! it is where "what does listing a directory on this computer mean?" is
 //! actually answered, and it answers it to match the SFTP shim call for call,
-//! because the panel above branches on neither. It is compiled on unix alone,
-//! for the reason given at its declaration below.
+//! because the panel above branches on neither — including the spelling of the
+//! paths it hands back, which it brings to the POSIX shape the panel does its
+//! arithmetic in whatever the local platform writes.
 //!
 //! Three shapes of this interface are worth explaining, because each of them is
 //! a decision rather than an accident:
@@ -51,14 +52,11 @@ use std::path::PathBuf;
 use futures::channel::mpsc::UnboundedSender;
 use logman_ssh::{SftpClient, SftpError};
 
-// Unix only, and gated here rather than inside itself: nothing in it is
-// platform specific, but a build with no pty has no local session to hand one
-// to, and an unreachable implementation is dead code the moment `-D warnings`
-// looks at it. The day a Windows shell arrives, this line is what moves.
-#[cfg(unix)]
+// Compiled everywhere logman is. It was unix only for as long as unix was the
+// only platform with a local shell to hand it to; now that Windows starts one
+// too, both have a session that browses this machine.
 mod local;
 
-#[cfg(unix)]
 pub use local::LocalSource;
 
 /// One entry of a directory listing the panel shows.
