@@ -108,20 +108,23 @@ pub const WINDOW_RESTORE: &str = "icons/window-restore.svg";
 /// The custom title bar's close button.
 pub const WINDOW_CLOSE: &str = "icons/window-close.svg";
 
-/// The application mark, drawn at the left end of the custom title bar.
+/// The application icon, drawn at the left end of the custom title bar.
 ///
-/// Deliberately *not* the shipped application icon: `assets/icon.svg` and the
-/// `.png`/`.ico`/`.icns` files rasterised from it draw the mark on a dark tile,
-/// which is what makes it stand out among the icons of a desktop and what made
-/// it vanish here — over dark chrome the tile and the title bar were the same
-/// colour, and only the chevron came through. This one is the tile's contents
-/// alone, and being an SVG it is tinted from the theme like every other icon in
-/// the row, so it holds its contrast in a light and a dark theme both.
-pub const LOGO: &str = "icons/logo.svg";
+/// The shipped icon itself, in its own colours — a raster, unlike everything
+/// else in this set, because those colours are the point: the title bar used
+/// to draw a monochrome sprite of the mark instead, from the days when the
+/// icon's tile was a flat dark plate that a dark theme's chrome swallowed
+/// whole. The current icon wears an embossed ring that keeps the tile's edge
+/// legible on dark and light chrome alike, so the bar can show the same face
+/// the taskbar does. Rendered at 64 px — four times the 16 px it is drawn at,
+/// so it stays sharp on any display scale — by
+/// `assets/render.py assets/icon.svg --sizes 64 --outdir crates/logman-app/assets/icons`;
+/// regenerate it whenever the master SVG changes.
+pub const APP_ICON: &str = "icons/icon-64.png";
 
 /// Every icon, paired with the bytes [`Icons`] hands back for it.
 const ICONS: [(&str, &[u8]); 18] = [
-    (LOGO, include_bytes!("../assets/icons/logo.svg")),
+    (APP_ICON, include_bytes!("../assets/icons/icon-64.png")),
     (FOLDER, include_bytes!("../assets/icons/folder.svg")),
     (FILE, include_bytes!("../assets/icons/file.svg")),
     (SYMLINK, include_bytes!("../assets/icons/symlink.svg")),
@@ -194,12 +197,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_icon_loads_and_is_an_svg() {
+    fn every_icon_loads_and_matches_its_extension() {
         for (name, _) in ICONS {
             let bytes = Icons
                 .load(name)
                 .expect("loading an embedded icon cannot fail")
                 .unwrap_or_else(|| panic!("{name} is missing from the asset source"));
+            // The one raster in the set: the title bar's application icon,
+            // which is shipped in its own colours rather than tinted.
+            if name.ends_with(".png") {
+                assert!(bytes.starts_with(b"\x89PNG"), "{name} is not a PNG");
+                continue;
+            }
             let text = std::str::from_utf8(&bytes).expect("an icon must be UTF-8");
             assert!(text.contains("<svg"), "{name} is not an SVG");
             assert!(
