@@ -60,7 +60,7 @@ or claims the app is damaged. The app is fine; the quarantine flag is the
 whole problem. After moving `logman.app` into `/Applications`, clear it:
 
 ```bash
-xattr -d com.apple.quarantine /Applications/logman.app
+xattr -r -d com.apple.quarantine /Applications/logman.app
 ```
 
 The next launch — and every one after it — opens normally. If running

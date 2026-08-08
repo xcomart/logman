@@ -431,7 +431,7 @@ fn stage(
 /// CI-built archive — but Gatekeeper's rules have tightened release by release,
 /// and the one unacceptable outcome here is an update that leaves the user with
 /// an app macOS refuses to reopen. So the flag is cleared unconditionally: this
-/// is the same `xattr -d com.apple.quarantine` the README walks a first-time
+/// is the same `xattr -r -d com.apple.quarantine` the README walks a first-time
 /// installer through, recursive because the flag lands on every file inside a
 /// quarantined bundle, and best-effort because the attribute is usually not
 /// there at all — a failure costs a debug line, never the update.
