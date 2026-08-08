@@ -56,6 +56,7 @@ use gpui::{
 };
 
 use crate::editor::EditorPalette;
+use crate::editor::syntax::TokenKind;
 use crate::editor::view::EditorView;
 
 /// Space between the line numbers and the text.
@@ -214,7 +215,7 @@ impl Element for EditorElement {
                 below.push(fill(row, palette.line_highlight));
             }
 
-            let runs = runs_for(editor, &text, start, &palette, &font);
+            let runs = runs_for(editor, line, &text, start, &palette, &font);
             let shaped = window.text_system().shape_line(
                 SharedString::from(text.clone()),
                 font_size,
@@ -409,21 +410,17 @@ fn plain_run(len: usize, color: Hsla, font: &Font) -> TextRun {
     }
 }
 
-/// The coloured runs of one line: the whole of it in the foreground colour,
-/// with the composing underline laid over it.
+/// The coloured runs of one line: the lexer's tokens, with the composing
+/// underline laid over them.
 ///
-/// **This is the seam.** A buffer here is plain text, so one run tiles the line
-/// and the only work left is splitting whatever run the IME's composition
-/// overlaps. Highlighting a `.conf` or a `.yml` means producing several runs
-/// from `text` instead of one — the splitting below already copes with any
-/// number of them, because it was written against a lexer that produced many —
-/// and nothing outside this function needs to know that it happened. What such
-/// a lexer would need beyond `text` is the state the previous line ended in,
-/// and that is the one thing this signature does not carry: a cache of per-line
-/// end states, kept in step by the editor's `splice`, is what it would have to
-/// gain.
+/// The virtualisation holds through here. Only the visible lines are lexed —
+/// [`Highlighter::tokens`](crate::editor::highlight::Highlighter::tokens) works
+/// from the cached state of the line *before*, so reaching row fifty thousand
+/// is a lookup and not fifty thousand lines of scanning — and only the visible
+/// lines are shaped.
 fn runs_for(
     editor: &EditorView,
+    line: usize,
     text: &str,
     start: usize,
     palette: &EditorPalette,
@@ -432,7 +429,24 @@ fn runs_for(
     if text.is_empty() {
         return Vec::new();
     }
-    let runs = vec![plain_run(text.len(), palette.foreground, font)];
+    let mut runs: Vec<TextRun> = editor
+        .highlighter()
+        .tokens(editor.buffer(), line)
+        .into_iter()
+        .map(|token| {
+            plain_run(
+                token.end - token.start,
+                color_for(token.kind, palette),
+                font,
+            )
+        })
+        .collect();
+    // A line the lexer produced no tokens for cannot happen -- the tokens tile
+    // the line, and the empty case returned above -- but a defensive fallback
+    // costs one branch and saves a mis-shaped line if that guarantee ever moves.
+    if runs.iter().map(|run| run.len).sum::<usize>() != text.len() {
+        runs = vec![plain_run(text.len(), palette.foreground, font)];
+    }
 
     let Some(marked) = editor.marked() else {
         return runs;
@@ -444,7 +458,7 @@ fn runs_for(
 
     // Split the runs at the composition's edges and underline what is between
     // them. The underline is the only signal that a syllable is still being
-    // composed, and it has to survive whatever color the run already carries.
+    // composed, and it has to survive whatever color the lexer gave the run.
     let from = marked.start.max(start) - start;
     let to = marked.end.min(end) - start;
     let mut split = Vec::with_capacity(runs.len() + 2);
@@ -473,6 +487,24 @@ fn runs_for(
         at = run_end;
     }
     split
+}
+
+/// The palette slot a token kind draws in.
+///
+/// `Literal` shares the number's slot: `true` and `null` are constants in every
+/// format here, exactly as `1` is, and giving them a colour of their own would
+/// claim a distinction none of these formats makes. See
+/// [`palette_for`](crate::editor::palette_for) for the rest of the mapping.
+const fn color_for(kind: TokenKind, palette: &EditorPalette) -> Hsla {
+    match kind {
+        TokenKind::Plain => palette.foreground,
+        TokenKind::Comment => palette.comment,
+        TokenKind::String => palette.string,
+        TokenKind::Number | TokenKind::Literal => palette.number,
+        TokenKind::Keyword => palette.keyword,
+        TokenKind::Key => palette.key,
+        TokenKind::Variable => palette.variable,
+    }
 }
 
 /// How many decimal digits `n` needs, at least two.

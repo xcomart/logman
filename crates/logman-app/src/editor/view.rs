@@ -69,7 +69,9 @@ use logman_term::TerminalTheme;
 use crate::editor::buffer::Buffer;
 use crate::editor::element::EditorElement;
 use crate::editor::find::FindState;
+use crate::editor::highlight::Highlighter;
 use crate::editor::history::{Edit, EditKind, History, SelectionState};
+use crate::editor::syntax::Language;
 use crate::editor::{EditorPalette, palette_for};
 use crate::i18n::ts;
 use crate::terminal_view::{DEFAULT_FONT_SIZE, LINE_HEIGHT_RATIO, terminal_font};
@@ -189,14 +191,6 @@ pub const FIND_KEY_CONTEXT: &str = "EditorFind";
 /// on is one less thing for those tools to disagree about.
 const INDENT: &str = "    ";
 
-/// What the comment toggle puts at the head of a line.
-///
-/// `#` because that is what the file formats reachable from the file panel use
-/// — shell scripts, `.conf`, `.ini`, YAML, `crontab`, `sshd_config` — and the
-/// editor has no way of knowing which of them it is looking at. A per-format
-/// prefix belongs with a per-format lexer, and neither exists yet.
-const LINE_COMMENT: &str = "#";
-
 /// What the editor tells its host about.
 ///
 /// Everything here is a notification rather than a request: the editor holds no
@@ -291,6 +285,16 @@ impl Layout {
 pub struct EditorView {
     focus_handle: FocusHandle,
     buffer: Buffer,
+    /// One [`crate::editor::syntax::LineState`] per line, and the language they
+    /// were lexed under.
+    ///
+    /// Kept beside the buffer rather than inside it because a buffer is a
+    /// document and this is an opinion about one: the same bytes are a shell
+    /// script or a log depending on what the host called
+    /// [`EditorView::set_language`] with. Every mutation of `buffer` goes
+    /// through [`EditorView::splice`], which is the one place the two are kept
+    /// in step.
+    highlighter: Highlighter,
     history: History,
     /// The selected byte range, `start <= end`. A caret is an empty one.
     selected_range: Range<usize>,
@@ -423,11 +427,14 @@ pub fn init(cx: &mut App) {
 }
 
 impl EditorView {
-    /// An empty editor.
+    /// An empty editor over plain text.
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let buffer = Buffer::new("");
+        let highlighter = Highlighter::new(&buffer, Language::Plain);
         Self {
             focus_handle: cx.focus_handle(),
-            buffer: Buffer::new(""),
+            buffer,
+            highlighter,
             history: History::new(),
             selected_range: 0..0,
             selection_reversed: false,
@@ -492,6 +499,28 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Colours the text surface as `language` from the next frame on.
+    ///
+    /// A no-op when the language has not moved, on the same terms as
+    /// [`EditorView::set_palette`] and [`EditorView::set_font`]: the host is
+    /// free to push the answer in on every frame, and an unchanged one costs
+    /// nothing. A changed one re-lexes the whole buffer, which is right —
+    /// nothing about the old cache survives a change to what a `#` means — and
+    /// affordable, because it happens when a file is opened and not while
+    /// anyone is typing.
+    pub fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
+        if self.highlighter.language() == language {
+            return;
+        }
+        self.highlighter.set_language(language, &self.buffer);
+        cx.notify();
+    }
+
+    /// The language the buffer is being coloured as.
+    pub fn language(&self) -> Language {
+        self.highlighter.language()
+    }
+
     /// Draws the text surface in `palette` from the next frame on.
     ///
     /// Cheap to call every frame, which is how the host keeps up with a colour
@@ -532,6 +561,7 @@ impl EditorView {
     /// cross it, and the editor is clean afterwards.
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.buffer = Buffer::new(text);
+        self.highlighter.reset(&self.buffer);
         self.history.clear();
         self.selected_range = 0..0;
         self.selection_reversed = false;
@@ -654,14 +684,19 @@ impl EditorView {
         cx.notify();
     }
 
-    /// Applies a replacement to the buffer and nothing else: no history, no
-    /// selection, no notification.
+    /// Applies a replacement to the buffer and the syntax cache, and nothing
+    /// else: no history, no selection, no notification.
     ///
-    /// The one place the buffer is mutated. Everything above it is arranged so
-    /// that this is called with a range that is already clamped and already on
-    /// character boundaries.
+    /// The one place the buffer is mutated, which is why it is also the one
+    /// place the cache is brought back into step. Everything above it is
+    /// arranged so that this is called with a range that is already clamped and
+    /// already on character boundaries.
     fn splice(&mut self, range: Range<usize>, text: &str) {
+        let first = self.buffer.line_of(range.start);
+        let removed = self.buffer.line_of(range.end) - first;
+        let added = text.bytes().filter(|byte| *byte == b'\n').count();
         self.buffer.replace(range, text);
+        self.highlighter.edited(&self.buffer, first, removed, added);
         self.dirty = true;
     }
 
@@ -1112,6 +1147,12 @@ impl EditorView {
     }
 
     fn toggle_comment(&mut self, _: &ToggleComment, _: &mut Window, cx: &mut Context<Self>) {
+        // A format with no comment syntax has no toggle. JSON is the only one,
+        // and writing a `#` into a `.json` would produce a file its own reader
+        // rejects; the context menu greys the row for the same reason.
+        let Some(prefix) = self.highlighter.language().line_comment() else {
+            return;
+        };
         let (first, last) = line_span(&self.buffer, &self.selected_range);
 
         let lines: Vec<(usize, String)> = (first..=last)
@@ -1126,7 +1167,7 @@ impl EditorView {
         // press comments the block, which is what a mixed selection means.
         let all_commented = lines
             .iter()
-            .all(|(_, text)| text.trim_start().starts_with(LINE_COMMENT));
+            .all(|(_, text)| text.trim_start().starts_with(prefix));
         let column = lines
             .iter()
             .map(|(_, text)| text.len() - text.trim_start().len())
@@ -1138,7 +1179,7 @@ impl EditorView {
             let start = self.buffer.line_start(*line);
             if all_commented {
                 let indent = text.len() - text.trim_start().len();
-                let mut width = LINE_COMMENT.len();
+                let mut width = prefix.len();
                 // Take the space back too, if this is a comment we wrote.
                 if text[indent + width..].starts_with(' ') {
                     width += 1;
@@ -1152,7 +1193,7 @@ impl EditorView {
                 edits.push(Edit {
                     start: start + column,
                     removed: String::new(),
-                    inserted: format!("{LINE_COMMENT} "),
+                    inserted: format!("{prefix} "),
                 });
             }
         }
@@ -1635,6 +1676,11 @@ impl EditorView {
     /// The buffer, for the renderer.
     pub(crate) const fn buffer(&self) -> &Buffer {
         &self.buffer
+    }
+
+    /// The syntax cache, for the renderer.
+    pub(crate) const fn highlighter(&self) -> &Highlighter {
+        &self.highlighter
     }
 
     /// The composing run, in bytes, for the underline the renderer draws.

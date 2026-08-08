@@ -16,11 +16,19 @@
 //! * **Only the visible lines are shaped.** The element works out the row range
 //!   from the scroll offset and shapes those and no others. [`mod@element`].
 //!
-//! Nothing here parses what it is showing. The buffer is plain text — a log, a
-//! config file, whatever the file panel opened — and every line is drawn in one
-//! colour. Syntax highlighting, if it is ever wanted, goes in at the one place
-//! marked for it in [`mod@element`] — `runs_for`, where a line is turned into
-//! the runs that shape it.
+//! * **Highlighting costs one line.** [`mod@syntax`] lexes a line at a time
+//!   from the state the line before it ended in, and [`mod@highlight`] caches
+//!   that one state per line. An edit re-lexes from the edited line until the
+//!   states stop moving, which for an ordinary keystroke is the edited line
+//!   alone; reaching the visible window from the top of a hundred-thousand-line
+//!   file is a table lookup rather than a hundred thousand lines of work.
+//!
+//! What the lexers do is deliberately shallow — six hand-written scanners for
+//! the formats a file panel over a server actually reaches, and no parser
+//! behind any of them. [`syntax::Language::detect`] picks one from the file's
+//! name, and a file it does not recognise is drawn exactly as everything was
+//! drawn before there were lexers at all: one run a line, in the foreground
+//! colour.
 //!
 //! # Using it
 //!
@@ -60,7 +68,9 @@
 pub mod buffer;
 pub mod element;
 pub mod find;
+pub mod highlight;
 pub mod history;
+pub mod syntax;
 pub mod view;
 
 // The names a host mounting the editor writes, gathered so that it writes
@@ -72,7 +82,9 @@ pub use self::{
     buffer::Buffer,
     element::EditorElement,
     find::{FindState, find_all},
+    highlight::Highlighter,
     history::{Edit, EditKind, History, SelectionState, Transaction},
+    syntax::{Language, LineState, Token, TokenKind},
     view::{EditorEvent, EditorView, init},
 };
 
@@ -83,21 +95,24 @@ use crate::terminal_view::to_hsla;
 
 /// The colours the text surface is drawn in.
 ///
-/// Nine slots, all of them derived from the *terminal* colour scheme rather than
-/// from the application [`Theme`](crate::ui::Theme): an editor pane sits beside
-/// a terminal pane showing the same host, and the two surfaces reading as one
-/// material is what stops the split looking like two applications glued
+/// Fifteen slots, all of them derived from the *terminal* colour scheme rather
+/// than from the application [`Theme`](crate::ui::Theme): an editor pane sits
+/// beside a terminal pane showing the same host, and the two surfaces reading
+/// as one material is what stops the split looking like two applications glued
 /// together. It also means a user who picked Solarized for their shell gets
 /// Solarized for the file they open out of it, without having chosen twice.
 ///
-/// A syntax palette — one slot per token kind — is what a *code* editor needs
-/// and is exactly what this avoids needing, because nothing here decides that
-/// one run of bytes means more than another.
+/// The six syntax slots follow the same rule and are the reason it matters
+/// most: a scheme's ANSI sixteen are what its author chose to have `ls` and
+/// `git diff` and a shell prompt drawn in, so taking a string's green from
+/// there is taking it from the person who already decided what green means on
+/// this screen. Inventing a syntax palette instead would put two colour systems
+/// side by side in one window.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EditorPalette {
     /// Behind everything. Opaque, unlike most of the app's surfaces.
     pub background: Hsla,
-    /// The text.
+    /// The text, and every token the lexers had no opinion about.
     pub foreground: Hsla,
     /// The caret.
     pub cursor: Hsla,
@@ -113,6 +128,18 @@ pub struct EditorPalette {
     pub find_match: Hsla,
     /// Behind the match the find bar is currently on.
     pub find_current: Hsla,
+    /// A comment.
+    pub comment: Hsla,
+    /// Quoted text, including its quotes.
+    pub string: Hsla,
+    /// A number, and the literals that stand beside one — `true`, `null`.
+    pub number: Hsla,
+    /// A word the format reserves.
+    pub keyword: Hsla,
+    /// The left-hand side of a mapping, and a section header.
+    pub key: Hsla,
+    /// An expansion: `$HOME`, `${x}`, a YAML anchor.
+    pub variable: Hsla,
 }
 
 /// How far the caret's line is lifted off the background, as a mix of the
@@ -135,10 +162,38 @@ const FIND_MATCH_MIX: f32 = 0.35;
 /// See [`FIND_MATCH_MIX`].
 const FIND_CURRENT_MIX: f32 = 0.7;
 
+/// Index of normal green in the sixteen-slot ANSI palette.
+const ANSI_GREEN: usize = 2;
 /// Index of normal yellow in the sixteen-slot ANSI palette.
 const ANSI_YELLOW: usize = 3;
+/// Index of normal blue in the sixteen-slot ANSI palette.
+const ANSI_BLUE: usize = 4;
+/// Index of normal magenta in the sixteen-slot ANSI palette.
+const ANSI_MAGENTA: usize = 5;
+/// Index of normal cyan in the sixteen-slot ANSI palette.
+const ANSI_CYAN: usize = 6;
+/// Index of bright black in the sixteen-slot ANSI palette.
+const ANSI_BRIGHT_BLACK: usize = 8;
 /// Index of bright yellow in the sixteen-slot ANSI palette.
 const ANSI_BRIGHT_YELLOW: usize = 11;
+
+/// The least contrast ratio a syntax colour may stand at against the page it is
+/// drawn on.
+///
+/// Well under the 4.5 that WCAG asks of body text, and deliberately: an ANSI
+/// sixteen is chosen to be *distinguishable*, not to be legible as prose, and
+/// holding a scheme's own blue to 4.5 against its own background would reject
+/// half the schemes people actually use. What this number is really for is the
+/// pathological case — a scheme whose normal blue is nearly its background —
+/// where the token would otherwise vanish entirely.
+const MIN_CONTRAST: f32 = 2.2;
+
+/// The lower bar a comment is held to. A comment is *meant* to recede, so it is
+/// only lifted when it has all but disappeared.
+const MIN_COMMENT_CONTRAST: f32 = 1.6;
+
+/// How many steps [`legible`] takes from a colour towards the foreground.
+const LEGIBILITY_STEPS: u8 = 4;
 
 /// `a` with `t` of `b` mixed into it, channel by channel.
 ///
@@ -152,6 +207,53 @@ fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let t = t.clamp(0., 1.);
     let channel = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
     Rgb::new(channel(a.r, b.r), channel(a.g, b.g), channel(a.b, b.b))
+}
+
+/// The relative luminance of `colour`, as sRGB defines it.
+///
+/// The gamma-corrected form rather than a plain average, because the whole
+/// point of the number is to predict what the eye will do with the colour, and
+/// a plain average calls a saturated blue as bright as a saturated green.
+fn luminance(colour: Rgb) -> f32 {
+    let channel = |value: u8| {
+        let value = f32::from(value) / 255.;
+        if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(colour.r) + 0.7152 * channel(colour.g) + 0.0722 * channel(colour.b)
+}
+
+/// The WCAG contrast ratio between two colours, from 1 to 21.
+fn contrast(a: Rgb, b: Rgb) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    let (lighter, darker) = if a > b { (a, b) } else { (b, a) };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+/// `colour`, lifted towards `foreground` until it stands `least` off
+/// `background`.
+///
+/// The defence against a scheme whose ANSI colour for some token happens to sit
+/// on top of its own background — which is not hypothetical: several popular
+/// dark schemes put bright black within a few percent of the page. Walking
+/// towards the *foreground* rather than towards white or black is what keeps
+/// the result in the scheme's own family: a washed-out Solarized blue is still
+/// recognisably Solarized, and the last step is the foreground itself, which
+/// the scheme has already guaranteed is readable.
+fn legible(colour: Rgb, background: Rgb, foreground: Rgb, least: f32) -> Rgb {
+    (0..=LEGIBILITY_STEPS)
+        .map(|step| {
+            mix(
+                colour,
+                foreground,
+                f32::from(step) / f32::from(LEGIBILITY_STEPS),
+            )
+        })
+        .find(|candidate| contrast(*candidate, background) >= least)
+        .unwrap_or(foreground)
 }
 
 /// The editor palette for a terminal colour `scheme`.
@@ -170,9 +272,39 @@ fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
 /// is painted after the matches and is opaque, so the current match disappears
 /// under it — which is right, because [`EditorView::find_next`](view::EditorView)
 /// selects the match it moves to, and the selection is then the mark.
+///
+/// # The six syntax slots
+///
+/// Each is an ANSI colour of the scheme, put through [`legible`] so that a
+/// scheme which happens to place one on top of its own background does not lose
+/// the token entirely:
+///
+/// | slot     | ANSI            | why                                                                     |
+/// |----------|-----------------|-------------------------------------------------------------------------|
+/// | comment  | 8 bright black  | the one slot in the sixteen whose job already *is* to be quiet           |
+/// | string   | 2 green         | what every terminal scheme, and every editor theme after them, uses      |
+/// | number   | 5 magenta       | a constant; the literals `true` and `null` are constants and share it    |
+/// | keyword  | 4 blue          | the structural colour, and the one a prompt uses for a directory         |
+/// | key      | 6 cyan          | beside blue in hue and clearly apart from it, which is what a `key: value` line needs |
+/// | variable | 3 yellow        | *something is substituted here*, the same warning colour as a find match |
+///
+/// `number` and the `true`/`false`/`null` literals share one slot rather than
+/// having two: no format here treats a boolean as a different kind of thing
+/// from a number, and a palette that split them would be asking every future
+/// reader to tell two magentas apart for nothing. `variable` shares yellow with
+/// the find-match fill, which cannot be confused with it — one is a glyph
+/// colour and the other a block painted behind glyphs.
 pub fn palette_for(scheme: &TerminalTheme) -> EditorPalette {
     let background = scheme.background;
     let foreground = scheme.foreground;
+    let syntax = |index: usize| {
+        to_hsla(legible(
+            scheme.ansi[index],
+            background,
+            foreground,
+            MIN_CONTRAST,
+        ))
+    };
     EditorPalette {
         background: to_hsla(background),
         foreground: to_hsla(foreground),
@@ -187,6 +319,17 @@ pub fn palette_for(scheme: &TerminalTheme) -> EditorPalette {
             scheme.ansi[ANSI_BRIGHT_YELLOW],
             FIND_CURRENT_MIX,
         )),
+        comment: to_hsla(legible(
+            scheme.ansi[ANSI_BRIGHT_BLACK],
+            background,
+            foreground,
+            MIN_COMMENT_CONTRAST,
+        )),
+        string: syntax(ANSI_GREEN),
+        number: syntax(ANSI_MAGENTA),
+        keyword: syntax(ANSI_BLUE),
+        key: syntax(ANSI_CYAN),
+        variable: syntax(ANSI_YELLOW),
     }
 }
 

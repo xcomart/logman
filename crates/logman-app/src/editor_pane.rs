@@ -43,7 +43,7 @@ use gpui::{
 use logman_term::TerminalTheme;
 
 use crate::SHORTCUT_MODIFIER;
-use crate::editor::{EditorEvent, EditorView, palette_for};
+use crate::editor::{EditorEvent, EditorView, Language, palette_for};
 // The editor's own commands, reached through the module rather than imported
 // one at a time: one of them is called `Copy`, which is also the name of the
 // trait this file derives on two of its types.
@@ -324,16 +324,19 @@ struct MenuState {
     can_undo: bool,
     /// Whether there is a change to put back.
     can_redo: bool,
+    /// Whether the file's format has a line comment to toggle.
+    can_comment: bool,
 }
 
 impl MenuState {
-    /// Reads the four predicates off the editor as it stands.
+    /// Reads the five predicates off the editor as it stands.
     fn of(editor: &EditorView) -> Self {
         Self {
             selected: editor.has_selection(),
             writable: !editor.is_read_only(),
             can_undo: editor.can_undo(),
             can_redo: editor.can_redo(),
+            can_comment: editor.language().line_comment().is_some(),
         }
     }
 
@@ -366,10 +369,11 @@ impl MenuState {
         self.can_redo
     }
 
-    /// The comment toggle writes `#` at the head of the selected lines, so it
-    /// is an edit like any other.
+    /// The comment toggle writes a prefix at the head of the selected lines, so
+    /// it is an edit like any other — and it needs a prefix to write. JSON has
+    /// none, and a row that would do nothing is greyed rather than offered.
     const fn toggle_comment(self) -> bool {
-        self.writable
+        self.writable && self.can_comment
     }
 
     /// Find is offered on any buffer; replace is an edit, and is not.
@@ -474,6 +478,12 @@ impl EditorPane {
         file: TextFile,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The file's name is what says how to colour it, with its first line as
+        // the fallback for the scripts that carry a `#!` and no extension. The
+        // pane is the only place that knows both, which is why the widget is
+        // told rather than asked.
+        let language = Language::detect(&name, file.text.lines().next().unwrap_or_default());
+
         // Filled in the constructor rather than after it, so the pane never
         // exists holding an empty buffer. Whether the `Changed` this emits is
         // seen by the subscription below does not matter either way: the dirty
@@ -481,6 +491,7 @@ impl EditorPane {
         let editor = cx.new(|cx| {
             let mut editor = EditorView::new(cx);
             editor.set_text(&file.text, cx);
+            editor.set_language(language, cx);
             editor
         });
         let editor_events = cx.subscribe(&editor, |pane, _editor, event: &EditorEvent, cx| {
@@ -1072,6 +1083,7 @@ mod tests {
         writable: true,
         can_undo: false,
         can_redo: false,
+        can_comment: true,
     };
 
     #[test]
@@ -1122,6 +1134,22 @@ mod tests {
         };
         assert!(undone.undo());
         assert!(undone.redo());
+    }
+
+    #[test]
+    fn a_format_with_no_comment_syntax_greys_the_toggle() {
+        // JSON, and only JSON. The row would otherwise write a `#` into a file
+        // whose own reader rejects it.
+        let json = MenuState {
+            can_comment: false,
+            ..IDLE
+        };
+        assert!(!json.toggle_comment());
+        assert!(IDLE.toggle_comment());
+        // The two predicates are independent: a read-only YAML has a comment
+        // syntax and still cannot be edited.
+        assert_eq!(Language::Json.line_comment(), None);
+        assert_eq!(Language::Yaml.line_comment(), Some("#"));
     }
 
     #[test]

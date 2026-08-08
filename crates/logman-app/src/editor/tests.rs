@@ -18,8 +18,12 @@ use gpui::{
 };
 use logman_term::{Rgb, TerminalTheme};
 
+use crate::editor::syntax::{Language, TokenKind};
 use crate::editor::view::{EditorEvent, EditorView};
-use crate::editor::{EditorPalette, mix, palette_for};
+use crate::editor::{
+    ANSI_BLUE, ANSI_BRIGHT_BLACK, ANSI_CYAN, ANSI_GREEN, ANSI_MAGENTA, ANSI_YELLOW, EditorPalette,
+    MIN_COMMENT_CONTRAST, MIN_CONTRAST, contrast, legible, mix, palette_for,
+};
 use crate::terminal_view::to_hsla;
 use crate::ui::scrollbar::ScrollbarAxis;
 
@@ -271,6 +275,26 @@ fn the_comment_toggle_takes_the_whole_selection(cx: &mut TestAppContext) {
     editor.update(&mut cx, |editor, cx| editor.select_range(0..20, cx));
     cx.simulate_keystrokes("cmd-/ ctrl-/");
     assert_eq!(editor.text(&mut cx), "host a\n  port 22\n\nuser b");
+}
+
+#[gpui::test]
+fn the_comment_toggle_follows_the_language(cx: &mut TestAppContext) {
+    // A plain buffer keeps the `#` it always had -- a file the detector did not
+    // place is a config file far more often than it is prose.
+    let (editor, mut cx) = open("{\"a\": 1}", cx);
+    editor.update(&mut cx, |editor, cx| editor.select_range(0..8, cx));
+    cx.simulate_keystrokes("cmd-/ ctrl-/");
+    assert_eq!(editor.text(&mut cx), "# {\"a\": 1}");
+
+    // JSON has no comment syntax, so the press writes nothing rather than
+    // writing something the file's own reader would reject.
+    editor.update(&mut cx, |editor, cx| {
+        editor.set_text("{\"a\": 1}", cx);
+        editor.set_language(Language::Json, cx);
+        editor.select_range(0..8, cx);
+    });
+    cx.simulate_keystrokes("cmd-/ ctrl-/");
+    assert_eq!(editor.text(&mut cx), "{\"a\": 1}");
 }
 
 #[gpui::test]
@@ -651,6 +675,50 @@ fn the_thumb_follows_the_scroll(cx: &mut TestAppContext) {
     );
 }
 
+/// A shell script of `lines` commands, for the tests that need a language with
+/// something to lex.
+fn long_script(lines: usize) -> String {
+    let mut text = String::with_capacity(lines * 16);
+    for line in 0..lines {
+        text.push_str("echo \"row ");
+        text.push_str(&line.to_string());
+        text.push_str("\"\n");
+    }
+    text
+}
+
+#[gpui::test]
+fn one_keystroke_in_a_hundred_thousand_lines_relexes_a_constant_number(cx: &mut TestAppContext) {
+    let (editor, mut cx) = open(&long_script(100_000), cx);
+    editor.update(&mut cx, |editor, cx| {
+        editor.set_language(Language::Shell, cx);
+        let at = editor.buffer().line_start(50_000) + 7;
+        editor.move_to(at, cx);
+    });
+    draw(&mut cx);
+
+    // Two runs of different lengths with the same surroundings, so that the
+    // frame the harness draws around them cancels out and what is left is the
+    // marginal cost of one keystroke.
+    let mut count = |presses: usize| {
+        let before = editor.read(&mut cx, |editor| editor.highlighter().lex_calls());
+        editor.with_window(&mut cx, |editor, window, cx| {
+            for _ in 0..presses {
+                editor.replace_text_in_range(None, "x", window, cx);
+            }
+        });
+        editor.read(&mut cx, |editor| editor.highlighter().lex_calls()) - before
+    };
+    let short = count(100);
+    let long = count(1_000);
+    let per_keystroke = (long - short) / 900;
+
+    assert!(
+        per_keystroke <= 3,
+        "one keystroke re-lexed {per_keystroke} lines of a hundred thousand"
+    );
+}
+
 #[gpui::test]
 fn typing_in_a_hundred_thousand_lines_stays_quick(cx: &mut TestAppContext) {
     let (editor, mut cx) = open(&long_file(100_000), cx);
@@ -915,12 +983,81 @@ fn pushing_the_same_font_again_repaints_nothing(cx: &mut TestAppContext) {
     assert!(*notified.borrow() > 0, "a changed font asked for no frame");
 }
 
+/// The language is pushed in by the host on the same terms as the font and the
+/// palette, so an unchanged one has to cost nothing.
+#[gpui::test]
+fn pushing_the_same_language_again_repaints_nothing(cx: &mut TestAppContext) {
+    let (editor, mut cx) = open("echo hi", cx);
+    editor.update(&mut cx, |editor, cx| {
+        editor.set_language(Language::Shell, cx);
+    });
+    draw(&mut cx);
+
+    let notified = Rc::new(RefCell::new(0_usize));
+    let observation = cx.update(|_, cx| {
+        let seen = notified.clone();
+        cx.observe(&editor.editor, move |_, _| *seen.borrow_mut() += 1)
+    });
+    editor.update(&mut cx, |editor, cx| {
+        editor.set_language(Language::Shell, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        *notified.borrow(),
+        0,
+        "an unchanged language asked for a frame"
+    );
+
+    editor.update(&mut cx, |editor, cx| {
+        editor.set_language(Language::Yaml, cx);
+    });
+    cx.run_until_parked();
+    drop(observation);
+    assert!(
+        *notified.borrow() > 0,
+        "a changed language asked for no frame"
+    );
+    assert_eq!(
+        editor.read(&mut cx, EditorView::language),
+        Language::Yaml,
+        "the language did not stick"
+    );
+}
+
+/// A file whose colours cross line boundaries, drawn: the runs the lexer
+/// produces have to add up to each line exactly, and a shaping call given runs
+/// that do not is what this would catch.
+#[gpui::test]
+fn a_highlighted_file_shapes_without_complaint(cx: &mut TestAppContext) {
+    let text = "#!/bin/sh\n\
+                # 주석입니다\n\
+                NAME=\"한글 값\"\n\
+                cat <<'EOF'\n\
+                anything at all: 🙂\n\
+                EOF\n\
+                echo \"${NAME}\" # 끝\n";
+    let (editor, mut cx) = open(text, cx);
+    editor.update(&mut cx, |editor, cx| {
+        editor.set_language(Language::Shell, cx);
+        editor.move_to(0, cx);
+    });
+    draw(&mut cx);
+
+    assert!(editor.read(&mut cx, EditorView::shaped_lines) >= 7);
+    // The heredoc reached the line under it, which is the whole point of the
+    // cache: line four is a string only because line three opened one.
+    let inside = editor.read(&mut cx, |editor| {
+        editor.highlighter().tokens(editor.buffer(), 4)
+    });
+    assert_eq!(inside[0].kind, TokenKind::String);
+}
+
 // The palette. Pure arithmetic over a colour scheme, so unlike everything above
 // these need no window: what they hold on to is that the editor's surface is
 // the terminal's surface, and that every fill painted under the text is opaque.
 
-/// The nine slots, so a property can be asserted of all of them at once.
-fn slots(palette: &EditorPalette) -> [Hsla; 9] {
+/// The fifteen slots, so a property can be asserted of all of them at once.
+fn slots(palette: &EditorPalette) -> [Hsla; 15] {
     [
         palette.background,
         palette.foreground,
@@ -931,8 +1068,49 @@ fn slots(palette: &EditorPalette) -> [Hsla; 9] {
         palette.gutter_active,
         palette.find_match,
         palette.find_current,
+        palette.comment,
+        palette.string,
+        palette.number,
+        palette.keyword,
+        palette.key,
+        palette.variable,
     ]
 }
+
+/// The six syntax slots on their own.
+fn syntax_slots(palette: &EditorPalette) -> [Hsla; 6] {
+    [
+        palette.comment,
+        palette.string,
+        palette.number,
+        palette.keyword,
+        palette.key,
+        palette.variable,
+    ]
+}
+
+/// Every built-in scheme with its name, which is the set every palette
+/// property is asserted over.
+///
+/// Read off the registry rather than listed here, so that a scheme added later
+/// is held to the same properties without anybody remembering to add it.
+fn schemes() -> Vec<(&'static str, TerminalTheme)> {
+    TerminalTheme::builtin()
+        .iter()
+        .map(|info| (info.name, TerminalTheme::by_name_or_default(info.id)))
+        .collect()
+}
+
+/// The ANSI index and the least contrast each syntax slot is built from, in the
+/// order [`syntax_slots`] returns them.
+const SYNTAX_SOURCES: [(usize, f32); 6] = [
+    (ANSI_BRIGHT_BLACK, MIN_COMMENT_CONTRAST),
+    (ANSI_GREEN, MIN_CONTRAST),
+    (ANSI_MAGENTA, MIN_CONTRAST),
+    (ANSI_BLUE, MIN_CONTRAST),
+    (ANSI_CYAN, MIN_CONTRAST),
+    (ANSI_YELLOW, MIN_CONTRAST),
+];
 
 #[test]
 fn mixing_walks_from_one_colour_to_the_other_and_clamps() {
@@ -963,21 +1141,109 @@ fn the_four_colours_a_scheme_names_are_taken_verbatim() {
 
 #[test]
 fn every_slot_is_opaque_in_every_built_in_scheme() {
-    // Five of the nine are painted as fills under the text, over a background
-    // that is itself opaque. An alpha anywhere here would make one highlight
-    // darken whatever it happened to land on top of.
-    for scheme in [
-        TerminalTheme::dark(),
-        TerminalTheme::light(),
-        TerminalTheme::solarized_dark(),
-        TerminalTheme::solarized_light(),
-        TerminalTheme::gruvbox_dark(),
-        TerminalTheme::dracula(),
-    ] {
+    // Five of the fifteen are painted as fills under the text, over a
+    // background that is itself opaque. An alpha anywhere here would make one
+    // highlight darken whatever it happened to land on top of.
+    for (name, scheme) in schemes() {
         for colour in slots(&palette_for(&scheme)) {
-            assert_eq!(colour.a, 1., "a slot of a built-in scheme is translucent");
+            assert_eq!(colour.a, 1., "a slot of {name} is translucent");
         }
     }
+}
+
+// The syntax slots. What is asserted of them is not which hue they landed on —
+// that is the scheme's business, and the point of deriving from it — but that
+// each one can be seen and that no two of them are the same mark.
+
+#[test]
+fn contrast_is_the_ratio_the_specification_defines() {
+    let black = Rgb::new(0, 0, 0);
+    let white = Rgb::new(255, 255, 255);
+    // The two ends of the scale, and the symmetry the definition has.
+    assert!((contrast(black, white) - 21.).abs() < 0.01);
+    assert!((contrast(white, black) - 21.).abs() < 0.01);
+    assert!((contrast(white, white) - 1.).abs() < 0.001);
+}
+
+#[test]
+fn a_colour_that_would_vanish_is_lifted_and_one_that_would_not_is_left_alone() {
+    let background = Rgb::new(0, 0, 0);
+    let foreground = Rgb::new(255, 255, 255);
+    // Already legible: taken verbatim, because a scheme's own colour is the
+    // whole point and the guard is not a filter.
+    let green = Rgb::new(0, 200, 0);
+    assert_eq!(legible(green, background, foreground, MIN_CONTRAST), green);
+    // All but invisible: walked towards the foreground until it is not.
+    let lost = Rgb::new(10, 10, 10);
+    let lifted = legible(lost, background, foreground, MIN_CONTRAST);
+    assert_ne!(lifted, lost);
+    assert!(contrast(lifted, background) >= MIN_CONTRAST);
+}
+
+#[test]
+fn each_syntax_slot_is_the_ansi_colour_the_scheme_named() {
+    // The mapping the documentation on `palette_for` sets out, asserted rather
+    // than described: a scheme's green is the string colour and nothing else
+    // decides it.
+    for (name, scheme) in schemes() {
+        let palette = palette_for(&scheme);
+        for (slot, (index, least)) in syntax_slots(&palette).into_iter().zip(SYNTAX_SOURCES) {
+            let expected = legible(
+                scheme.ansi[index],
+                scheme.background,
+                scheme.foreground,
+                least,
+            );
+            assert_eq!(slot, to_hsla(expected), "{name} at ANSI {index}");
+        }
+    }
+}
+
+#[test]
+fn every_syntax_colour_stands_off_the_page_in_every_built_in_scheme() {
+    // Not a tautology: `legible` gives up after four steps and falls back to
+    // the foreground, so this is the claim that no built-in scheme needs the
+    // fallback to fail. Solarized Dark is the one this was written for — its
+    // bright black is three percent off its background.
+    for (name, scheme) in schemes() {
+        for (index, least) in SYNTAX_SOURCES {
+            let colour = legible(
+                scheme.ansi[index],
+                scheme.background,
+                scheme.foreground,
+                least,
+            );
+            assert!(
+                contrast(colour, scheme.background) >= least,
+                "ANSI {index} of {name} would have been lost"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_syntax_slots_are_told_apart_from_one_another() {
+    for (name, scheme) in schemes() {
+        let palette = palette_for(&scheme);
+        let slots = syntax_slots(&palette);
+        for (index, colour) in slots.iter().enumerate() {
+            assert_ne!(
+                *colour, palette.background,
+                "a token drawn on itself in {name}"
+            );
+            for other in &slots[index + 1..] {
+                assert_ne!(colour, other, "two syntax slots collided in {name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_plain_token_is_the_scheme_s_own_foreground() {
+    // The claim the whole design rests on: a file with nothing to highlight
+    // looks exactly as it did before there were lexers.
+    let scheme = TerminalTheme::gruvbox_dark();
+    assert_eq!(palette_for(&scheme).foreground, to_hsla(scheme.foreground));
 }
 
 #[test]
