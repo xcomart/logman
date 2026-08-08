@@ -1,8 +1,9 @@
 # logman user guide
 
 logman is a GUI SSH terminal: one window, a strip of tabs, a real terminal in
-each of them, and an SFTP file browser beside it. This guide covers everything
-the application does. The [README](../README.md) is the short version.
+each of them, an SFTP file browser beside it, and an editor for the files that
+browser finds. This guide covers everything the application does. The
+[README](../README.md) is the short version.
 
 ![logman with two sessions in split panes and the remote files panel](screenshots/main-dark.png)
 
@@ -12,6 +13,7 @@ the application does. The [README](../README.md) is the short version.
 - [Tabs and sessions](#tabs-and-sessions)
 - [Split panes](#split-panes)
 - [The remote files panel](#the-remote-files-panel)
+- [The editor](#the-editor)
 - [The terminal](#the-terminal)
 - [Settings](#settings)
 - [Keyboard shortcuts](#keyboard-shortcuts)
@@ -325,6 +327,9 @@ a row that is not selected selects it first; a right-click *inside* an existing
 selection leaves that selection alone, which is how a command is aimed at
 several entries at once.
 
+- **Edit** — opens the file in an editor tab. Offered over exactly one file,
+  never over a directory and never over several rows; see
+  [The editor](#the-editor).
 - **Download…** — the same thing the **↓** button does.
 - **Rename…** — offered only when exactly one row is selected.
 - **Delete…** — asks before it does anything.
@@ -445,6 +450,311 @@ There is one panel for the window, not one per session — but each session keep
 its own directory, entries, selection and scroll position. Switching tabs or
 panes restores what that session was showing instead of asking the server again.
 The state is dropped when the session's pane closes.
+
+## The editor
+
+Right-clicking a file in the panel and choosing **Edit** opens it in an editor:
+a text buffer with line numbers, undo, find and replace, and syntax
+highlighting. It reads and writes over the same connection the panel browses,
+so a file on a server is edited where it lives rather than downloaded, changed
+and put back.
+
+### Opening a file
+
+**Edit** is offered over exactly one selected file. A directory has no contents
+a text buffer could hold, and several rows would open several panes, so neither
+gets the row.
+
+The file opens in a **tab of its own**, placed right after the active one — not
+as a split of the pane that asked. A split would give the file half of a
+terminal that was only as wide as it needed to be, and give it permanently;
+a tab costs the shell nothing, and the strip's own close button, its dropdown
+and <kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd> all come with it.
+
+The tab is labelled with the file first and the connection after it —
+`hosts - web01` — because the strip is read from the left and truncates on the
+right, and what tells two open files apart is usually the file. The connection
+half is the session's own title, so a shell that retitles itself retitles the
+files opened out of it; a session with no title to give leaves the tab called
+after the file alone.
+
+While such a tab is active the **files panel keeps browsing the filesystem the
+file came from**. An open file is not a session — the tab has no connection of
+its own, no status dot and nothing to reconnect — but the panel has one
+filesystem it could usefully be showing beside it, and that is the one.
+
+Asking to edit a file that is **already open** moves to its tab instead of
+opening a second buffer over the same bytes: two panes editing one file would
+each write the other's work away at the next save. The same file name on two
+hosts is two files, and one host's file reached from two tabs is one file.
+
+**Two kinds of file are refused**, both on the panel's own status line:
+
+- **Larger than 10 MB.** Checked against the listing, so nothing is transferred
+  before the refusal. The limit is the round trip's rather than the buffer's —
+  every load copies the whole file across the session, with no progress bar and
+  no way to cancel it.
+- **Not valid UTF-8.** Only the bytes can answer this, so it is checked after
+  the transfer. There is no encoding picker and no byte view, so a file the
+  editor cannot decode is one it would silently corrupt on save.
+
+Anything else that goes wrong — the server refusing the read, a link that
+points nowhere — comes back through the same sentence every other panel command
+uses.
+
+### Saving
+
+<kbd>Ctrl</kbd>+<kbd>S</kbd> (<kbd>Cmd</kbd>+<kbd>S</kbd> on macOS), or the
+**Save** button in the pane's header, writes the buffer back over the file it
+was opened from. The header carries a dot beside the name while there are
+unsaved changes and says *Saving…* while the write is in flight; the strip
+underneath reports the save by name afterwards, or the reason it failed in the
+danger colour. Either line goes away as soon as the buffer moves on from it.
+
+A clean buffer is still written. "Save" that silently does nothing is
+indistinguishable from "save" that failed, and a file whose contents match may
+still have been changed underneath by something else.
+
+**What is preserved.** A byte order mark and the line ending style both come off
+on the way in and go back on the way out, so a CRLF file with a BOM, opened and
+saved untouched, is written back byte for byte. The style is decided by which
+one dominated in the file as read, not by the first one seen: a file of ten
+thousand CRLF lines with one stray `\n` is a CRLF file, and writing it back as
+LF would rewrite every line of a diff. A carriage return that arrives in the
+buffer afterwards — pasted out of a Windows editor — is normalised the same way,
+so a CRLF file never comes back as `\r\r\n`.
+
+**A save is not atomic.** The file is overwritten in place. The usual shape —
+write a sibling temporary file and rename it over the target — depends on the
+rename replacing an existing path, and that is exactly what SFTP version 3
+leaves unspecified: OpenSSH refuses it, others replace silently, and the
+`posix-rename@openssh.com` extension that settles it is not offered everywhere.
+A save that worked against one host and failed against the next would be worse
+than the window this leaves open, so the write goes straight to the file and a
+failure is reported rather than silently repaired.
+
+**A second save cannot start while one is in flight**, and a save writes the
+text as it stood when it began. Anything typed while the bytes were moving is
+still unsaved when they land, and the dot stays.
+
+**The session ending does not close the file.** The pane stays, with everything
+in it; it is the *save* that fails then, with the source's own sentence under
+the buffer.
+
+### Closing an edited file
+
+Closing a file with unsaved changes asks first — the pane's **×**, the tab's
+close button and <kbd>Ctrl</kbd>+<kbd>W</kbd> all land on the same question:
+
+| Answer | What happens |
+| --- | --- |
+| **Save** | The question goes down and the write starts. The pane closes only once the write has landed; a failure leaves it standing with the reason under it, which is the only place the reason can be read. |
+| **Discard changes** | The pane closes and the edits are gone. |
+| **Cancel** | Nothing happens. <kbd>Esc</kbd> does the same. |
+
+If something is typed while the save started by **Save** is still in flight,
+the pane stays open: those bytes are not on disk, and closing on them would lose
+exactly what the question was asked about.
+
+**Closing several tabs at once does not ask.** *Close other tabs* and *Close
+tabs to the right* skip any tab holding unsaved changes rather than putting a
+queue of questions up or discarding the work.
+
+A **split** tab holding an edited file beside a shell is not covered by the
+question either: it closes as a unit. Such a tab can only be made by merging one
+in deliberately.
+
+### Editing
+
+The buffer is an ordinary text surface with the usual keys — arrows,
+<kbd>Home</kbd>, <kbd>End</kbd>, the page keys, and each of them with
+<kbd>Shift</kbd> to select. <kbd>Home</kbd> goes to the first non-blank of the
+line and then to column 0. Clicking places the caret, a double click takes the
+word, a triple click the line, and dragging extends by whichever of the three
+started it. The wheel scrolls, and a slim indicator appears over either edge
+while it does.
+
+- **Undo and redo** — <kbd>Ctrl</kbd>+<kbd>Z</kbd> and
+  <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd>, with <kbd>Ctrl</kbd>+<kbd>Y</kbd>
+  as a second spelling of redo. Typing coalesces into transactions rather than
+  one keystroke each, and the caret goes back where it was.
+- **Indent and outdent** — <kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd>,
+  over the selected lines or at the caret. One indent is four spaces: the files
+  this editor is opened on are read by other tools as often as by a person, and
+  a width nobody has to agree on is one less thing to disagree about.
+  <kbd>Enter</kbd> carries the current line's indent onto the new one.
+- **Comment toggle** — <kbd>Ctrl</kbd>+<kbd>/</kbd> comments the selected lines
+  out, or uncomments them if they all already are. The prefix is `#` for every
+  built-in format, and whatever a syntax definition declared for its own. JSON
+  has no comment syntax at all, so there the command is greyed rather than
+  offered and producing a file its own reader would reject.
+- **Copy, cut and paste** — <kbd>Ctrl</kbd>+<kbd>C</kbd>,
+  <kbd>Ctrl</kbd>+<kbd>X</kbd> and <kbd>Ctrl</kbd>+<kbd>V</kbd>, unshifted.
+  The terminal needs the shifted chords because a remote shell wants the plain
+  ones; a text buffer has no remote shell to keep them for.
+- **Word-wise movement and deletion** — <kbd>Ctrl</kbd> with the left and right
+  arrows or with <kbd>Backspace</kbd> and <kbd>Delete</kbd>
+  (<kbd>Alt</kbd> on macOS, the way every other macOS text field spells it).
+- **The whole file** — <kbd>Ctrl</kbd>+<kbd>A</kbd> selects it,
+  <kbd>Ctrl</kbd>+<kbd>Home</kbd> and <kbd>Ctrl</kbd>+<kbd>End</kbd> go to its
+  ends.
+
+**Right-clicking in the buffer** opens a menu holding cut, copy, paste, select
+all, undo, redo, the comment toggle, find, replace and save, each with the key
+that already is it. A row the buffer cannot answer — nothing selected, an empty
+history, a format with no comment syntax — is greyed rather than left out, so
+the menu is the same shape every time it opens.
+
+**IME composition works as it does in a session.** The preedit is drawn at the
+caret and nothing enters the buffer until it is committed. See the README's
+[Limitations](../README.md#limitations) for which IMEs this has actually been
+exercised against.
+
+### Find and replace
+
+<kbd>Ctrl</kbd>+<kbd>F</kbd> opens the find bar along the bottom of the pane and
+<kbd>Ctrl</kbd>+<kbd>H</kbd> opens it with the replace row already showing. A
+selection on one line seeds the query field, so searching for what is under the
+caret is two keys.
+
+The bar holds the query field, a counter reading `3/17`, and an **Aa** toggle
+for case sensitivity — the mark every editor puts on it, and not a word anybody
+has to translate. Every match in the file is highlighted as you type, with the
+current one drawn brighter than the rest; stepping to a match selects it, so the
+caret is left where it was found.
+
+- <kbd>F3</kbd> and <kbd>Shift</kbd>+<kbd>F3</kbd> step to the next and previous
+  match, wrapping at either end. Both work from the buffer and from inside the
+  bar.
+- <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd> replaces **every** match, in
+  one undoable transaction.
+- <kbd>Esc</kbd> closes the bar and puts the caret back in the buffer. With the
+  bar already closed the key falls through to whatever is listening above the
+  editor.
+
+Matching is **plain substring**, not a regular expression, and matches are
+non-overlapping: searching `aa` in `aaaa` finds two, not three. A file is what
+somebody is looking for a request id or a host name in, and a regex engine would
+be more machinery than anything else in the application wants.
+
+### Syntax highlighting
+
+The language is worked out when the file opens, from three things in order of
+how certain each is: the **whole file name** (a `Dockerfile` has no extension to
+go on, and a dotfile is all extension), the **extension**, and — only for a name
+with no extension at all — the **`#!` line**, because half the shell scripts on
+a server are called `deploy` rather than `deploy.sh`.
+
+Six formats have a scanner written by hand, being the six a file panel over a
+server reaches every day:
+
+| Language | Recognised by |
+| --- | --- |
+| **Shell** | `.sh`, `.bash`, `.zsh`, `.ksh`, `.ash`, `.mksh`; the login rc files — `.bashrc`, `.bash_profile`, `.profile`, `.zshrc`, `.zshenv` and their siblings; any `#!` naming an interpreter that ends in `sh`. |
+| **YAML** | `.yml`, `.yaml`. |
+| **JSON** | `.json`. |
+| **TOML** | `.toml`. |
+| **Conf** | `.ini`, `.conf`, `.cfg`, `.properties`, `.env`; `.env.*`; `sshd_config`, `ssh_config`, `.gitconfig`, `.npmrc`, `.editorconfig`. |
+| **Dockerfile** | `Dockerfile`, `Dockerfile.*`, `*.dockerfile`, `Containerfile`. |
+
+Ten more ship as **definition files** compiled into the binary: C, C++, C#, Go,
+Java, JavaScript, Python, Rust, SQL and TypeScript. They are ordinary
+definitions of the kind described below, so there is nothing they can do that a
+file of your own cannot.
+
+Anything else is drawn as plain text: one run a line, in the foreground colour.
+
+None of this is a parser. Each scanner is a state machine over one line at a
+time, which is the point: a `.yml` that is *invalid* YAML still has to be
+readable while it is being fixed, and a scanner keeps colouring where a parser
+would only report. Comments, strings, numbers, keywords, the left of a mapping
+and shell-style expansions are told apart; operators and punctuation are
+deliberately left alone, since colouring those is what makes a scheme look busy
+rather than legible.
+
+**The colours come from the session's terminal colour scheme** and the text is
+drawn in the terminal font family and at the terminal font size, so a file
+opened beside the shell it came from matches it. Changing any of the three — in
+the settings or as a profile override — repaints an open file with it. The
+pane's own header and message strip take the *UI theme* instead, like every
+other piece of chrome.
+
+### Defining a language
+
+A language of your own is one `*.yml` (or `*.yaml`) file in the `syntaxes`
+directory beside `settings.json`. The file's stem is the language's id, so
+`nginx.yml` defines `nginx`:
+
+```yaml
+name: Nginx                  # what the picker shows; the stem is the id
+files:
+  extensions: [nginx]        # no dot, matched without regard to case
+  names: [nginx.conf]        # exact file names, for what has no extension
+  shebangs: [nginx]          # matches when the `#!` interpreter ends with this
+comment: "#"                 # line comment, and what the comment toggle writes
+strings:
+  - quote: '"'
+keywords:
+  keyword: [server, location, upstream, listen, proxy_pass]
+variables: ["$"]             # sigils: `$NAME` and `${...}` become variables
+```
+
+Every key but `name` is optional — a file holding nothing but `name` and `files`
+gives a language that is matched and drawn in one colour, which is a perfectly
+good way to start. The full schema, including block comments, multi-line
+strings written as delimiter pairs, the four keyword groups, case-insensitive
+keywords, `[section]` and `key:` colouring, and a plain account of what a
+line-at-a-time scanner cannot express, is at the head of
+`crates/logman-app/src/editor/syntax/custom.rs`.
+
+Four rules govern which definition answers for a file:
+
+1. **The six built-in languages come first.** A definition can add a language
+   but never take one of them over, so dropping a `yaml.yml` into the directory
+   does not change what a `.yaml` file is.
+2. **Your definitions come before the ten shipped ones**, so a `python.yml` of
+   your own wins for a `.py`.
+3. **A file whose stem matches a shipped id replaces that definition outright.**
+   `python.yml` is how the shipped Python definition gets changed; nothing is
+   ever written into the directory, so there is no copy to edit and none to go
+   stale.
+4. **The directory is read once, at start-up.** Adding, changing or removing a
+   definition takes effect on the next launch. That is not laziness about file
+   watching: an open editor holds an index into the registry, and swapping it
+   underneath would repaint a buffer with another language's rules.
+
+Reading is forgiving, the way themes and schemes are: a file that does not parse
+is logged and skipped, and so is a single rule inside a file that cannot be
+honoured. One broken definition never costs you the others.
+
+### The status bar over a file
+
+While the keyboard is in a file, the right end of the status bar shows two
+things:
+
+- **What the file is being coloured as.** It is a button — the chevron points up
+  because that is where its list opens — and the list holds every format the
+  editor knows, the built-in seven in their own order and everything else by
+  name. Picking one applies it at once, and it **sticks**: nothing detects the
+  language again while the file is open, so a file the detector placed wrongly
+  stays where you put it.
+- **Where the caret is**, written `12/200 : 5`: the line, out of the lines there
+  are, and then the column. Digits and punctuation and not a word, for the same
+  reason the grid size beside a session is written `80x24`.
+
+### What the editor does not do
+
+- It does not watch the file. A file changed on the server underneath an open
+  editor is not noticed, and the next save writes over it.
+- An editor pane cannot be split. Every split logman offers opens a *second
+  connection to the same host*, and a file is not a connection, so the rows are
+  left out and the shortcuts do nothing over one. The tab can still be pulled in
+  beside another with **Split right of current tab**.
+- There is no soft wrapping, no code folding and no multiple cursors, each left
+  out deliberately: the first two need a map between the buffer's lines and the
+  rows on screen, and the third would change the shape of every command in the
+  editor.
+- Replace acts on every match at once. There is no replace-this-one-and-move-on.
 
 ## The terminal
 
@@ -669,6 +979,36 @@ is plain <kbd>Cmd</kbd>+<kbd>B</kbd>.
 | <kbd>Esc</kbd> | <kbd>Esc</kbd> | Dismiss the topmost dialog or menu |
 | <kbd>Ctrl</kbd>+<kbd>Q</kbd> | <kbd>Cmd</kbd>+<kbd>Q</kbd> | Quit |
 
+### In an open file
+
+These are live only while the keyboard is in an editor pane, and none of them
+reaches a terminal. On macOS they take <kbd>Cmd</kbd> as well, with one
+exception: the word-wise moves and deletions take <kbd>Alt</kbd> there, the way
+they do in every other macOS text field.
+
+| Key | Action |
+| --- | --- |
+| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the file |
+| <kbd>Ctrl</kbd>+<kbd>F</kbd> | Open the find bar |
+| <kbd>Ctrl</kbd>+<kbd>H</kbd> | Open the find bar with the replace row showing |
+| <kbd>F3</kbd> / <kbd>Shift</kbd>+<kbd>F3</kbd> | Next / previous match |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd> | Replace every match |
+| <kbd>Esc</kbd> | Close the find bar |
+| <kbd>Ctrl</kbd>+<kbd>Z</kbd> | Undo |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd>, <kbd>Ctrl</kbd>+<kbd>Y</kbd> | Redo |
+| <kbd>Ctrl</kbd>+<kbd>/</kbd> | Comment or uncomment the selected lines |
+| <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | Indent / outdent |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd> | Copy, cut, paste |
+| <kbd>Ctrl</kbd>+<kbd>A</kbd> | Select the whole file |
+| <kbd>Ctrl</kbd>+<kbd>Home</kbd> / <kbd>Ctrl</kbd>+<kbd>End</kbd> | Start / end of the file, with <kbd>Shift</kbd> to select |
+| <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd> | Previous / next word, with <kbd>Shift</kbd> to select |
+| <kbd>Ctrl</kbd>+<kbd>Backspace</kbd> / <kbd>Ctrl</kbd>+<kbd>Delete</kbd> | Delete the word before / after the caret |
+
+The arrow keys, <kbd>Home</kbd>, <kbd>End</kbd>, <kbd>PageUp</kbd> and
+<kbd>PageDown</kbd> move the caret, and each of them with <kbd>Shift</kbd>
+extends the selection instead. On macOS
+<kbd>Ctrl</kbd>+<kbd>Cmd</kbd>+<kbd>Space</kbd> opens the character palette.
+
 Inside a dialog, <kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd> move between
 controls and <kbd>Enter</kbd> submits from any field. Both are scoped to the
 dialog, so the terminal keeps sending <kbd>Tab</kbd> to the remote shell for
@@ -712,10 +1052,12 @@ that would be refused is left out rather than shown doing nothing.
 | `settings.json` | Everything in the settings dialog. |
 | `themes/*.json` | UI themes of your own, one file per theme. Created on demand; see [Themes and colour schemes](#themes-and-colour-schemes). |
 | `schemes/*.json` | Terminal colour schemes of your own, in Windows Terminal's format. |
+| `syntaxes/*.yml` | The editor's language definitions, one file per language; see [Defining a language](#defining-a-language). |
 
 All of them are plain text, safe to edit by hand, written atomically, and
-tolerant of a UTF-8 byte order mark. The two directories only exist once there
-is something in them.
+tolerant of a UTF-8 byte order mark. The three directories only exist once there
+is something in them — and `syntaxes` only if *you* put something there, since
+nothing is ever written into it. It is read at start-up and left alone.
 
 ### Secrets
 
@@ -799,6 +1141,43 @@ order:
 
 If the panel is simply showing something stale, **⟳** lists the directory again.
 
+### A file will not open for editing
+
+Two refusals come from the editor itself, and both appear on the file panel's
+status line:
+
+- *Only files under 10 MB can be edited.* Checked against the listing, so
+  nothing was transferred. There is no way to raise it.
+- *That file is not UTF-8 text, so it cannot be edited here.* Some other
+  encoding, or a binary. Download it instead — the editor has no encoding picker
+  and would corrupt what it cannot decode.
+
+If the message is a server's own sentence instead, the read failed the way any
+other panel command can fail: check the permissions on the file, and whether the
+session is still connected.
+
+**A save that fails** leaves its reason under the buffer and the file open.
+The usual cause is a session that has since ended — the pane survives a
+disconnect, the write does not — followed by permissions on the file or a full
+filesystem. Nothing is lost; reconnect in another tab, and save again.
+
+### A syntax definition is not being used
+
+In order:
+
+1. **Restart.** The `syntaxes` directory is read once, at start-up.
+2. **Check the file name.** One `*.yml` or `*.yaml` per language, directly in
+   `syntaxes`, and its stem is the language's id.
+3. **Check what it is competing with.** A definition can never take over one of
+   the six built-in languages, so a definition claiming `.yaml` will not be
+   consulted for one.
+4. **Check that it parsed.** A file that does not parse, and a single rule that
+   cannot be honoured, are logged and skipped — run with `RUST_LOG` set (below)
+   to see the complaint.
+
+Whatever the reason, the file-type button in the status bar sets the language
+for the file in front of you by hand.
+
 ### Fonts and text
 
 A missing glyph means the terminal font does not cover the character. Pick a
@@ -844,5 +1223,7 @@ section. The ones that come up most:
   transfer or a delete once it has started;
 - panes can be resized by dragging but not rearranged, and neither a split
   layout nor the panel's width survives a restart;
+- the editor opens UTF-8 text only, up to 10 MB, saves without atomicity, and
+  notices nothing that changes the file underneath it;
 - a selection is anchored to the viewport and is not re-anchored when the
   scrollback moves under it.
