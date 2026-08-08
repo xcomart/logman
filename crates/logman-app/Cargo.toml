@@ -69,6 +69,16 @@ futures.workspace = true
 gpui.workspace = true
 rust-i18n.workspace = true
 sys-locale.workspace = true
+# Only for `src/update.rs`, the one HTTPS request logman makes: the start-up
+# query to the GitHub releases API. gpui's own `cx.http_client()` is a
+# `NullHttpClient` unless the application installs one, and installing a real
+# one to serve a single background request would be a much larger dependency.
+ureq.workspace = true
+# Only for `src/update.rs`: the SHA-256 the self-updater checks a downloaded
+# release asset against. Already linked as the crypto backend of both `russh`
+# and `ureq`'s `rustls`, so this is an edge in the graph rather than a crate in
+# the build.
+ring.workspace = true
 
 [dev-dependencies]
 # The file panel's upload planner walks a real tree, symlinks included, so the

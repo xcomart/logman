@@ -17,6 +17,7 @@ menu:
   break_out_pane: Bereich abtrennen
   settings: Einstellungen…
   about: Über logman
+  check_updates: Nach Updates suchen
   quit: Beenden
   session: Sitzung
   tip_menu: Menü
@@ -216,6 +217,7 @@ connection:
     name: Lokales Terminal
     title: Shell auf diesem Computer
     hint: "Öffnet %{shell}, Ihre Anmelde-Shell, in einem neuen Tab. Sie läuft auf diesem Computer, daher sind weder ein Host noch ein Passwort nötig."
+    hint_shell: "Öffnet %{shell} in einem neuen Tab. Die Shell läuft auf diesem Computer, daher sind weder ein Host noch ein Passwort nötig."
   name: Name
   host: Host
   port: Port
@@ -309,3 +311,16 @@ about:
   tagline: Ein plattformübergreifendes grafisches SSH-Terminal auf Basis von gpui.
   license: "Lizenziert unter %{license}."
   credits: Erstellt mit gpui 0.2.2 (eingebunden und gepatcht), russh und alacritty_terminal.
+
+update:
+  title: Update verfügbar
+  available: "logman %{version} ist verfügbar."
+  installed: "Sie verwenden derzeit %{version}."
+  update: Aktualisieren
+  ignore: Diese Version ignorieren
+  checking: Suche nach Updates…
+  up_to_date: Sie verwenden die neueste Version.
+  downloading: Wird heruntergeladen…
+  installing: Wird installiert…
+  failed: Das Update ist fehlgeschlagen.
+  open_release: Release-Seite öffnen

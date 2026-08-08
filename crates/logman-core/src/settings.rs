@@ -255,6 +255,18 @@ pub struct AppSettings {
     pub terminal: TerminalSettings,
     /// Defaults for new connections.
     pub connection: ConnectionSettings,
+    /// Release tag the user asked never to be told about again, e.g. `"v0.4.0"`.
+    ///
+    /// Written by the start-up update check when the user picks "ignore this
+    /// version", and compared against the latest tag verbatim: only that exact
+    /// release is suppressed, so the next one announces itself normally. `None`
+    /// — the default — means nothing has been ignored.
+    ///
+    /// Stored as the tag rather than as a parsed version because the tag is what
+    /// GitHub answers with and what the comparison already has in hand; nothing
+    /// here validates it, since an unrecognisable value can only ever fail to
+    /// match a real tag, which is the harmless direction.
+    pub ignored_update: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -266,6 +278,7 @@ impl Default for AppSettings {
             window: WindowSettings::default(),
             terminal: TerminalSettings::default(),
             connection: ConnectionSettings::default(),
+            ignored_update: None,
         }
     }
 }
@@ -354,6 +367,11 @@ impl AppSettings {
             && language.trim().is_empty()
         {
             self.language = None;
+        }
+        if let Some(tag) = &self.ignored_update
+            && tag.trim().is_empty()
+        {
+            self.ignored_update = None;
         }
         self.ui_theme = sanitize_ui_theme(&self.ui_theme);
         self.window.sanitize();

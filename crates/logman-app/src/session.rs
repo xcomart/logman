@@ -209,6 +209,90 @@ pub enum LocalFilesystem {
     },
 }
 
+/// A shell this machine can start, as offered to the user before it exists.
+///
+/// Windows-only, because it answers a question only Windows asks: *which*
+/// local shell? Unix has one — the login shell — and needs neither a list nor
+/// a description of an entry in it. Here there are at least two, and one more
+/// per installed WSL distribution, so the choice is a value that two places
+/// have to agree on: the welcome screen's buttons and the connection dialog's
+/// pinned rows offer the same shells, and a shell described in only one of
+/// them would be a shell the other silently lacks.
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+pub struct LocalShell {
+    /// Plain name of the shell — `PowerShell`, `cmd`, or the distribution's
+    /// own name. Never translated: it is what the thing is called, and it is
+    /// also what the tab is called until the shell titles itself.
+    pub name: SharedString,
+    /// Command line that starts it.
+    pub command: Vec<String>,
+    /// Filesystem the shell stands in, which is what the session's file panel
+    /// ends up browsing.
+    pub filesystem: LocalFilesystem,
+}
+
+#[cfg(windows)]
+impl LocalShell {
+    /// What kind of shell this is, for the line above [`Self::name`].
+    ///
+    /// Both callers pair the two: the welcome screen joins them with a
+    /// separator, the dialog stacks them the way a profile row stacks its name
+    /// over its `user@host`. `WSL` is a product name and so stays as it is in
+    /// every language; the other two are terminals on this machine and are
+    /// named by the phrase the rest of the interface already uses for one.
+    pub fn kind_label(&self) -> SharedString {
+        match self.filesystem {
+            LocalFilesystem::ThisMachine => ts!("connection.local.name"),
+            LocalFilesystem::Wsl { .. } => "WSL".into(),
+        }
+    }
+}
+
+/// Every local shell this machine can start, given the WSL distributions
+/// `distros` found on it.
+///
+/// The two fixed shells come first and in a stable order, so that an index
+/// into this list keeps meaning the same shell when a later discovery appends
+/// the WSL ones.
+#[cfg(windows)]
+pub fn local_shells(distros: &[String]) -> Vec<LocalShell> {
+    // `-NoLogo` because the copyright banner is two lines of noise above the
+    // first prompt, and the user asked for a shell rather than for the version
+    // of it.
+    let mut shells = vec![
+        LocalShell {
+            name: "PowerShell".into(),
+            command: vec!["powershell.exe".to_owned(), "-NoLogo".to_owned()],
+            filesystem: LocalFilesystem::ThisMachine,
+        },
+        LocalShell {
+            name: "cmd".into(),
+            command: vec!["cmd.exe".to_owned()],
+            filesystem: LocalFilesystem::ThisMachine,
+        },
+    ];
+
+    shells.extend(distros.iter().map(|distro| LocalShell {
+        name: SharedString::from(distro.clone()),
+        // `--cd ~` starts the shell in the distribution's home directory.
+        // Without it WSL inherits this process's working directory and
+        // translates it, dropping the user somewhere under `/mnt/c` instead.
+        command: vec![
+            "wsl.exe".to_owned(),
+            "-d".to_owned(),
+            distro.clone(),
+            "--cd".to_owned(),
+            "~".to_owned(),
+        ],
+        filesystem: LocalFilesystem::Wsl {
+            distro: distro.clone(),
+        },
+    }));
+
+    shells
+}
+
 /// A live transport handle.
 ///
 /// Both variants are fire-and-forget channels into threads owned by the
@@ -941,6 +1025,46 @@ mod tests {
         let summary = failed.summary();
         assert!(summary.contains("local shell"), "{summary}");
         assert!(summary.contains("No such file"), "{summary}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_fixed_local_shells_come_first_and_in_a_stable_order() {
+        // The order is load-bearing: the connection dialog remembers the row
+        // the user picked by index, and the WSL discovery replaces the list
+        // under it once it answers.
+        let fixed = local_shells(&[]);
+        let with_wsl = local_shells(&["Ubuntu".to_owned(), "Debian".to_owned()]);
+
+        assert_eq!(
+            fixed.iter().map(|shell| &shell.name).collect::<Vec<_>>(),
+            ["PowerShell", "cmd"]
+        );
+        assert_eq!(
+            with_wsl.iter().map(|shell| &shell.name).collect::<Vec<_>>(),
+            ["PowerShell", "cmd", "Ubuntu", "Debian"]
+        );
+        assert!(
+            fixed
+                .iter()
+                .all(|shell| matches!(shell.filesystem, LocalFilesystem::ThisMachine))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_wsl_shell_names_its_distribution_in_both_the_command_and_the_filesystem() {
+        let shells = local_shells(&["Ubuntu".to_owned()]);
+        let wsl = shells.last().expect("a distribution was asked for");
+
+        assert_eq!(
+            wsl.command,
+            ["wsl.exe", "-d", "Ubuntu", "--cd", "~"].map(str::to_owned)
+        );
+        match &wsl.filesystem {
+            LocalFilesystem::Wsl { distro } => assert_eq!(distro, "Ubuntu"),
+            other => panic!("a WSL shell stands in a WSL filesystem, not in {other:?}"),
+        }
     }
 
     #[test]

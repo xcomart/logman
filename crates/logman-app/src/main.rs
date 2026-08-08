@@ -40,6 +40,8 @@ mod theme_store;
 // read as dead code, hence the module-wide allow.
 #[allow(dead_code)]
 mod ui;
+mod update;
+mod update_dialog;
 mod verifier;
 // Windows-only because it shells out to `wsl.exe`, and because the welcome
 // screen it feeds only offers a choice of local shells on the platform that
@@ -72,8 +74,8 @@ use i18n::ts;
 use icons::Icons;
 use pane_tree::{Axis, PaneId, PaneNode, PaneTree, SplitId};
 use session::{Session, SessionStatus};
-// Only the welcome screen's shell buttons name one of these, and only Windows
-// has that choice to offer.
+// Only a locally started shell carries one of these, and only Windows has more
+// than one filesystem such a shell could be standing in.
 #[cfg(windows)]
 use session::LocalFilesystem;
 use settings_dialog::{SettingsDialog, SettingsDialogEvent};
@@ -83,6 +85,7 @@ use ui::{
     ScrollbarAxis, ScrollbarState, TabBar, TabItem, Theme, ThemeRegistry, WindowControlIcons,
     WindowControls, hide_later, hide_now, scroll_to, scrolled, set_theme, theme, tooltip_label,
 };
+use update_dialog::{UpdateDialog, UpdateDialogEvent};
 
 actions!(
     logman,
@@ -111,6 +114,10 @@ actions!(
         OpenSettings,
         /// Open the about dialog.
         ShowAbout,
+        /// Ask GitHub whether a newer release exists, showing the answer either
+        /// way. Unlike the start-up check, this one is not silent and does not
+        /// respect the ignored-version tag.
+        CheckUpdates,
         /// Close the open dialog or dropdown menu, if there is one.
         DismissDialog,
     ]
@@ -392,6 +399,14 @@ struct Workspace {
     settings: Entity<SettingsDialog>,
     /// The about dialog, rendered only while it reports itself open.
     about: Entity<AboutDialog>,
+    /// The update dialog, rendered only while it reports itself open.
+    ///
+    /// Two things open it: the start-up check in [`update`], at most once per
+    /// run and only when it found something worth saying, and the "Check for
+    /// updates" command, as often as the user asks. It also owns the download
+    /// and the swap that "Update" starts, which is why it is the one dialog the
+    /// shell cannot always close.
+    update: Entity<UpdateDialog>,
     /// The remote file panel, shown to the left of the panes.
     ///
     /// One panel for the whole window rather than one per session: it keeps the
@@ -441,6 +456,8 @@ struct Workspace {
     _settings_events: Subscription,
     /// Keeps the about dialog subscription alive.
     _about_events: Subscription,
+    /// Keeps the update dialog subscription alive.
+    _update_events: Subscription,
     /// Disconnects every session before the process exits.
     _quit: Subscription,
 }
@@ -465,6 +482,17 @@ impl Workspace {
                     ConnectionDialogEvent::ConnectLocal => {
                         dialog.update(cx, |dialog, cx| dialog.close(cx));
                         this.open_local_session(window, cx);
+                    }
+                    #[cfg(windows)]
+                    ConnectionDialogEvent::ConnectLocalShell(shell) => {
+                        dialog.update(cx, |dialog, cx| dialog.close(cx));
+                        this.open_local_command(
+                            shell.name.clone(),
+                            shell.command.clone(),
+                            shell.filesystem.clone(),
+                            window,
+                            cx,
+                        );
                     }
                     ConnectionDialogEvent::Dismissed => {
                         dialog.update(cx, |dialog, cx| dialog.close(cx));
@@ -512,6 +540,22 @@ impl Workspace {
                 },
             );
 
+        let update = cx.new(UpdateDialog::new);
+        let update_events = cx.subscribe_in(&update, window, |this, dialog, event, window, cx| {
+            match event {
+                UpdateDialogEvent::Ignored { tag } => {
+                    // The dialog has already closed itself; writing the file is
+                    // the shell's job because the shell is what owns settings.
+                    update::remember_ignored(tag, cx);
+                    this.focus_active(window, cx);
+                }
+                UpdateDialogEvent::Dismissed => {
+                    dialog.update(cx, |dialog, cx| dialog.close(cx));
+                    this.focus_active(window, cx);
+                }
+            }
+        });
+
         let quit = cx.on_app_quit(|this, cx| {
             for session in this.sessions(cx) {
                 session.update(cx, |session, cx| session.disconnect(cx));
@@ -525,6 +569,10 @@ impl Workspace {
         // `wsl.exe` is a process spawn, and the welcome screen has plenty to
         // show without it. The buttons appear underneath the fixed ones when
         // the answer lands, which is well before a user reaches for them.
+        //
+        // Run once and handed to both places that offer a local shell — the
+        // welcome screen from the field, the connection dialog from its own
+        // copy — rather than discovered twice for the same answer.
         #[cfg(windows)]
         cx.spawn(async move |this, cx| {
             let distros = cx
@@ -532,7 +580,44 @@ impl Workspace {
                 .spawn(async { wsl::list_distros() })
                 .await;
             this.update(cx, |workspace, cx| {
+                workspace.dialog.update(cx, |dialog, cx| {
+                    dialog.set_wsl_distros(&distros, cx);
+                });
                 workspace.wsl_distros = distros;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+
+        // The update check, likewise off the UI thread: it is an HTTPS request
+        // to GitHub, and nothing on screen waits for it. The tag the user may
+        // have ignored is read here, on the UI thread, because the settings
+        // global is only reachable from it.
+        //
+        // The answer opens a dialog, so it deliberately does *not* go through
+        // `open_about`'s `close_overlays` route: this is the one dialog nobody
+        // asked for, arriving at a moment nobody chose, and it must never take
+        // the screen from something the user opened themselves — a half-typed
+        // connection form above all. If anything is already up, the check simply
+        // says nothing and tries again next launch.
+        let ignored = app_settings::current(cx).ignored_update;
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { update::check(ignored.as_deref()) })
+                .await;
+            let Some(release) = found else {
+                return;
+            };
+            this.update(cx, |workspace, cx| {
+                if workspace.dialog_open(cx) {
+                    log::debug!("update {} announced while a dialog is open", release.tag);
+                    return;
+                }
+                workspace.update.update(cx, |dialog, cx| {
+                    dialog.open(release, cx);
+                });
                 cx.notify();
             })
             .ok();
@@ -550,6 +635,7 @@ impl Workspace {
             dialog,
             settings,
             about,
+            update,
             panel,
             panel_open: true,
             menu_open: false,
@@ -562,6 +648,7 @@ impl Workspace {
             _dialog_events: dialog_events,
             _settings_events: settings_events,
             _about_events: about_events,
+            _update_events: update_events,
             _quit: quit,
         }
     }
@@ -1201,13 +1288,18 @@ impl Workspace {
         self.dialog.read(cx).is_open()
             || self.settings.read(cx).is_open()
             || self.about.read(cx).is_open()
+            || self.update.read(cx).is_open()
     }
 
     /// Closes every dialog and the dropdown menu.
     ///
-    /// Every `open_*` method starts here, which is what keeps the three modals
+    /// Every `open_*` method starts here, which is what keeps the modals
     /// mutually exclusive: only one of them can ever be on screen, and opening
-    /// one always puts the menu away.
+    /// one always puts the menu away. The update dialog is closed here like the
+    /// rest, so a user who reaches for a command instead of one of its buttons
+    /// is not left with a stale announcement floating over the window — except
+    /// while it is installing, when its own `close` refuses and the swap is
+    /// allowed to finish; see [`UpdateDialog::close`].
     fn close_overlays(&mut self, cx: &mut Context<Self>) {
         self.menu_open = false;
         self.tab_menu_open = false;
@@ -1221,6 +1313,9 @@ impl Workspace {
         }
         if self.about.read(cx).is_open() {
             self.about.update(cx, |dialog, cx| dialog.close(cx));
+        }
+        if self.update.read(cx).is_open() {
+            self.update.update(cx, |dialog, cx| dialog.close(cx));
         }
     }
 
@@ -1312,6 +1407,24 @@ impl Workspace {
     fn open_about(&mut self, cx: &mut Context<Self>) {
         self.close_overlays(cx);
         self.about.update(cx, |dialog, cx| dialog.open(cx));
+        cx.notify();
+    }
+
+    /// Asks GitHub for the latest release and shows the answer.
+    ///
+    /// Goes through `close_overlays` where the start-up check pointedly does
+    /// not: this dialog was asked for, so it is entitled to the screen the way
+    /// every other menu command is.
+    ///
+    /// Refuses while an install is already running, which is the one case where
+    /// the update dialog cannot be closed and so must not be reopened into a
+    /// different state.
+    fn check_updates(&mut self, cx: &mut Context<Self>) {
+        if self.update.read(cx).is_busy() {
+            return;
+        }
+        self.close_overlays(cx);
+        self.update.update(cx, |dialog, cx| dialog.start_check(cx));
         cx.notify();
     }
 
@@ -1507,6 +1620,16 @@ impl Workspace {
         self.open_about(cx);
     }
 
+    /// Handles the "Check for updates" menu item.
+    fn check_updates_action(
+        &mut self,
+        _: &CheckUpdates,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.check_updates(cx);
+    }
+
     /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + a digit.
     fn select_tab_action(
         &mut self,
@@ -1552,6 +1675,17 @@ impl Workspace {
             self.about.update(cx, |dialog, cx| dialog.close(cx));
             self.focus_active(window, cx);
             cx.notify();
+            return;
+        }
+        if self.update.read(cx).is_open() {
+            // Swallowed rather than propagated while an install runs: the key
+            // must not reach the terminal, but nothing may take the screen from
+            // a swap either, so `Escape` simply does nothing until it is over.
+            if !self.update.read(cx).is_busy() {
+                self.update.update(cx, |dialog, cx| dialog.close(cx));
+                self.focus_active(window, cx);
+                cx.notify();
+            }
             return;
         }
         if self.dialog.read(cx).is_open() {
@@ -1784,6 +1918,10 @@ impl Workspace {
                 .shortcut(format!("{SHORTCUT_MODIFIER}+,"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
             MenuEntry::separator(),
+            // Next to About, where a Help menu would put it and where users of
+            // every other desktop application look for it.
+            MenuEntry::new(ts!("menu.check_updates"))
+                .on_activate(|window, cx| window.dispatch_action(Box::new(CheckUpdates), cx)),
             MenuEntry::new(ts!("menu.about"))
                 .on_activate(|window, cx| window.dispatch_action(Box::new(ShowAbout), cx)),
             MenuEntry::separator(),
@@ -2403,80 +2541,44 @@ impl Workspace {
         #[cfg(windows)]
         {
             let this = cx.entity();
-            let local = ts!("connection.local.name");
-            // Every button is the same button but for its five parts, so it is
-            // built once here rather than three times below. The last of them —
-            // which filesystem the shell stands in — is what decides which
-            // filesystem the session's file panel browses.
-            let row = |id: ElementId,
-                       text: String,
-                       label: SharedString,
-                       command: Vec<String>,
-                       filesystem: LocalFilesystem| {
-                let this = this.clone();
-                Button::new(id, text)
-                    .variant(ButtonVariant::Secondary)
-                    .full_width(true)
-                    .on_click(move |_, window, cx| {
-                        // Cloned per press rather than moved: the handler is
-                        // kept for the life of the button and may be pressed
-                        // again, opening a second tab on the same shell.
-                        let (label, command, filesystem) =
-                            (label.clone(), command.clone(), filesystem.clone());
-                        this.update(cx, |workspace, cx| {
-                            workspace.open_local_command(label, command, filesystem, window, cx)
-                        });
-                    })
-                    .into_any_element()
-            };
 
-            // `-NoLogo` because the copyright banner is two lines of noise
-            // above the first prompt, and the user asked for a shell rather
-            // than for the version of it.
-            let mut rows = vec![
-                row(
-                    "empty-local-powershell".into(),
-                    format!("{local}  ·  PowerShell"),
-                    "PowerShell".into(),
-                    vec!["powershell.exe".to_owned(), "-NoLogo".to_owned()],
-                    LocalFilesystem::ThisMachine,
-                ),
-                row(
-                    "empty-local-cmd".into(),
-                    format!("{local}  ·  cmd"),
-                    "cmd".into(),
-                    vec!["cmd.exe".to_owned()],
-                    LocalFilesystem::ThisMachine,
-                ),
-            ];
-
-            // Labelled `WSL · <distro>` rather than as another local terminal:
-            // the shell these open is a Linux one on its own filesystem, which
-            // is a different place to be than the two above — and the same
-            // difference is what the last argument carries into the session, so
-            // that its file panel browses the distribution the shell is
-            // standing in rather than this machine's disk.
-            rows.extend(self.wsl_distros.iter().enumerate().map(|(index, distro)| {
-                row(
-                    ("empty-local-wsl", index).into(),
-                    format!("WSL  ·  {distro}"),
-                    SharedString::from(distro.clone()),
-                    // `--cd ~` starts the shell in the distribution's home
-                    // directory. Without it WSL inherits this process's
-                    // working directory and translates it, dropping the user
-                    // somewhere under `/mnt/c` instead.
-                    vec![
-                        "wsl.exe".to_owned(),
-                        "-d".to_owned(),
-                        distro.clone(),
-                        "--cd".to_owned(),
-                        "~".to_owned(),
-                    ],
-                    LocalFilesystem::Wsl {
-                        distro: distro.clone(),
-                    },
-                )
-            }));
+            // The same list the connection dialog pins above its saved
+            // profiles, built from the one place that knows how each of these
+            // shells is started — a button that opened a shell the dialog does
+            // not offer, or the other way round, would be a difference between
+            // two ways of asking for the same thing.
+            //
+            // A WSL entry labels itself `WSL` rather than as another local
+            // terminal: the shell it opens is a Linux one on a filesystem of
+            // its own, which is a different place to be than the two above it
+            // — and that difference travels into the session, so that its file
+            // panel browses the distribution the shell is standing in rather
+            // than this machine's disk.
+            let rows = session::local_shells(&self.wsl_distros)
+                .into_iter()
+                .enumerate()
+                .map(|(index, shell)| {
+                    let this = this.clone();
+                    let text = format!("{}  ·  {}", shell.kind_label(), shell.name);
+                    Button::new(("empty-local", index), text)
+                        .variant(ButtonVariant::Secondary)
+                        .full_width(true)
+                        .on_click(move |_, window, cx| {
+                            // Cloned per press rather than moved: the handler is
+                            // kept for the life of the button and may be pressed
+                            // again, opening a second tab on the same shell.
+                            let (label, command, filesystem) = (
+                                shell.name.clone(),
+                                shell.command.clone(),
+                                shell.filesystem.clone(),
+                            );
+                            this.update(cx, |workspace, cx| {
+                                workspace.open_local_command(label, command, filesystem, window, cx)
+                            });
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
 
             Some(
                 div()
@@ -2787,6 +2889,11 @@ impl Render for Workspace {
             .read(cx)
             .is_open()
             .then(|| div().absolute().inset_0().child(self.about.clone()));
+        let update = self
+            .update
+            .read(cx)
+            .is_open()
+            .then(|| div().absolute().inset_0().child(self.update.clone()));
 
         // With client-side decorations the compositor stops drawing the drop
         // shadow along with the frame, so the window has to bring its own:
@@ -2850,6 +2957,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_file_panel_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::show_about_action))
+            .on_action(cx.listener(Self::check_updates_action))
             .on_action(cx.listener(Self::select_tab_action))
             .on_action(cx.listener(Self::dismiss_dialog_action))
             .child(toolbar)
@@ -2861,7 +2969,8 @@ impl Render for Workspace {
             .children(empty_context)
             .children(dialog)
             .children(settings)
-            .children(about);
+            .children(about)
+            .children(update);
 
         let Some(tiling) = tiling else {
             // A server-decorated window: the compositor frames and shadows
@@ -3190,8 +3299,8 @@ fn window_appearance(window: &WindowSettings) -> WindowBackgroundAppearance {
 /// backend label the items with their key equivalents; register the bindings
 /// first so the keymap it reads is already populated.
 ///
-/// About, Settings and Quit live in the application menu because that is where
-/// macOS users look for them.
+/// About, Check for updates, Settings and Quit live in the application menu
+/// because that is where macOS users look for them.
 ///
 /// The item labels are translated, but the application menu's own name is the
 /// "logman" wordmark and stays as it is. Rebuilt and re-installed whenever the
@@ -3202,6 +3311,7 @@ fn app_menus() -> Vec<Menu> {
             name: "logman".into(),
             items: vec![
                 MenuItem::action(ts!("menu.about"), ShowAbout),
+                MenuItem::action(ts!("menu.check_updates"), CheckUpdates),
                 MenuItem::separator(),
                 MenuItem::action(ts!("menu.settings"), OpenSettings),
                 MenuItem::separator(),
@@ -3312,6 +3422,16 @@ fn main() {
         if let Err(error) = logman_core::init_secrets() {
             log::warn!("the OS keychain is unavailable: {error}");
         }
+
+        // A self-update renames the copy it replaces aside instead of deleting
+        // it — Windows cannot delete a running image, and one code path for
+        // three platforms is worth more than an immediate unlink on the two
+        // that could. This is the other half: the leftover is swept up on the
+        // next launch. On the background executor because removing a `.app`
+        // bundle is a recursive delete and nothing on screen depends on it.
+        cx.background_executor()
+            .spawn(async { update::clean_leftovers() })
+            .detach();
 
         // Load settings before the widget layer installs its default theme, then
         // override that theme to match what the user configured.

@@ -40,6 +40,10 @@ menu:
   break_out_pane: Move pane to its own tab
   settings: Settings…
   about: About logman
+  # Both the in-app row and the macOS menu-bar item, and also the title of the
+  # dialog it opens — so no trailing ellipsis, which would read oddly as a
+  # heading.
+  check_updates: Check for updates
   quit: Quit
   session: Session
   # Hover label of the button that opens this menu. Named after the menu it
@@ -398,19 +402,28 @@ connection:
   select_file: Select
   saved_profiles: Saved profiles
   empty_list: No saved profiles yet. Fill in the form and connect — the connection is saved automatically.
-  # The row pinned above the saved profiles, and the panel that replaces the
-  # form once it is selected. Unix only: there is no local terminal to offer on
-  # Windows. `%{shell}` is the name of the user's login shell — a value, like
-  # the host and port samples above, and never translated.
+  # The rows pinned above the saved profiles, and the panel that replaces the
+  # form once one of them is selected. `%{shell}` is the shell's own name — a
+  # value, like the host and port samples above, and never translated. Neither
+  # is `WSL`, which the Windows rows carry in place of `name` and which is a
+  # product name rather than a word.
   #
-  # `name` doubles as the dialog's own title while the row is selected, since
-  # neither "New connection" nor "Connect" describes opening a local shell.
-  # `title` deliberately says something other than `name`, so the panel reads as
-  # an explanation of the row rather than as a repeat of it.
+  # `name` doubles as the dialog's own title while a local row is selected,
+  # since neither "New connection" nor "Connect" describes opening a local
+  # shell. `title` deliberately says something other than `name`, so the panel
+  # reads as an explanation of the row rather than as a repeat of it.
+  #
+  # The two hints differ in one clause, and only because the platforms do. Unix
+  # pins a single row, the login shell the user was given, so the sentence can
+  # say which shell that is and why. Windows pins one row per shell it can
+  # start — PowerShell, cmd, one per WSL distribution — and the user has just
+  # chosen among them, so `hint_shell` names the choice and stops there. Each
+  # is used on its own platform only.
   local:
     name: Local terminal
     title: Shell on this computer
     hint: "Opens %{shell}, your login shell, in a new tab. It runs on this computer, so there is no host to reach and no password to enter."
+    hint_shell: "Opens %{shell} in a new tab. It runs on this computer, so there is no host to reach and no password to enter."
   name: Name
   host: Host
   port: Port
@@ -560,3 +573,34 @@ about:
   tagline: A multi-platform GUI SSH terminal built on gpui.
   license: "Licensed under %{license}."
   credits: Built with gpui 0.2.2 (vendored and patched), russh and alacritty_terminal.
+
+# The update dialog, in all of its states: the announcement the start-up check
+# puts up when GitHub has a newer release than the running build, the manual
+# check from the menu, and the download that installs it. Both version numbers
+# are values, not words, and the name `logman` is not translated either.
+update:
+  title: Update available
+  available: "logman %{version} is available."
+  # Second line, quieter than the first: which build the user is looking at
+  # right now, so the offer means something without them going to the about box.
+  installed: "You are currently running %{version}."
+  # Downloads the release built for this platform and restarts into it. Falls
+  # back to opening the release page where the project publishes no such build.
+  update: Update
+  # Never mention *this* release again. A later one still announces itself, so
+  # the wording has to name the version rather than promise silence in general.
+  ignore: Ignore this version
+  # A check the user asked for, before the answer arrives. The start-up check
+  # shows nothing at all until it has one.
+  checking: Checking for updates…
+  # The answer no other path ever shows: the start-up check stays silent here.
+  up_to_date: You are up to date.
+  # The two halves of an install, shown above the progress bar.
+  downloading: Downloading…
+  installing: Installing…
+  # Heading of the error state. The detail printed underneath it comes from the
+  # operating system, from `tar`, or from the server, and is not translated.
+  failed: The update failed.
+  # The way out of the error state, and of a release with no build for this
+  # platform: the browser, and the user takes it from there.
+  open_release: Open the release page
