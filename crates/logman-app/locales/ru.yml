@@ -311,6 +311,15 @@ input:
 editor:
   find: Найти
   replace: Заменить
+  menu_cut: Вырезать
+  menu_copy: Копировать
+  menu_paste: Вставить
+  menu_select_all: Выделить всё
+  menu_undo: Отменить
+  menu_redo: Повторить
+  menu_toggle_comment: Переключить комментарий
+  menu_find: Найти…
+  menu_replace: Заменить…
   saving: Сохранение…
   saved: "Файл %{name} сохранён."
   save_failed: "Не удалось сохранить: %{error}"

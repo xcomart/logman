@@ -311,6 +311,15 @@ input:
 editor:
   find: Suchen
   replace: Ersetzen
+  menu_cut: Ausschneiden
+  menu_copy: Kopieren
+  menu_paste: Einfügen
+  menu_select_all: Alles auswählen
+  menu_undo: Rückgängig
+  menu_redo: Wiederherstellen
+  menu_toggle_comment: Kommentar ein-/ausschalten
+  menu_find: Suchen…
+  menu_replace: Ersetzen…
   saving: Wird gespeichert…
   saved: "%{name} gespeichert."
   save_failed: "Speichern nicht möglich: %{error}"

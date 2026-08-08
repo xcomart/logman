@@ -36,17 +36,23 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
-    MouseButton, MouseDownEvent, SharedString, Subscription, Window, actions, div, prelude::*, px,
+    Action, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
+    MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Window, actions, div,
+    prelude::*, px,
 };
 use logman_term::TerminalTheme;
 
+use crate::SHORTCUT_MODIFIER;
 use crate::editor::{EditorEvent, EditorView, palette_for};
+// The editor's own commands, reached through the module rather than imported
+// one at a time: one of them is called `Copy`, which is also the name of the
+// trait this file derives on two of its types.
+use crate::editor::view as editor_actions;
 use crate::files::{FileError, FileSource};
 use crate::i18n::ts;
 use crate::session::Session;
 use crate::terminal_view::resolve_font;
-use crate::ui::{theme, tooltip_label};
+use crate::ui::{ContextMenu, MenuEntry, theme, tooltip_label};
 
 actions!(
     logman_editor_pane,
@@ -300,6 +306,78 @@ fn save_closes_pane(closing: bool, saved_ok: bool, saved: u64, current: u64) -> 
     closing && saved_ok && saved == current
 }
 
+/// Which commands of the right-click menu may be run, given where the buffer
+/// stands.
+///
+/// Kept apart from the menu that reads it for the same reason
+/// [`save_closes_pane`] is kept apart from the save: this is the whole of the
+/// rule and none of the plumbing. Whether a row is greyed is a claim about a
+/// selection, a history and a read-only flag, and none of the three needs a
+/// pane, a session or a window in order to be checked — or tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MenuState {
+    /// Whether there is a selection, as opposed to only a caret.
+    selected: bool,
+    /// Whether the buffer accepts edits at all.
+    writable: bool,
+    /// Whether there is a change to take back.
+    can_undo: bool,
+    /// Whether there is a change to put back.
+    can_redo: bool,
+}
+
+impl MenuState {
+    /// Reads the four predicates off the editor as it stands.
+    fn of(editor: &EditorView) -> Self {
+        Self {
+            selected: editor.has_selection(),
+            writable: !editor.is_read_only(),
+            can_undo: editor.can_undo(),
+            can_redo: editor.can_redo(),
+        }
+    }
+
+    /// Cut takes the selection *out*, so it wants both something to take and a
+    /// buffer that may lose it.
+    const fn cut(self) -> bool {
+        self.selected && self.writable
+    }
+
+    /// Copy only reads, so a read-only buffer still offers it.
+    const fn copy(self) -> bool {
+        self.selected
+    }
+
+    /// Paste needs nowhere to paste *from* — an empty clipboard is the
+    /// platform's answer and not something to ask about here — only somewhere
+    /// to paste to.
+    const fn paste(self) -> bool {
+        self.writable
+    }
+
+    /// Undo and redo follow the history and nothing else: a read-only buffer
+    /// has no history to begin with.
+    const fn undo(self) -> bool {
+        self.can_undo
+    }
+
+    /// See [`MenuState::undo`].
+    const fn redo(self) -> bool {
+        self.can_redo
+    }
+
+    /// The comment toggle writes `#` at the head of the selected lines, so it
+    /// is an edit like any other.
+    const fn toggle_comment(self) -> bool {
+        self.writable
+    }
+
+    /// Find is offered on any buffer; replace is an edit, and is not.
+    const fn replace(self) -> bool {
+        self.writable
+    }
+}
+
 /// The message strip under the editor, when there is something to say.
 struct Message {
     /// The sentence.
@@ -347,6 +425,13 @@ pub struct EditorPane {
     close_after_save: bool,
     /// The line under the editor, if anything has been said.
     message: Option<Message>,
+    /// Where the right-click that asked for the context menu landed, in window
+    /// coordinates, while that menu is open.
+    ///
+    /// The pane holds it rather than the editor because the editor holds none of
+    /// the strings such a menu needs — it reports the press as
+    /// [`EditorEvent::ContextMenu`] and leaves the drawing here.
+    context: Option<Point<Pixels>>,
     /// Focus target of the pane as a whole; the editor inside has its own.
     focus_handle: FocusHandle,
     /// Keeps the buffer-change subscription alive.
@@ -374,14 +459,9 @@ pub fn init(cx: &mut App) {
 /// The save button's tooltip: the command, and the key that already is it.
 ///
 /// Spelled with the platform's own modifier, the same choice [`init`] makes
-/// when it binds the key.
+/// when it binds the key and the same one the menu's shortcut hints make.
 fn save_shortcut_label() -> String {
-    let modifier = if cfg!(target_os = "macos") {
-        "Cmd"
-    } else {
-        "Ctrl"
-    };
-    format!("{} ({modifier}+S)", ts!("common.save"))
+    format!("{} ({SHORTCUT_MODIFIER}+S)", ts!("common.save"))
 }
 
 impl EditorPane {
@@ -404,8 +484,13 @@ impl EditorPane {
             editor
         });
         let editor_events = cx.subscribe(&editor, |pane, _editor, event: &EditorEvent, cx| {
-            if matches!(event, EditorEvent::Changed) {
-                pane.on_changed(cx);
+            match event {
+                EditorEvent::Changed => pane.on_changed(cx),
+                EditorEvent::ContextMenu { position } => pane.open_context(*position, cx),
+                // Nothing here follows the caret: the header shows the file and
+                // not the position in it, and the menu reads the selection when
+                // it is built rather than tracking it.
+                EditorEvent::SelectionChanged => {}
             }
         });
         let session_changed = cx.observe(&session, |_pane, _session, cx| cx.notify());
@@ -421,6 +506,7 @@ impl EditorPane {
             saving: false,
             close_after_save: false,
             message: None,
+            context: None,
             focus_handle: cx.focus_handle(),
             _editor_events: editor_events,
             _session: session_changed,
@@ -461,6 +547,133 @@ impl EditorPane {
         // moves on from it.
         self.message = None;
         cx.notify();
+    }
+
+    /// Raises the right-click menu at `position`, in window coordinates.
+    ///
+    /// The press is also reported as a focus, the way the left button's is: the
+    /// editor has already taken the keyboard by the time it reports the click,
+    /// so a pane whose menu is open but whose accent frame sits on a sibling
+    /// would be showing the wrong pane as active. The terminal's right-click
+    /// says the same thing for the same reason.
+    fn open_context(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.context = Some(position);
+        cx.emit(EditorPaneEvent::Focused);
+        cx.notify();
+    }
+
+    /// Puts the right-click menu away.
+    fn close_context(&mut self, cx: &mut Context<Self>) {
+        self.context = None;
+        cx.notify();
+    }
+
+    /// The rows of the right-click menu, in the order the keyboard offers them.
+    ///
+    /// Every row *dispatches* an action rather than calling a method: the editor
+    /// exposes no method for any of these and should not have to, so the menu
+    /// and the chord are one command reaching one handler. The editor's own
+    /// commands go to the editor's focus handle, which is what puts them in the
+    /// `Editor` key context; "Save" goes to the pane's, because saving is the
+    /// pane's — the widget has nowhere to save to.
+    ///
+    /// The handles are dispatched to whether or not they hold the focus, but in
+    /// practice the editor has just taken it: the right-click that opened this
+    /// menu focused the buffer before it reported the press.
+    fn menu_entries(&self, cx: &mut Context<Self>) -> Vec<MenuEntry> {
+        let editor = self.editor.read(cx);
+        let state = MenuState::of(editor);
+        let editor_handle = editor.focus_handle(cx);
+        let pane_handle = self.focus_handle.clone();
+
+        let row = |label: SharedString, key: &str, enabled: bool, action: Box<dyn Action>| {
+            let handle = editor_handle.clone();
+            MenuEntry::new(label)
+                .shortcut(format!("{SHORTCUT_MODIFIER}+{key}"))
+                .enabled(enabled)
+                .on_activate(move |window, cx| handle.dispatch_action(&*action, window, cx))
+        };
+
+        vec![
+            row(
+                ts!("editor.menu_cut"),
+                "X",
+                state.cut(),
+                Box::new(editor_actions::Cut),
+            ),
+            row(
+                ts!("editor.menu_copy"),
+                "C",
+                state.copy(),
+                Box::new(editor_actions::Copy),
+            ),
+            row(
+                ts!("editor.menu_paste"),
+                "V",
+                state.paste(),
+                Box::new(editor_actions::Paste),
+            ),
+            MenuEntry::separator(),
+            row(
+                ts!("editor.menu_select_all"),
+                "A",
+                true,
+                Box::new(editor_actions::SelectAll),
+            ),
+            MenuEntry::separator(),
+            row(
+                ts!("editor.menu_undo"),
+                "Z",
+                state.undo(),
+                Box::new(editor_actions::Undo),
+            ),
+            row(
+                ts!("editor.menu_redo"),
+                "Shift+Z",
+                state.redo(),
+                Box::new(editor_actions::Redo),
+            ),
+            MenuEntry::separator(),
+            row(
+                ts!("editor.menu_toggle_comment"),
+                "/",
+                state.toggle_comment(),
+                Box::new(editor_actions::ToggleComment),
+            ),
+            MenuEntry::separator(),
+            row(
+                ts!("editor.menu_find"),
+                "F",
+                true,
+                Box::new(editor_actions::Find),
+            ),
+            row(
+                ts!("editor.menu_replace"),
+                "H",
+                state.replace(),
+                Box::new(editor_actions::Replace),
+            ),
+            MenuEntry::separator(),
+            MenuEntry::new(ts!("common.save"))
+                .shortcut(format!("{SHORTCUT_MODIFIER}+S"))
+                .on_activate(move |window, cx| {
+                    pane_handle.dispatch_action(&SaveFile, window, cx);
+                }),
+        ]
+    }
+
+    /// Builds the menu a right-click in the buffer opens, if one is open.
+    fn render_context(&self, cx: &mut Context<Self>) -> Option<ContextMenu> {
+        let position = self.context?;
+        let this = cx.entity();
+        Some(
+            ContextMenu::new("editor-pane-context")
+                .position(position)
+                .entries(self.menu_entries(cx))
+                .on_dismiss(move |_window, cx| {
+                    this.update(cx, |pane, cx| pane.close_context(cx));
+                }),
+        )
     }
 
     /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>S</kbd>.
@@ -720,6 +933,10 @@ impl Render for EditorPane {
             .child(header)
             .child(div().flex_1().min_h_0().child(self.editor.clone()))
             .children(message)
+            // Last, and positioned in window coordinates, so the panel paints
+            // over the buffer and the message strip alike rather than being
+            // clipped to the box it is declared in.
+            .children(self.render_context(cx))
     }
 }
 
@@ -846,6 +1063,65 @@ mod tests {
         // The write carried revision 7 and the buffer is at 8: what was typed
         // in between is unsaved, so the close question is unanswered still.
         assert!(!save_closes_pane(true, true, 7, 8));
+    }
+
+    /// A buffer with a caret and nothing else: the state a right-click on an
+    /// untouched file finds.
+    const IDLE: MenuState = MenuState {
+        selected: false,
+        writable: true,
+        can_undo: false,
+        can_redo: false,
+    };
+
+    #[test]
+    fn with_nothing_selected_there_is_nothing_to_cut_or_copy() {
+        assert!(!IDLE.cut());
+        assert!(!IDLE.copy());
+        // Paste is about where the text is going, not about what is highlighted.
+        assert!(IDLE.paste());
+    }
+
+    #[test]
+    fn a_selection_opens_the_clipboard_rows() {
+        let state = MenuState {
+            selected: true,
+            ..IDLE
+        };
+        assert!(state.cut());
+        assert!(state.copy());
+    }
+
+    #[test]
+    fn a_read_only_buffer_offers_only_the_commands_that_read_it() {
+        let state = MenuState {
+            selected: true,
+            writable: false,
+            ..IDLE
+        };
+        // Copy takes a copy and changes nothing, so it stands; the three that
+        // would write do not.
+        assert!(state.copy());
+        assert!(!state.cut());
+        assert!(!state.paste());
+        assert!(!state.toggle_comment());
+        assert!(!state.replace());
+    }
+
+    #[test]
+    fn undo_and_redo_follow_the_history_and_nothing_else() {
+        assert!(!IDLE.undo());
+        assert!(!IDLE.redo());
+
+        let undone = MenuState {
+            can_undo: true,
+            can_redo: true,
+            // Neither one asks about the selection.
+            selected: false,
+            ..IDLE
+        };
+        assert!(undone.undo());
+        assert!(undone.redo());
     }
 
     #[test]

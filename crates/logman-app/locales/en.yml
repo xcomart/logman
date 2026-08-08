@@ -586,6 +586,26 @@ editor:
   find: Find
   # Placeholder of the field beneath it, shown only while replacing.
   replace: Replace
+  # The rows of the menu a right-click in the buffer opens. Imperatives, unlike
+  # the two placeholders above, and separate keys from them for exactly that
+  # reason: a language that spells a command differently from the box it fills
+  # needs somewhere to say so. Each row is one of the editor's own commands and
+  # is greyed out when the buffer cannot answer it — nothing is selected, the
+  # history is empty, the file is read-only — so the wording never has to hedge.
+  # A row that saves the file is at the foot of the menu under `common.save`.
+  menu_cut: Cut
+  menu_copy: Copy
+  menu_paste: Paste
+  menu_select_all: Select all
+  menu_undo: Undo
+  menu_redo: Redo
+  # Comments the selected lines out, or uncomments them if they all already are.
+  # Worded for no language in particular: the buffer is plain text, the prefix
+  # is always `#`, and the editor never learns what kind of file it is holding.
+  menu_toggle_comment: Toggle comment
+  # Both open the find bar — the second with its replace row already showing.
+  menu_find: Find…
+  menu_replace: Replace…
   # In the pane's header while a save is in flight. It sits next to the file
   # name, so it says what is happening and not what to.
   saving: Saving…

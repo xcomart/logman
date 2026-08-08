@@ -311,6 +311,15 @@ input:
 editor:
   find: 查找
   replace: 替换
+  menu_cut: 剪切
+  menu_copy: 复制
+  menu_paste: 粘贴
+  menu_select_all: 全选
+  menu_undo: 撤销
+  menu_redo: 重做
+  menu_toggle_comment: 切换注释
+  menu_find: 查找…
+  menu_replace: 替换…
   saving: 正在保存…
   saved: "已保存 %{name}。"
   save_failed: "无法保存：%{error}"

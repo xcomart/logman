@@ -311,6 +311,15 @@ input:
 editor:
   find: 検索
   replace: 置換
+  menu_cut: 切り取り
+  menu_copy: コピー
+  menu_paste: 貼り付け
+  menu_select_all: すべて選択
+  menu_undo: 元に戻す
+  menu_redo: やり直す
+  menu_toggle_comment: コメントの切り替え
+  menu_find: 検索…
+  menu_replace: 置換…
   saving: 保存中…
   saved: "%{name} を保存しました。"
   save_failed: "保存できませんでした: %{error}"

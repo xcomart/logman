@@ -311,6 +311,15 @@ input:
 editor:
   find: Rechercher
   replace: Remplacer
+  menu_cut: Couper
+  menu_copy: Copier
+  menu_paste: Coller
+  menu_select_all: Tout sélectionner
+  menu_undo: Annuler
+  menu_redo: Rétablir
+  menu_toggle_comment: Commenter ou décommenter
+  menu_find: Rechercher…
+  menu_replace: Remplacer…
   saving: Enregistrement…
   saved: "%{name} enregistré."
   save_failed: "Impossible d'enregistrer : %{error}"
