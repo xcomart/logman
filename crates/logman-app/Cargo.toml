@@ -58,6 +58,10 @@ log.workspace = true
 env_logger.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Read-only, and by one module: `src/editor/syntax/custom.rs` parses the
+# language definitions in the `syntaxes` directory. See the workspace manifest
+# for why YAML and why this fork of the reader.
+serde_norway.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true
 # The document behind `src/editor/`. See the workspace manifest for why a rope

@@ -118,6 +118,27 @@ ropey = { version = "1.6", default-features = false, features = [
     "cr_lines",
     "simd",
 ] }
+# --- user-supplied syntax definitions: the editor's extra languages ---
+# The editor ships six hand-written lexers; anything beyond them comes from a
+# definition file the user drops into the `syntaxes` directory. YAML rather than
+# the JSON every other configuration file here is written in, because these
+# files are *only* ever hand-written: they want comments, and they are mostly
+# quotes, backslashes and brackets — exactly the characters JSON makes a person
+# double-escape. Nothing writes one, so this is a read-only dependency of
+# `logman-app` and no serializer of it is ever linked.
+#
+# The obvious crate, `serde_yaml`, was archived in March 2024 and its last
+# release says `+deprecated` in its own version number, so the choice is between
+# the two maintained forks. They are the same size to the byte: both depend on
+# `indexmap`, `itoa`, `ryu`, `serde` and a libyaml binding, and the first four
+# are already in the lockfile, so either adds exactly two crates to the build.
+# The tie-break is what that fifth dependency *is*. `serde_yaml_ng` still pulls
+# dtolnay's `unsafe-libyaml` 0.2.11, which was archived alongside `serde_yaml`
+# itself — the fork would inherit the very dead code it was made to escape —
+# whereas `serde_norway` carries `unsafe-libyaml-norway`, a fork of that binding
+# that is still receiving releases. The crate has no features at all, default or
+# otherwise, so there is nothing here to turn off.
+serde_norway = "0.9"
 futures = "0.3"
 async-trait = "0.1"
 bitflags = "2"

@@ -9,10 +9,10 @@
 //! * Linux: `~/.config/logman`
 //!
 //! Most of what logman persists is a single file in that directory —
-//! [`config_file`], [`known_hosts_file`], [`settings_file`]. Two kinds of
-//! user-supplied appearance files get a subdirectory each instead, because
-//! there is no fixed number of them: [`ui_themes_dir`] holds UI theme files and
-//! [`schemes_dir`] holds terminal color scheme files.
+//! [`config_file`], [`known_hosts_file`], [`settings_file`]. The kinds of file
+//! the user may supply any number of get a subdirectory each instead:
+//! [`ui_themes_dir`] holds UI theme files, [`schemes_dir`] terminal color
+//! scheme files, and [`syntaxes_dir`] the editor's language definitions.
 
 use std::ffi::OsString;
 use std::fs;
@@ -36,6 +36,9 @@ const UI_THEMES_DIR_NAME: &str = "themes";
 
 /// Name of the directory holding user-supplied terminal color scheme files.
 const SCHEMES_DIR_NAME: &str = "schemes";
+
+/// Name of the directory holding user-supplied syntax definition files.
+const SYNTAXES_DIR_NAME: &str = "syntaxes";
 
 /// Byte order mark that Windows editors readily prepend to UTF-8 files.
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
@@ -121,6 +124,21 @@ pub fn schemes_dir() -> Result<PathBuf> {
     Ok(config_dir()?.join(SCHEMES_DIR_NAME))
 }
 
+/// Directory holding the editor's user-supplied language definitions
+/// (`syntaxes`).
+///
+/// One `*.yml` or `*.yaml` file per language, whose stem is the language's id.
+/// Unlike the two directories above these files are read and never written, so
+/// nothing here creates the directory: a user who has never defined a language
+/// simply has none.
+///
+/// # Errors
+///
+/// Fails when no home directory can be determined for the current user.
+pub fn syntaxes_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join(SYNTAXES_DIR_NAME))
+}
+
 /// Build a unique temporary path next to `path`.
 ///
 /// Keeping the temporary file in the same directory guarantees that the final
@@ -189,7 +207,10 @@ mod tests {
         let settings = settings_file().expect("settings file");
         let themes = ui_themes_dir().expect("themes dir");
         let schemes = schemes_dir().expect("schemes dir");
+        let syntaxes = syntaxes_dir().expect("syntaxes dir");
 
+        assert_eq!(syntaxes.parent(), Some(dir.as_path()));
+        assert_eq!(syntaxes.file_name().unwrap(), SYNTAXES_DIR_NAME);
         assert_eq!(profiles.parent(), Some(dir.as_path()));
         assert_eq!(hosts.parent(), Some(dir.as_path()));
         assert_eq!(settings.parent(), Some(dir.as_path()));

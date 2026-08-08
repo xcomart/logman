@@ -1,6 +1,7 @@
 //! Detection, the invariants every lexer owes the renderer, and the helpers the
 //! per-language tests are written with.
 
+use super::custom::tests::lock_registry;
 use super::*;
 
 /// Asserts that `tokens` tile `line`: in order, no gaps, no overlaps, every
@@ -32,7 +33,11 @@ pub(super) fn kinds<'a>(line: &'a str, tokens: &[Token]) -> Vec<(TokenKind, &'a 
         .collect()
 }
 
-/// Every language, for the properties that hold of all of them.
+/// Every built-in language, for the properties that hold of all of them.
+///
+/// A user-defined one is not here: what it does is decided by a file, and the
+/// properties below are the ones this module decides. [`super::custom`] holds
+/// the tests that install a definition and check it.
 const ALL: [Language; 7] = [
     Language::Plain,
     Language::Shell,
@@ -45,6 +50,10 @@ const ALL: [Language; 7] = [
 
 #[test]
 fn an_extension_names_the_language() {
+    // Every test that expects a name to come out `Plain` holds the registry:
+    // it is process-wide, and a definition another test installed would be
+    // what answers for the names nothing built in claims.
+    let _guard = lock_registry();
     for (name, expected) in [
         ("deploy.sh", Language::Shell),
         ("run.bash", Language::Shell),
@@ -92,6 +101,7 @@ fn a_name_with_no_extension_is_matched_whole() {
 
 #[test]
 fn a_dotfile_is_not_all_extension() {
+    let _guard = lock_registry();
     // The trap the whole-name table exists for: splitting `.bashrc` on its dot
     // leaves `bashrc`, which is not an extension anybody registers.
     assert_eq!(Language::detect(".bash_profile", ""), Language::Shell);
@@ -101,6 +111,7 @@ fn a_dotfile_is_not_all_extension() {
 
 #[test]
 fn a_shebang_speaks_only_for_a_name_with_no_extension() {
+    let _guard = lock_registry();
     assert_eq!(Language::detect("deploy", "#!/bin/sh"), Language::Shell);
     assert_eq!(
         Language::detect("deploy", "#!/bin/bash -e"),
@@ -181,6 +192,35 @@ fn a_plain_buffer_is_one_run_a_line_and_carries_nothing() {
     );
     assert!(state.is_start());
     assert!(lex_line("", LineState::START, Language::Plain).0.is_empty());
+}
+
+#[test]
+fn every_built_in_language_names_itself_for_the_picker() {
+    // Proper names, spelled the way the formats spell themselves: these rows go
+    // into a menu untranslated, so a lowercase `json` or a `Yaml` would be a
+    // typo on screen in every locale at once.
+    let names: Vec<&str> = ALL.iter().map(|language| language.name()).collect();
+    assert_eq!(
+        names,
+        [
+            "Plain Text",
+            "Shell",
+            "YAML",
+            "JSON",
+            "TOML",
+            "Conf",
+            "Dockerfile"
+        ]
+    );
+}
+
+#[test]
+fn the_picker_lists_the_built_in_languages_first_and_in_order() {
+    // Nothing registered, so the list is the built-in seven and stops there.
+    // Plain text leads, being the answer to "colour none of this" rather than a
+    // format among the others.
+    let _guard = lock_registry();
+    assert_eq!(Language::all(), ALL.to_vec());
 }
 
 #[test]

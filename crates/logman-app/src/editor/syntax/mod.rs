@@ -30,8 +30,23 @@
 //! take the text system down with it. [`Runs`] is what makes that true by
 //! construction rather than by care: a lexer only ever says "this span is
 //! interesting", and the gaps between become plain runs on their own.
+//!
+//! # Six by hand, and as many more as a file can describe
+//!
+//! Six formats have a lexer of their own here because they are the six a file
+//! panel over a server reaches every day. The seventh is [`mod@custom`]: one
+//! general scanner driven by a YAML definition, which is what keeps this module
+//! from growing a new hand-written scanner every time somebody opens a `.py`.
+//! Ten such definitions ship compiled into the binary — C, C++, C#, Go, Java,
+//! JavaScript, Python, Rust, SQL, TypeScript — and the user's `syntaxes`
+//! directory holds as many more as they care to write, any of which may replace
+//! a shipped one by taking its name. A definition can only add a language,
+//! never take one of these six over — [`Language::detect`] asks the built-in
+//! table first — and what it can express stops where a line-at-a-time scanner
+//! does; [`mod@custom`] documents the schema and its limits.
 
 pub mod conf;
+pub mod custom;
 pub mod dockerfile;
 pub mod json;
 pub mod shell;
@@ -147,6 +162,11 @@ pub(crate) enum Carry {
     /// A Dockerfile instruction the previous line ended with a `\`, so this
     /// line continues it rather than starting a new one.
     Continued,
+    /// A block comment a user-defined language left open.
+    CustomComment,
+    /// A user-defined language's multi-line string, carrying which of the
+    /// definition's string rules opened it.
+    CustomString(u8),
 }
 
 /// The state a line ends in, and the state the next one starts from.
@@ -183,6 +203,13 @@ pub enum Language {
     Conf,
     /// `Dockerfile`, `Dockerfile.*`, `Containerfile`.
     Dockerfile,
+    /// A language the user defined, by its index in [`custom::definitions`].
+    ///
+    /// An index rather than a name because it is compared and copied on every
+    /// line and stored in every open editor. It is stable because the registry
+    /// is written once, at start-up, and only read afterwards — see
+    /// [`mod@custom`] for why that is the deal and what it buys.
+    Custom(usize),
 }
 
 impl Language {
@@ -195,13 +222,31 @@ impl Language {
     /// shebang. The shebang is last because a `.yml` that happens to start with
     /// `#!` is still YAML, and it is consulted at all because half the shell
     /// scripts on a server are called `deploy` rather than `deploy.sh`.
+    ///
+    /// The definitions are asked only once all three have come back with
+    /// [`Language::Plain`], so a definition file can add a language but never
+    /// take one over. That is the outer half of the precedence rule, and it is
+    /// this way round because a definition is one file in a directory the user
+    /// may have forgotten about, while a built-in language is what every other
+    /// logman colours a `.yml` as. The inner half — the user's own definitions
+    /// ahead of the ten logman ships, and a user file replacing a shipped one
+    /// of the same name — is [`custom::assembled`]'s.
     pub fn detect(name: &str, first_line: &str) -> Self {
         // A caller with a whole path should not be mis-detected on the strength
         // of a directory called `bin.d`.
         let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
         let lower = name.to_ascii_lowercase();
 
-        if let Some(language) = Self::by_name(&lower) {
+        let builtin = Self::builtin(&lower, first_line);
+        if builtin != Self::Plain {
+            return builtin;
+        }
+        custom::detect(&lower, first_line).unwrap_or(Self::Plain)
+    }
+
+    /// The language of `lower` among the six that ship with logman.
+    fn builtin(lower: &str, first_line: &str) -> Self {
+        if let Some(language) = Self::by_name(lower) {
             return language;
         }
         // A leading dot is not an extension: `.bashrc` splits into an empty
@@ -276,26 +321,65 @@ impl Language {
     /// it were, which costs a handful of keywords and no correctness: the
     /// comments, strings and expansions this highlights are the same in both.
     fn by_shebang(first_line: &str) -> Self {
-        let Some(rest) = first_line.strip_prefix("#!") else {
-            return Self::Plain;
-        };
-        let mut words = rest.split_whitespace();
-        let Some(mut interpreter) = words.next() else {
-            return Self::Plain;
-        };
-        // `#!/usr/bin/env bash` names the interpreter in the next word.
-        if interpreter.rsplit('/').next() == Some("env") {
-            let Some(next) = words.next() else {
-                return Self::Plain;
-            };
-            interpreter = next;
+        match shebang_interpreter(first_line) {
+            Some(leaf) if leaf.ends_with("sh") => Self::Shell,
+            _ => Self::Plain,
         }
-        let leaf = interpreter.rsplit('/').next().unwrap_or(interpreter);
-        if leaf.ends_with("sh") {
-            Self::Shell
-        } else {
-            Self::Plain
+    }
+
+    /// What this language is called, for a list the user picks from.
+    ///
+    /// Proper names, and so the same in every locale: `YAML` and `Dockerfile`
+    /// are spelled that way wherever the application is read. [`Language::Plain`]
+    /// is the exception in kind — "plain text" describes a file rather than
+    /// naming a format — and the answer here is the technical fallback; the
+    /// picker localises that one row, since this module holds no strings a
+    /// translator could reach.
+    ///
+    /// A user-defined language answers with the `name` of its definition, which
+    /// is what the file called itself.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Plain => "Plain Text",
+            Self::Shell => "Shell",
+            Self::Yaml => "YAML",
+            Self::Json => "JSON",
+            Self::Toml => "TOML",
+            Self::Conf => "Conf",
+            Self::Dockerfile => "Dockerfile",
+            Self::Custom(index) => custom::name(index),
         }
+    }
+
+    /// Every language an open file may be set to, in the order a picker lists
+    /// them.
+    ///
+    /// The seven built in first and in the order they are declared — plain text
+    /// at the head, because it is the one row that is an answer to "colour none
+    /// of this" rather than a format — then everything the registry holds, by
+    /// name. The registry's own order is its *search* order, user definitions
+    /// ahead of shipped ones so that a `.py` of the user's wins; that order says
+    /// nothing to somebody reading a list, and a list of thirty formats is read
+    /// alphabetically or not at all.
+    ///
+    /// Built fresh on each call rather than cached: it is built when a menu
+    /// opens, and the alternative is a second static that has to be invalidated
+    /// when the registry is written.
+    pub fn all() -> Vec<Self> {
+        let mut all = vec![
+            Self::Plain,
+            Self::Shell,
+            Self::Yaml,
+            Self::Json,
+            Self::Toml,
+            Self::Conf,
+            Self::Dockerfile,
+        ];
+        let mut registered: Vec<Self> =
+            (0..custom::definitions().len()).map(Self::Custom).collect();
+        registered.sort_by_key(|language| language.name().to_lowercase());
+        all.extend(registered);
+        all
     }
 
     /// What the comment toggle puts at the head of a line, when the format has
@@ -308,9 +392,14 @@ impl Language {
     /// config file the detector did not place, far more often than it is prose,
     /// and refusing the toggle there would take away something that worked
     /// before any of this existed.
-    pub const fn line_comment(self) -> Option<&'static str> {
+    ///
+    /// A user-defined language answers with its `comment` key, and a definition
+    /// that names none is treated exactly as JSON is: no toggle, and a greyed
+    /// menu row.
+    pub fn line_comment(self) -> Option<&'static str> {
         match self {
             Self::Json => None,
+            Self::Custom(index) => custom::line_comment(index),
             _ => Some("#"),
         }
     }
@@ -322,7 +411,7 @@ impl Language {
     /// that answer `true`. For the others every line is lexed from
     /// [`LineState::START`], so there is nothing worth remembering and a vector
     /// of `START` as long as a hundred-thousand-line log is worth avoiding.
-    pub const fn carries_state(self) -> bool {
+    pub fn carries_state(self) -> bool {
         match self {
             // A plain line is one run; a JSON string may not contain a newline;
             // an ini or `.env` line is a mapping and ends with itself.
@@ -330,6 +419,9 @@ impl Language {
             // Quotes and heredocs; block scalars; multi-line strings; a `\`
             // continuation.
             Self::Shell | Self::Yaml | Self::Toml | Self::Dockerfile => true,
+            // A definition carries only if it declared something that can cross
+            // a line: a block comment, or a string written as a delimiter pair.
+            Self::Custom(index) => custom::carries_state(index),
         }
     }
 }
@@ -348,7 +440,23 @@ pub fn lex_line(line: &str, state: LineState, language: Language) -> (Vec<Token>
         Language::Toml => toml::lex_line(line, state),
         Language::Conf => (conf::lex_line(line), LineState::START),
         Language::Dockerfile => dockerfile::lex_line(line, state),
+        Language::Custom(index) => custom::lex_line(line, state, index),
     }
+}
+
+/// The interpreter a `#!` line names, reduced to its last path segment.
+///
+/// `#!/usr/bin/env bash` names it in the second word, which is why this is not
+/// a `split('/').last()` at the call site. `None` when the line is not a
+/// shebang or names nothing.
+fn shebang_interpreter(first_line: &str) -> Option<&str> {
+    let rest = first_line.strip_prefix("#!")?;
+    let mut words = rest.split_whitespace();
+    let mut interpreter = words.next()?;
+    if interpreter.rsplit('/').next() == Some("env") {
+        interpreter = words.next()?;
+    }
+    Some(interpreter.rsplit('/').next().unwrap_or(interpreter))
 }
 
 /// One run over the whole line, which is what the editor drew before it could
