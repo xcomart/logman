@@ -17,6 +17,7 @@ menu:
   break_out_pane: ペインを新しいタブに分離
   settings: 設定…
   about: logman について
+  check_updates: 更新を確認
   quit: 終了
   session: セッション
   tip_menu: メニュー
@@ -310,3 +311,16 @@ about:
   tagline: gpui で作られたマルチプラットフォームの GUI SSH ターミナルです。
   license: "%{license} ライセンスで配布されています。"
   credits: gpui 0.2.2 (ベンダリングとパッチ適用)、russh、alacritty_terminal を利用しています。
+
+update:
+  title: 更新があります
+  available: "logman %{version} が利用できます。"
+  installed: "現在実行中のバージョンは %{version} です。"
+  update: 更新
+  ignore: このバージョンを無視
+  checking: 更新を確認しています…
+  up_to_date: 最新バージョンです。
+  downloading: ダウンロードしています…
+  installing: インストールしています…
+  failed: 更新に失敗しました。
+  open_release: リリースページを開く

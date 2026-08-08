@@ -17,6 +17,7 @@ menu:
   break_out_pane: Separar en nueva pestaña
   settings: Configuración…
   about: Acerca de logman
+  check_updates: Buscar actualizaciones
   quit: Salir
   session: Sesión
   tip_menu: Menú
@@ -310,3 +311,16 @@ about:
   tagline: Un terminal SSH gráfico multiplataforma construido sobre gpui.
   license: "Distribuido bajo la licencia %{license}."
   credits: Creado con gpui 0.2.2 (incluido y parcheado), russh y alacritty_terminal.
+
+update:
+  title: Actualización disponible
+  available: "logman %{version} ya está disponible."
+  installed: "Ahora mismo estás usando la %{version}."
+  update: Actualizar
+  ignore: Ignorar esta versión
+  checking: Buscando actualizaciones…
+  up_to_date: Ya tienes la última versión.
+  downloading: Descargando…
+  installing: Instalando…
+  failed: La actualización ha fallado.
+  open_release: Abrir la página de la versión

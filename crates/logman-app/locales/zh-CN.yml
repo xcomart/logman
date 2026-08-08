@@ -17,6 +17,7 @@ menu:
   break_out_pane: 将窗格移到新标签页
   settings: 设置…
   about: 关于 logman
+  check_updates: 检查更新
   quit: 退出
   session: 会话
   tip_menu: 菜单
@@ -310,3 +311,16 @@ about:
   tagline: 基于 gpui 构建的跨平台图形界面 SSH 终端。
   license: "以 %{license} 许可证发布。"
   credits: 基于 gpui 0.2.2（已内置并打补丁）、russh 和 alacritty_terminal 构建。
+
+update:
+  title: 有可用更新
+  available: "logman %{version} 已发布。"
+  installed: "当前运行的是 %{version}。"
+  update: 更新
+  ignore: 忽略此版本
+  checking: 正在检查更新…
+  up_to_date: 已是最新版本。
+  downloading: 正在下载…
+  installing: 正在安装…
+  failed: 更新失败。
+  open_release: 打开发布页面

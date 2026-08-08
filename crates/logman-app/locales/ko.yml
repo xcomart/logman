@@ -17,6 +17,7 @@ menu:
   break_out_pane: 창을 새 탭으로 분리
   settings: 설정…
   about: logman 정보
+  check_updates: 업데이트 확인
   quit: 종료
   session: 세션
   tip_menu: 메뉴
@@ -310,3 +311,16 @@ about:
   tagline: gpui로 만든 멀티플랫폼 GUI SSH 터미널입니다.
   license: "%{license} 라이선스로 배포됩니다."
   credits: gpui 0.2.2(벤더링 및 패치), russh, alacritty_terminal을 사용합니다.
+
+update:
+  title: 업데이트 있음
+  available: "logman %{version}을(를) 사용할 수 있습니다."
+  installed: "현재 실행 중인 버전은 %{version}입니다."
+  update: 업데이트
+  ignore: 이 버전 무시
+  checking: 업데이트를 확인하는 중…
+  up_to_date: 최신 버전입니다.
+  downloading: 다운로드 중…
+  installing: 설치하는 중…
+  failed: 업데이트에 실패했습니다.
+  open_release: 릴리스 페이지 열기

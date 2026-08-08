@@ -149,6 +149,27 @@ russh = { version = "0.62", default-features = false, features = [
 # it inherits the transport (and the crypto backend) chosen above. ---
 russh-sftp = "2.3"
 
+# --- HTTPS.  One caller: the start-up update check, which asks the GitHub
+# releases API for the latest tag.  A blocking client rather than a `tokio`-based
+# one because the call is a single request made from the background executor and
+# never from the UI thread, so there is nothing for an async client to interleave
+# with; `tokio` is deliberately confined to the SSH transport.
+#
+# The feature set is spelled out even though it happens to equal the default,
+# because *which* TLS backend is chosen is load-bearing: `rustls` here resolves
+# to the `ring` provider, whereas `native-tls` would drag in `aws-lc-rs` and with
+# it a NASM requirement on Windows — the same trap the russh entry above avoids.
+# `gzip` is kept because the API answers with compressed JSON. ---
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+
+# --- SHA-256, for the self-updater.  The GitHub releases API publishes a
+# `digest` field for every asset, and an updater that overwrites its own binary
+# should check it.  `ring` is already in the tree twice over — it is the crypto
+# backend both `russh` and `ureq`'s `rustls` resolve to — so naming it directly
+# adds a dependency edge and not a crate: the version below is the one the
+# lockfile already pins for them. ---
+ring = "0.17"
+
 # --- terminal emulation (same engine Zed uses) ---
 alacritty_terminal = "0.26"
 
