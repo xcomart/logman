@@ -72,8 +72,8 @@ use i18n::ts;
 use icons::Icons;
 use pane_tree::{Axis, PaneId, PaneNode, PaneTree, SplitId};
 use session::{Session, SessionStatus};
-// Only the welcome screen's shell buttons name one of these, and only Windows
-// has that choice to offer.
+// Only a locally started shell carries one of these, and only Windows has more
+// than one filesystem such a shell could be standing in.
 #[cfg(windows)]
 use session::LocalFilesystem;
 use settings_dialog::{SettingsDialog, SettingsDialogEvent};
@@ -466,6 +466,17 @@ impl Workspace {
                         dialog.update(cx, |dialog, cx| dialog.close(cx));
                         this.open_local_session(window, cx);
                     }
+                    #[cfg(windows)]
+                    ConnectionDialogEvent::ConnectLocalShell(shell) => {
+                        dialog.update(cx, |dialog, cx| dialog.close(cx));
+                        this.open_local_command(
+                            shell.name.clone(),
+                            shell.command.clone(),
+                            shell.filesystem.clone(),
+                            window,
+                            cx,
+                        );
+                    }
                     ConnectionDialogEvent::Dismissed => {
                         dialog.update(cx, |dialog, cx| dialog.close(cx));
                         this.focus_active(window, cx);
@@ -525,6 +536,10 @@ impl Workspace {
         // `wsl.exe` is a process spawn, and the welcome screen has plenty to
         // show without it. The buttons appear underneath the fixed ones when
         // the answer lands, which is well before a user reaches for them.
+        //
+        // Run once and handed to both places that offer a local shell — the
+        // welcome screen from the field, the connection dialog from its own
+        // copy — rather than discovered twice for the same answer.
         #[cfg(windows)]
         cx.spawn(async move |this, cx| {
             let distros = cx
@@ -532,6 +547,9 @@ impl Workspace {
                 .spawn(async { wsl::list_distros() })
                 .await;
             this.update(cx, |workspace, cx| {
+                workspace.dialog.update(cx, |dialog, cx| {
+                    dialog.set_wsl_distros(&distros, cx);
+                });
                 workspace.wsl_distros = distros;
                 cx.notify();
             })
@@ -2403,80 +2421,44 @@ impl Workspace {
         #[cfg(windows)]
         {
             let this = cx.entity();
-            let local = ts!("connection.local.name");
-            // Every button is the same button but for its five parts, so it is
-            // built once here rather than three times below. The last of them —
-            // which filesystem the shell stands in — is what decides which
-            // filesystem the session's file panel browses.
-            let row = |id: ElementId,
-                       text: String,
-                       label: SharedString,
-                       command: Vec<String>,
-                       filesystem: LocalFilesystem| {
-                let this = this.clone();
-                Button::new(id, text)
-                    .variant(ButtonVariant::Secondary)
-                    .full_width(true)
-                    .on_click(move |_, window, cx| {
-                        // Cloned per press rather than moved: the handler is
-                        // kept for the life of the button and may be pressed
-                        // again, opening a second tab on the same shell.
-                        let (label, command, filesystem) =
-                            (label.clone(), command.clone(), filesystem.clone());
-                        this.update(cx, |workspace, cx| {
-                            workspace.open_local_command(label, command, filesystem, window, cx)
-                        });
-                    })
-                    .into_any_element()
-            };
 
-            // `-NoLogo` because the copyright banner is two lines of noise
-            // above the first prompt, and the user asked for a shell rather
-            // than for the version of it.
-            let mut rows = vec![
-                row(
-                    "empty-local-powershell".into(),
-                    format!("{local}  ·  PowerShell"),
-                    "PowerShell".into(),
-                    vec!["powershell.exe".to_owned(), "-NoLogo".to_owned()],
-                    LocalFilesystem::ThisMachine,
-                ),
-                row(
-                    "empty-local-cmd".into(),
-                    format!("{local}  ·  cmd"),
-                    "cmd".into(),
-                    vec!["cmd.exe".to_owned()],
-                    LocalFilesystem::ThisMachine,
-                ),
-            ];
-
-            // Labelled `WSL · <distro>` rather than as another local terminal:
-            // the shell these open is a Linux one on its own filesystem, which
-            // is a different place to be than the two above — and the same
-            // difference is what the last argument carries into the session, so
-            // that its file panel browses the distribution the shell is
-            // standing in rather than this machine's disk.
-            rows.extend(self.wsl_distros.iter().enumerate().map(|(index, distro)| {
-                row(
-                    ("empty-local-wsl", index).into(),
-                    format!("WSL  ·  {distro}"),
-                    SharedString::from(distro.clone()),
-                    // `--cd ~` starts the shell in the distribution's home
-                    // directory. Without it WSL inherits this process's
-                    // working directory and translates it, dropping the user
-                    // somewhere under `/mnt/c` instead.
-                    vec![
-                        "wsl.exe".to_owned(),
-                        "-d".to_owned(),
-                        distro.clone(),
-                        "--cd".to_owned(),
-                        "~".to_owned(),
-                    ],
-                    LocalFilesystem::Wsl {
-                        distro: distro.clone(),
-                    },
-                )
-            }));
+            // The same list the connection dialog pins above its saved
+            // profiles, built from the one place that knows how each of these
+            // shells is started — a button that opened a shell the dialog does
+            // not offer, or the other way round, would be a difference between
+            // two ways of asking for the same thing.
+            //
+            // A WSL entry labels itself `WSL` rather than as another local
+            // terminal: the shell it opens is a Linux one on a filesystem of
+            // its own, which is a different place to be than the two above it
+            // — and that difference travels into the session, so that its file
+            // panel browses the distribution the shell is standing in rather
+            // than this machine's disk.
+            let rows = session::local_shells(&self.wsl_distros)
+                .into_iter()
+                .enumerate()
+                .map(|(index, shell)| {
+                    let this = this.clone();
+                    let text = format!("{}  ·  {}", shell.kind_label(), shell.name);
+                    Button::new(("empty-local", index), text)
+                        .variant(ButtonVariant::Secondary)
+                        .full_width(true)
+                        .on_click(move |_, window, cx| {
+                            // Cloned per press rather than moved: the handler is
+                            // kept for the life of the button and may be pressed
+                            // again, opening a second tab on the same shell.
+                            let (label, command, filesystem) = (
+                                shell.name.clone(),
+                                shell.command.clone(),
+                                shell.filesystem.clone(),
+                            );
+                            this.update(cx, |workspace, cx| {
+                                workspace.open_local_command(label, command, filesystem, window, cx)
+                            });
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
 
             Some(
                 div()

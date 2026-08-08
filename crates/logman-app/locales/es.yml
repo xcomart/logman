@@ -216,6 +216,7 @@ connection:
     name: Terminal local
     title: Shell en este equipo
     hint: "Abre %{shell}, tu shell de inicio de sesión, en una pestaña nueva. Se ejecuta en este equipo, así que no hace falta ningún host ni ninguna contraseña."
+    hint_shell: "Abre %{shell} en una pestaña nueva. Se ejecuta en este equipo, así que no hace falta ningún host ni ninguna contraseña."
   name: Nombre
   host: Host
   port: Puerto

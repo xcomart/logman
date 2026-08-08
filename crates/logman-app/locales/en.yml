@@ -398,19 +398,28 @@ connection:
   select_file: Select
   saved_profiles: Saved profiles
   empty_list: No saved profiles yet. Fill in the form and connect — the connection is saved automatically.
-  # The row pinned above the saved profiles, and the panel that replaces the
-  # form once it is selected. Unix only: there is no local terminal to offer on
-  # Windows. `%{shell}` is the name of the user's login shell — a value, like
-  # the host and port samples above, and never translated.
+  # The rows pinned above the saved profiles, and the panel that replaces the
+  # form once one of them is selected. `%{shell}` is the shell's own name — a
+  # value, like the host and port samples above, and never translated. Neither
+  # is `WSL`, which the Windows rows carry in place of `name` and which is a
+  # product name rather than a word.
   #
-  # `name` doubles as the dialog's own title while the row is selected, since
-  # neither "New connection" nor "Connect" describes opening a local shell.
-  # `title` deliberately says something other than `name`, so the panel reads as
-  # an explanation of the row rather than as a repeat of it.
+  # `name` doubles as the dialog's own title while a local row is selected,
+  # since neither "New connection" nor "Connect" describes opening a local
+  # shell. `title` deliberately says something other than `name`, so the panel
+  # reads as an explanation of the row rather than as a repeat of it.
+  #
+  # The two hints differ in one clause, and only because the platforms do. Unix
+  # pins a single row, the login shell the user was given, so the sentence can
+  # say which shell that is and why. Windows pins one row per shell it can
+  # start — PowerShell, cmd, one per WSL distribution — and the user has just
+  # chosen among them, so `hint_shell` names the choice and stops there. Each
+  # is used on its own platform only.
   local:
     name: Local terminal
     title: Shell on this computer
     hint: "Opens %{shell}, your login shell, in a new tab. It runs on this computer, so there is no host to reach and no password to enter."
+    hint_shell: "Opens %{shell} in a new tab. It runs on this computer, so there is no host to reach and no password to enter."
   name: Name
   host: Host
   port: Port

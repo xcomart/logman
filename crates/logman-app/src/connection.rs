@@ -38,6 +38,8 @@ use logman_ssh::SshAuth;
 use uuid::Uuid;
 
 use crate::i18n::ts;
+#[cfg(windows)]
+use crate::session::{LocalShell, local_shells};
 use crate::ui::{
     Button, ButtonVariant, Checkbox, ContextMenu, MenuEntry, SchemePicker, SchemeSwatch, Segmented,
     TextInput, form_row, modal, theme,
@@ -199,6 +201,15 @@ pub enum ConnectionDialogEvent {
     /// saved, needs no credentials, and always runs the user's login shell.
     #[cfg(unix)]
     ConnectLocal,
+    /// Open the shell on this machine the user picked from the pinned rows.
+    ///
+    /// The Windows counterpart of [`ConnectionDialogEvent::ConnectLocal`], and
+    /// the reason the two are not one variant: Windows has no single local
+    /// shell, so which one was picked is the whole of the message. Still
+    /// carries no credentials and saves nothing — a local session is a local
+    /// session on either platform.
+    #[cfg(windows)]
+    ConnectLocalShell(LocalShell),
     /// The dialog was dismissed without connecting.
     Dismissed,
 }
@@ -386,6 +397,14 @@ pub struct ConnectionDialog {
     /// through [`Self::clear_local_selection`].
     #[cfg(unix)]
     local_selected: bool,
+    /// Which of the pinned local rows is the current selection, as an index
+    /// into [`Self::local_shells`].
+    ///
+    /// The Windows shape of the field above, and an index rather than a flag
+    /// because there is more than one local shell to pin. Mutually exclusive
+    /// with [`Self::editing`] in exactly the same way.
+    #[cfg(windows)]
+    local_selected: Option<usize>,
     /// Name of the user's login shell, resolved once when the dialog is built.
     ///
     /// Cached rather than looked up per frame: the lookup reads `$SHELL` and,
@@ -393,6 +412,14 @@ pub struct ConnectionDialog {
     /// running application.
     #[cfg(unix)]
     local_shell: SharedString,
+    /// The local shells the pinned rows offer, in the order they are rendered.
+    ///
+    /// Starts as the two shells every Windows machine has and grows by one row
+    /// per WSL distribution when [`Self::set_wsl_distros`] delivers the
+    /// discovery the shell started at launch. Held rather than rebuilt per
+    /// frame because [`Self::local_selected`] indexes it.
+    #[cfg(windows)]
+    local_shells: Vec<LocalShell>,
     /// Authentication method currently selected in the form.
     auth_kind: AuthKind,
     /// Whether the secret should be written to the OS keychain.
@@ -505,8 +532,14 @@ impl ConnectionDialog {
             editing: None,
             #[cfg(unix)]
             local_selected: false,
+            #[cfg(windows)]
+            local_selected: None,
             #[cfg(unix)]
             local_shell: SharedString::from(login_shell_name()),
+            // Without the distributions for now: finding them costs a process,
+            // and the shell hands them over as soon as it has them.
+            #[cfg(windows)]
+            local_shells: local_shells(&[]),
             auth_kind: AuthKind::Password,
             save_secret: false,
             status: None,
@@ -683,29 +716,80 @@ impl ConnectionDialog {
         }
     }
 
-    /// Whether the pinned local row is the current selection.
+    /// Offer one pinned row per WSL distribution in `distros`, on top of the
+    /// shells every Windows machine has.
     ///
-    /// Answers `false` where there is no local terminal at all, so the render
-    /// path can branch on it without a platform conditional of its own.
+    /// Called once, by the shell, when the discovery it started at launch
+    /// answers — the dialog does not go looking itself, because the welcome
+    /// screen needs the same list and a second `wsl.exe` would be a second
+    /// process for an answer already in hand.
+    ///
+    /// Any local selection is dropped, because it is an index into the list
+    /// being replaced. In practice this costs nothing: the discovery lands
+    /// seconds into the run, long before a dialog nobody has opened yet could
+    /// carry a selection.
+    #[cfg(windows)]
+    pub fn set_wsl_distros(&mut self, distros: &[String], cx: &mut Context<Self>) {
+        self.clear_local_selection();
+        self.local_shells = local_shells(distros);
+        cx.notify();
+    }
+
+    /// Whether one of the pinned local rows is the current selection.
+    ///
+    /// Hides the shape of the selection — a flag on unix, an index on Windows —
+    /// so the render path can branch on it without a platform conditional of
+    /// its own.
     fn is_local_selected(&self) -> bool {
         #[cfg(unix)]
         {
             self.local_selected
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            false
+            self.local_selected.is_some()
         }
     }
 
-    /// Drop the pinned local row from the selection.
+    /// Name of the shell the selected pinned row would start, if one is
+    /// selected.
     ///
-    /// A no-op where there is no local terminal, which is what keeps the SSH
-    /// paths that call it free of platform conditionals.
+    /// The one thing the panel on the right needs out of the selection, and
+    /// the only reason it needs no platform conditional either.
+    fn selected_local_name(&self) -> Option<SharedString> {
+        #[cfg(unix)]
+        {
+            self.local_selected.then(|| self.local_shell.clone())
+        }
+        #[cfg(windows)]
+        {
+            self.selected_local_shell().map(|shell| shell.name.clone())
+        }
+    }
+
+    /// The local shell the selected pinned row would start.
+    ///
+    /// Looked up rather than indexed: the list is replaced when the WSL
+    /// discovery answers, and a stale index must read as "nothing selected"
+    /// rather than panic.
+    #[cfg(windows)]
+    fn selected_local_shell(&self) -> Option<&LocalShell> {
+        self.local_selected
+            .and_then(|index| self.local_shells.get(index))
+    }
+
+    /// Drop the pinned local rows from the selection.
+    ///
+    /// Always defined, so the SSH paths that call it stay free of platform
+    /// conditionals.
     fn clear_local_selection(&mut self) {
         #[cfg(unix)]
         {
             self.local_selected = false;
+        }
+        #[cfg(windows)]
+        {
+            self.local_selected = None;
         }
     }
 
@@ -719,6 +803,18 @@ impl ConnectionDialog {
     fn select_local(&mut self, cx: &mut Context<Self>) {
         self.reset_form(cx);
         self.local_selected = true;
+        self.pending_focus = None;
+        cx.notify();
+    }
+
+    /// Make the pinned local row at `index` the selection.
+    ///
+    /// The Windows shape of the call above, and identical to it in everything
+    /// but which of the several local shells the row stands for.
+    #[cfg(windows)]
+    fn select_local(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.reset_form(cx);
+        self.local_selected = Some(index);
         self.pending_focus = None;
         cx.notify();
     }
@@ -1117,10 +1213,9 @@ impl ConnectionDialog {
 
     /// Whether the form holds enough information to open a session.
     fn can_connect(&self, cx: &App) -> bool {
-        // The pinned local row is always ready: there is no host to reach, no
+        // A pinned local row is always ready: there is no host to reach, no
         // credential to check and no form to complete.
-        #[cfg(unix)]
-        if self.local_selected {
+        if self.is_local_selected() {
             return true;
         }
         if self.auth_kind == AuthKind::Agent {
@@ -1188,6 +1283,14 @@ impl ConnectionDialog {
         #[cfg(unix)]
         if self.local_selected {
             cx.emit(ConnectionDialogEvent::ConnectLocal);
+            self.close(cx);
+            return;
+        }
+        // Cloned out of the list first: closing the dialog needs the whole of
+        // `self`, and the event has to carry the choice past that.
+        #[cfg(windows)]
+        if let Some(shell) = self.selected_local_shell().cloned() {
+            cx.emit(ConnectionDialogEvent::ConnectLocalShell(shell));
             self.close(cx);
             return;
         }
@@ -1593,8 +1696,8 @@ impl ConnectionDialog {
                     .border_color(theme.border)
                     .bg(theme.surface)
                     // Pinned above everything the store holds, and separated by
-                    // a rule: it is not one of the saved profiles, it is always
-                    // there, and it scrolls away with them rather than staying
+                    // a rule: they are not saved profiles, they are always
+                    // there, and they scroll away with them rather than staying
                     // stuck to the top of a long list.
                     .children(self.render_local_rows(cx))
                     .when(empty, |this| {
@@ -1610,112 +1713,158 @@ impl ConnectionDialog {
             )
     }
 
-    /// The pinned "Local terminal" row and the rule under it, or nothing at all
-    /// on a platform with no local terminal.
+    /// The pinned local rows and the rule under them.
     ///
-    /// A list rather than an `Option` so that the rule is a sibling of the row
+    /// Unix pins one, the login shell. Windows pins one per shell it can start
+    /// — PowerShell, `cmd`, and one per installed WSL distribution — so the
+    /// dialog offers the same choice the welcome screen does, and the WSL ones
+    /// appear only once [`Self::set_wsl_distros`] has been told about them.
+    ///
+    /// A list rather than an `Option` so that the rule is a sibling of the rows
     /// instead of being wrapped in a container that would break the list's own
     /// spacing.
     fn render_local_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        #[cfg(not(unix))]
-        {
-            let _ = cx;
-            Vec::new()
-        }
+        let mut rows: Vec<AnyElement> = Vec::new();
 
         #[cfg(unix)]
-        {
-            let theme = theme(cx);
-            let this = cx.entity();
-            let selected = self.local_selected;
+        rows.push(Self::local_row(
+            "connection-local".into(),
+            ts!("connection.local.name"),
+            self.local_shell.clone(),
+            self.local_selected,
+            |dialog, cx| dialog.select_local(cx),
+            cx,
+        ));
 
-            let row = div()
-                .id("connection-local")
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.))
-                .px(px(8.))
-                .py(px(6.))
-                .rounded_md()
-                .cursor_pointer()
-                .bg(if selected {
-                    theme.surface_active
-                } else {
-                    gpui::transparent_black()
-                })
-                .hover(move |style| {
-                    style.bg(if selected {
-                        theme.surface_active
-                    } else {
-                        theme.surface_hover
-                    })
-                })
-                // Selected on a single click, opened on a double one, exactly
-                // like a saved profile row.
-                .on_click(move |event, _window, cx| {
-                    let double = event.click_count() >= 2;
-                    this.update(cx, |dialog, cx| {
-                        dialog.select_local(cx);
-                        if double {
-                            dialog.connect(cx);
-                        }
-                    });
-                })
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_grow()
-                        .min_w_0()
-                        .gap(px(1.))
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(13.))
-                                .text_color(theme.text)
-                                .child(ts!("connection.local.name")),
-                        )
-                        // The shell's name is a value, not a word: never
-                        // translated, and shown where a profile shows its
-                        // `user@host`.
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(11.))
-                                .text_color(theme.text_muted)
-                                .child(self.local_shell.clone()),
-                        ),
-                );
+        #[cfg(windows)]
+        for (index, shell) in self.local_shells.iter().enumerate() {
+            rows.push(Self::local_row(
+                ("connection-local", index).into(),
+                shell.kind_label(),
+                shell.name.clone(),
+                self.local_selected == Some(index),
+                move |dialog, cx| dialog.select_local(index, cx),
+                cx,
+            ));
+        }
 
+        // The rule belongs to the rows above it: with nothing pinned there is
+        // nothing to separate the saved profiles from.
+        if !rows.is_empty() {
             let rule = div()
                 .h(px(1.))
                 .flex_none()
                 .my(px(2.))
                 .mx(px(4.))
-                .bg(theme.border);
-
-            vec![row.into_any_element(), rule.into_any_element()]
+                .bg(theme(cx).border);
+            rows.push(rule.into_any_element());
         }
+
+        rows
+    }
+
+    /// One pinned local row: what kind of shell it is over the shell's own
+    /// name, and the click behaviour of a saved profile row.
+    ///
+    /// `on_select` is what tells the rows apart — there is one of them on unix
+    /// and several on Windows — and everything else about them is shared, so
+    /// that a local row and a profile row cannot drift apart in looks.
+    fn local_row(
+        id: ElementId,
+        kind: SharedString,
+        shell: SharedString,
+        selected: bool,
+        on_select: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = theme(cx);
+        let this = cx.entity();
+
+        div()
+            .id(id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .px(px(8.))
+            .py(px(6.))
+            .rounded_md()
+            .cursor_pointer()
+            .bg(if selected {
+                theme.surface_active
+            } else {
+                gpui::transparent_black()
+            })
+            .hover(move |style| {
+                style.bg(if selected {
+                    theme.surface_active
+                } else {
+                    theme.surface_hover
+                })
+            })
+            // Selected on a single click, opened on a double one, exactly
+            // like a saved profile row.
+            .on_click(move |event, _window, cx| {
+                let double = event.click_count() >= 2;
+                this.update(cx, |dialog, cx| {
+                    on_select(dialog, cx);
+                    if double {
+                        dialog.connect(cx);
+                    }
+                });
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_grow()
+                    .min_w_0()
+                    .gap(px(1.))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.))
+                            .text_color(theme.text)
+                            .child(kind),
+                    )
+                    // The shell's name is a value, not a word: never
+                    // translated, and shown where a profile shows its
+                    // `user@host`.
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(theme.text_muted)
+                            .child(shell),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// The right-hand side of the dialog: the connection form, or the local
-    /// panel while the pinned row is selected.
+    /// panel while a pinned row is selected.
     fn render_target_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        #[cfg(unix)]
-        if self.local_selected {
-            return self.render_local_panel(cx).into_any_element();
+        match self.selected_local_name() {
+            Some(shell) => Self::render_local_panel(shell, cx).into_any_element(),
+            None => self.render_form(cx).into_any_element(),
         }
-        self.render_form(cx).into_any_element()
     }
 
-    /// What stands in for the form once the pinned local row is selected.
+    /// What stands in for the form once a pinned local row is selected.
     ///
     /// Deliberately has no controls: a local session takes no configuration,
-    /// so the panel only says what pressing Connect will do.
-    #[cfg(unix)]
-    fn render_local_panel(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// so the panel only says what pressing Connect will do — with `shell` the
+    /// name of the shell it will start.
+    fn render_local_panel(shell: SharedString, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = theme(cx);
+
+        // Two sentences for one thought, because only unix can call the shell
+        // the user's login shell: there it is the one they were given, here it
+        // is the one they just picked from several.
+        #[cfg(unix)]
+        let hint = ts!("connection.local.hint", shell = shell);
+        #[cfg(windows)]
+        let hint = ts!("connection.local.hint_shell", shell = shell);
 
         div()
             .flex()
@@ -1734,10 +1883,7 @@ impl ConnectionDialog {
                     .max_w(px(380.))
                     .text_size(px(12.))
                     .text_color(theme.text_muted)
-                    .child(ts!(
-                        "connection.local.hint",
-                        shell = self.local_shell.clone()
-                    )),
+                    .child(hint),
             )
     }
 
