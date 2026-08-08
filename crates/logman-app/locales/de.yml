@@ -55,6 +55,7 @@ files:
   select_upload_folder: Ordner hochladen
   select_download_folder: Speichern
   menu_open: Öffnen
+  menu_edit: Bearbeiten
   menu_download: Herunterladen…
   menu_rename: Umbenennen…
   menu_delete: Löschen…
@@ -95,6 +96,8 @@ files:
   create: Erstellen
   created: "%{name} wurde erstellt."
   invalid_name: Dieser Name kann nicht verwendet werden.
+  edit_too_large: "Nur Dateien unter %{limit} MB können bearbeitet werden."
+  edit_not_text: Diese Datei ist kein UTF-8-Text und kann hier nicht bearbeitet werden.
   failed: "Entfernte Dateien: %{error}"
   local:
     title: Lokale Dateien
@@ -304,6 +307,17 @@ input:
   menu_copy: Kopieren
   menu_paste: Einfügen
   menu_select_all: Alles auswählen
+
+editor:
+  find: Suchen
+  replace: Ersetzen
+  saving: Wird gespeichert…
+  saved: "%{name} gespeichert."
+  save_failed: "Speichern nicht möglich: %{error}"
+  close_title: Nicht gespeicherte Änderungen
+  close_unsaved: "%{name} enthält nicht gespeicherte Änderungen. Schließen und verwerfen?"
+  close_discard: Änderungen verwerfen
+  close_cancel: Abbrechen
 
 about:
   title: Über logman

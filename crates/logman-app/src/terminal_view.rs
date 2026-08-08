@@ -94,10 +94,14 @@ const PASTE_SHORTCUT: &str = if cfg!(target_os = "macos") {
 /// The real size comes from [`EffectiveTerminal::font_size`]; this only backs
 /// the rare code paths (such as a scroll before the first paint) that run
 /// without a session snapshot to hand.
-const DEFAULT_FONT_SIZE: Pixels = px(14.);
+pub(crate) const DEFAULT_FONT_SIZE: Pixels = px(14.);
 
 /// Line height as a multiple of the font size.
-const LINE_HEIGHT_RATIO: f32 = 1.3;
+///
+/// Shared with [`crate::editor`] for the same reason its palette is: an editor
+/// pane and the terminal pane beside it are one surface, and rows that do not
+/// line up across a split are the first thing that gives that away.
+pub(crate) const LINE_HEIGHT_RATIO: f32 = 1.3;
 
 /// Padding between the terminal surface and its container.
 const SURFACE_PADDING: Pixels = px(6.);
@@ -130,7 +134,7 @@ impl Global for TerminalFont {}
 
 /// Returns the terminal font, falling back to the first candidate when
 /// [`TerminalView::init`] has not run yet.
-fn terminal_font(cx: &App) -> Font {
+pub(crate) fn terminal_font(cx: &App) -> Font {
     cx.try_global::<TerminalFont>()
         .map(|global| global.0.clone())
         .unwrap_or_else(|| font(MONOSPACE_CANDIDATES[0]))
@@ -140,7 +144,11 @@ fn terminal_font(cx: &App) -> Font {
 ///
 /// An explicit [`EffectiveTerminal::font_family`] wins; otherwise the per-OS
 /// monospace default resolved by [`TerminalView::init`] is used.
-fn resolve_font(effective: &EffectiveTerminal, cx: &App) -> Font {
+///
+/// Shared with [`crate::editor_pane`], which draws its text surface in the same
+/// font as the terminal the file was opened out of; one resolver means the two
+/// can never disagree about what "the monospace font" is.
+pub(crate) fn resolve_font(effective: &EffectiveTerminal, cx: &App) -> Font {
     match &effective.font_family {
         Some(family) => font(family),
         None => terminal_font(cx),
@@ -148,7 +156,11 @@ fn resolve_font(effective: &EffectiveTerminal, cx: &App) -> Font {
 }
 
 /// Converts a terminal color into the color space gpui paints with.
-fn to_hsla(color: Rgb) -> Hsla {
+///
+/// Shared with [`crate::editor`], which derives its own palette from the same
+/// scheme so that an editor pane and the terminal pane beside it read as one
+/// surface; one conversion means the two can never drift apart.
+pub(crate) fn to_hsla(color: Rgb) -> Hsla {
     rgb(color.to_u32()).into()
 }
 

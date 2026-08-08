@@ -55,6 +55,7 @@ files:
   select_upload_folder: フォルダーをアップロード
   select_download_folder: 保存
   menu_open: 開く
+  menu_edit: 編集
   menu_download: ダウンロード…
   menu_rename: 名前を変更…
   menu_delete: 削除…
@@ -95,6 +96,8 @@ files:
   create: 作成
   created: "%{name} を作成しました。"
   invalid_name: この名前は使用できません。
+  edit_too_large: "%{limit} MB 未満のファイルのみ編集できます。"
+  edit_not_text: このファイルは UTF-8 テキストではないため、ここでは編集できません。
   failed: "リモートファイル: %{error}"
   local:
     title: ローカルファイル
@@ -304,6 +307,17 @@ input:
   menu_copy: コピー
   menu_paste: 貼り付け
   menu_select_all: すべて選択
+
+editor:
+  find: 検索
+  replace: 置換
+  saving: 保存中…
+  saved: "%{name} を保存しました。"
+  save_failed: "保存できませんでした: %{error}"
+  close_title: 未保存の変更
+  close_unsaved: "%{name} には未保存の変更があります。閉じて破棄しますか？"
+  close_discard: 変更を破棄
+  close_cancel: キャンセル
 
 about:
   title: logman について

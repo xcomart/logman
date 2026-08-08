@@ -131,6 +131,10 @@ files:
   # `menu_open` is offered over a single directory only, and says what a
   # double-click on the row already does.
   menu_open: Open
+  # The file counterpart of `menu_open`, in the same slot: over a directory the
+  # obvious thing to do is go into it, over a file it is to look inside it. No
+  # ellipsis — the pane opens on the spot, and nothing is asked first.
+  menu_edit: Edit
   menu_download: Download…
   menu_rename: Rename…
   menu_delete: Delete…
@@ -209,6 +213,12 @@ files:
   # `..`, which would rename the entry — or create the folder — in a different
   # directory entirely. Shared by both fields, since it is the same refusal.
   invalid_name: That name cannot be used.
+  # The two refusals `menu_edit` can answer with. Neither is a failure of the
+  # file — it is a perfectly good file — so both say what the editor cannot do
+  # rather than what is wrong with it. `%{limit}` is a whole number of
+  # megabytes; the unit is spelled here because it is not a value.
+  edit_too_large: "Only files under %{limit} MB can be edited."
+  edit_not_text: That file is not UTF-8 text, so it cannot be edited here.
   failed: "Remote files: %{error}"
   # Twins of the keys above, for a session whose filesystem is this computer's
   # own. Only the keys whose English says remote, server, upload or download
@@ -564,6 +574,38 @@ input:
   menu_copy: Copy
   menu_paste: Paste
   menu_select_all: Select all
+
+# The multi-line editor: its find bar, and the pane a file opened from the file
+# panel is shown in. In the find bar only the two fields carry words — the case
+# toggle is marked `Aa` and the match counter is a pair of numbers, and neither
+# is written differently in any language.
+editor:
+  # Placeholder of the field the search query is typed into. A noun, not the
+  # imperative — it names what the field holds, the way `files.title` names the
+  # panel.
+  find: Find
+  # Placeholder of the field beneath it, shown only while replacing.
+  replace: Replace
+  # In the pane's header while a save is in flight. It sits next to the file
+  # name, so it says what is happening and not what to.
+  saving: Saving…
+  # The strip under the editor after a save. `%{name}` is the file's own name,
+  # never a path: the header above already says which file the pane holds.
+  saved: "Saved %{name}."
+  # The same strip when the write failed. `%{error}` is the sentence the
+  # filesystem or the server gave, which is not translated — it is also what a
+  # save attempted after the session ended reports, since the source is what
+  # refuses.
+  save_failed: "Could not save: %{error}"
+  # Title of the question asked before a pane holding unsaved changes is closed.
+  close_title: Unsaved changes
+  # The question itself. Two answers, not three: saving first is a keystroke
+  # away and leaves any failure on the pane where it can be read.
+  close_unsaved: "%{name} has unsaved changes. Close it and lose them?"
+  # The answer that closes the pane. Named for what it costs rather than for the
+  # act, because the act — closing — is not the part worth confirming.
+  close_discard: Discard changes
+  close_cancel: Cancel
 
 # The about box. The version, the licence name and the names of the libraries
 # are values, not words, and are never translated.

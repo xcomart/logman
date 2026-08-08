@@ -1,0 +1,859 @@
+//! One file, open for editing, as a pane of a session tab.
+//!
+//! [`crate::editor`] is a text widget and nothing more: it holds a rope and
+//! knows how to draw and edit it, and it deliberately has no idea where the
+//! bytes came from. This module is the other half — the part that reads a file
+//! off a [`FileSource`], decides how it is to be spelled back, tracks whether
+//! it still matches what is on disk, and writes it out again.
+//!
+//! # Reading and writing through the panel's own trait
+//!
+//! [`FileSource`] has no "give me the contents" call, on purpose: the file panel
+//! never needed one, and a trait method is a promise all three backends have to
+//! keep. So a load is a [`FileSource::copy_out`] into a temporary directory
+//! followed by a plain [`std::fs::read`], and a save is the mirror of that. The
+//! detour costs one extra copy of a file that is capped at [`MAX_EDIT_BYTES`]
+//! anyway, and it means SFTP, the local filesystem and WSL all arrive here
+//! already working.
+//!
+//! # What is refused, and why it is refused early
+//!
+//! Two things: a file larger than [`MAX_EDIT_BYTES`], and one that is not valid
+//! UTF-8. The size is checked by the *panel*, off the listing it already has, so
+//! nothing is transferred before the refusal; the encoding can only be checked
+//! once the bytes are here. Neither is a limitation of the buffer — the rope
+//! would hold a gigabyte — but of what the editor can honestly promise to write
+//! back: it has no encoding picker and no byte view, so a file it cannot decode
+//! is a file it would silently corrupt on save.
+//!
+//! # What is preserved across a round trip
+//!
+//! A byte order mark and the line ending style. Both are stripped on the way in
+//! — the buffer holds `\n` and no BOM, which is what every command in the editor
+//! assumes — and put back on the way out, so opening a CRLF file with a BOM and
+//! saving it unchanged writes the same bytes it read.
+
+use std::sync::Arc;
+
+use gpui::{
+    App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
+    MouseButton, MouseDownEvent, SharedString, Subscription, Window, actions, div, prelude::*, px,
+};
+use logman_term::TerminalTheme;
+
+use crate::editor::{EditorEvent, EditorView, palette_for};
+use crate::files::{FileError, FileSource};
+use crate::i18n::ts;
+use crate::session::Session;
+use crate::terminal_view::resolve_font;
+use crate::ui::{theme, tooltip_label};
+
+actions!(
+    logman_editor_pane,
+    [
+        /// Write the buffer back to the file it was opened from.
+        SaveFile,
+    ]
+);
+
+/// Key context of the pane, which wraps the editor's own.
+///
+/// Separate from the editor's `Editor` context because the two answer different
+/// questions: that one is "the keyboard is in a text buffer", this one is "that
+/// buffer belongs to a file". Saving needs the second, and binding it in the
+/// first would offer it to a text widget with nowhere to save to.
+const KEY_CONTEXT: &str = "EditorPane";
+
+/// Largest file the editor will open, in bytes.
+///
+/// Not the rope's limit — that is measured in gigabytes — but the transfer's:
+/// every load copies the whole file across the session and back out of a
+/// temporary directory, with no progress bar and no way to cancel it, so the cap
+/// is set where that round trip stays imperceptible on a slow link.
+pub const MAX_EDIT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Height of the pane's header strip, in pixels.
+const HEADER_HEIGHT: f32 = 26.;
+
+/// The dirty marker: a filled dot beside the file name.
+const DIRTY_MARK: &str = "\u{25cf}";
+
+/// The close button's glyph, the same multiplication sign the tab strip uses.
+const CLOSE_MARK: &str = "\u{00d7}";
+
+/// How a file spells the end of a line.
+///
+/// Two cases and no "mixed", because a file with both is still written back one
+/// way: whichever dominated when it was read. Guessing per line would mean
+/// storing the endings in the buffer, and the buffer holds text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Newlines {
+    /// `\n`, as everything but Windows writes.
+    Lf,
+    /// `\r\n`.
+    Crlf,
+}
+
+/// A file's contents, decoded, plus what has to be put back to write it out
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextFile {
+    /// The text, with `\n` line endings and no byte order mark.
+    pub text: String,
+    /// How the file spelled its line endings.
+    pub newlines: Newlines,
+    /// Whether the file started with a UTF-8 byte order mark.
+    pub bom: bool,
+}
+
+/// The UTF-8 byte order mark, as it appears at the head of a file.
+const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
+impl TextFile {
+    /// Decodes `bytes` as the editor's buffer, or says why it cannot.
+    ///
+    /// The line ending style is decided by *dominance* rather than by the first
+    /// one seen: a file of ten thousand CRLF lines with one stray `\n` in it is
+    /// a CRLF file, and writing it back as LF would rewrite every line of a diff.
+    pub fn decode(bytes: &[u8]) -> Result<Self, LoadError> {
+        let bom = bytes.starts_with(&BOM);
+        let body = if bom { &bytes[BOM.len()..] } else { bytes };
+        let text = std::str::from_utf8(body).map_err(|_| LoadError::NotUtf8)?;
+
+        // Every `\r\n` is also an `\n`, so the LF count is the total and the
+        // difference is the lone ones.
+        let total = text.matches('\n').count();
+        let crlf = text.matches("\r\n").count();
+        let newlines = if crlf * 2 > total {
+            Newlines::Crlf
+        } else {
+            Newlines::Lf
+        };
+
+        // Unconditional, not only for a file that is mostly CRLF: the minority
+        // endings of a mixed file have to go too, or the buffer would carry a
+        // carriage return the editor draws as a character and the caret can be
+        // put beside. Which style *dominated* decides how it is written back,
+        // not what the buffer holds.
+        Ok(Self {
+            text: text.replace("\r\n", "\n"),
+            newlines,
+            bom,
+        })
+    }
+
+    /// The bytes to write for `text`, in this file's own spelling.
+    ///
+    /// Takes the text rather than reading [`TextFile::text`] because the copy in
+    /// here is the one that was *loaded*; what gets written is whatever the
+    /// buffer holds now.
+    pub fn encode(&self, text: &str) -> Vec<u8> {
+        // Both arms normalise first, because the buffer can have acquired a
+        // carriage return since it was loaded — pasted out of a Windows editor,
+        // say. Without it a CRLF file would come back out as `\r\r\n` and an LF
+        // file would keep an ending it never had.
+        let normalised = text.replace("\r\n", "\n");
+        let body = match self.newlines {
+            Newlines::Crlf => normalised.replace('\n', "\r\n"),
+            Newlines::Lf => normalised,
+        };
+        let mut bytes = Vec::with_capacity(body.len() + BOM.len());
+        if self.bom {
+            bytes.extend_from_slice(&BOM);
+        }
+        bytes.extend_from_slice(body.as_bytes());
+        bytes
+    }
+}
+
+/// Why a file could not be opened for editing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadError {
+    /// Larger than [`MAX_EDIT_BYTES`].
+    TooLarge,
+    /// The bytes are not valid UTF-8, so the editor cannot show them without
+    /// deciding an encoding it has no way to ask about.
+    NotUtf8,
+    /// The file could not be fetched at all.
+    Transport(FileError),
+}
+
+impl From<FileError> for LoadError {
+    fn from(error: FileError) -> Self {
+        Self::Transport(error)
+    }
+}
+
+/// Fetches `dir/name` from `source` and hands back its bytes.
+///
+/// The temporary directory is a directory rather than a bare temporary file
+/// because [`FileSource::copy_in`] keeps the local file's *name*, and the save
+/// that follows has to hand it a file called exactly what the remote one is
+/// called. Both ends of the round trip therefore work in a scratch directory of
+/// their own, which is removed when the `TempDir` drops — including on the
+/// error paths, which is why it is bound rather than passed through.
+pub async fn read_file(
+    source: &Arc<dyn FileSource>,
+    dir: &str,
+    name: &str,
+) -> Result<Vec<u8>, FileError> {
+    let scratch = scratch_dir()?;
+    let local = scratch.path().join(name);
+    source
+        .copy_out(&file_path(dir, name), local.clone(), None)
+        .await?;
+    std::fs::read(&local).map_err(|error| local_error(&local, &error))
+}
+
+/// Writes `bytes` back to `dir/name` on `source`.
+///
+/// **Not atomic**, deliberately. The usual shape — write a sibling temporary
+/// file and rename it over the target — depends on the rename replacing an
+/// existing file, and over SFTP that is exactly what is not portable: the
+/// version 3 protocol most servers still speak leaves the behaviour of
+/// `SSH_FXP_RENAME` over an existing path unspecified, so OpenSSH refuses it
+/// while others silently replace, and the `posix-rename@openssh.com` extension
+/// that fixes it is not something every server offers. A save that worked
+/// against one host and failed against the next would be worse than the window
+/// this leaves open, and the file panel has no way to recover a half-renamed
+/// target either. So the file is overwritten in place, and a save that fails
+/// part way says so on the pane rather than being silently repaired.
+pub async fn write_file(
+    source: &Arc<dyn FileSource>,
+    dir: &str,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), FileError> {
+    let scratch = scratch_dir()?;
+    let local = scratch.path().join(name);
+    std::fs::write(&local, bytes).map_err(|error| local_error(&local, &error))?;
+    source.copy_in(local, dir, None).await?;
+    Ok(())
+}
+
+/// A private directory on this machine for one transfer's staging file.
+fn scratch_dir() -> Result<tempfile::TempDir, FileError> {
+    tempfile::TempDir::new().map_err(|error| {
+        FileError::Local(format!(
+            "a temporary directory could not be created: {error}"
+        ))
+    })
+}
+
+/// The sentence a failed local read or write reports.
+fn local_error(path: &std::path::Path, error: &std::io::Error) -> FileError {
+    FileError::Local(format!("{} could not be used: {error}", path.display()))
+}
+
+/// Joins a source directory and an entry name the way the file panel does.
+///
+/// Sources spell their paths POSIX style whatever this machine writes — see
+/// [`crate::files`] — so this is string arithmetic and not `PathBuf` work.
+///
+/// Public because the workspace asks "is this file already open?" before it
+/// builds a pane, and the answer has to be spelled the way an open pane spells
+/// its own path.
+pub fn file_path(directory: &str, name: &str) -> String {
+    if directory.is_empty() {
+        name.to_owned()
+    } else if directory.ends_with('/') {
+        format!("{directory}{name}")
+    } else {
+        format!("{directory}/{name}")
+    }
+}
+
+/// What the pane tells the workspace about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditorPaneEvent {
+    /// A press landed inside the pane, which makes it the active one.
+    ///
+    /// Reported rather than left to gpui's focus listeners for the same reason
+    /// [`crate::terminal_view::PaneFocused`] is: a focus listener runs after the
+    /// frame that carried the click was drawn, so the accent frame would trail
+    /// the press by one input event.
+    Focused,
+    /// The close button was pressed. The workspace decides what closing means.
+    CloseRequested,
+    /// The save the pane was asked to make *before* closing has landed, and
+    /// every edit in the buffer is on disk. The pane may now be taken down.
+    ///
+    /// Only [`EditorPane::save_and_close`] can lead here; an ordinary save —
+    /// the header button, <kbd>Ctrl</kbd>+<kbd>S</kbd> — is silent however well
+    /// it goes, or saving a file would be a way of closing it.
+    SavedForClose,
+}
+
+/// Whether a save that has just landed may take the pane down with it.
+///
+/// Three conditions, and the last is the interesting one: `saved` is the
+/// revision the written bytes were encoded from and `current` is where the
+/// buffer stands now, so a mismatch means something was typed while the write
+/// was in flight. That text is not on disk, and closing on it would lose
+/// exactly what the question the user answered was asked about.
+///
+/// A free function rather than a branch inside [`EditorPane::finish_save`]
+/// because it is the whole of the rule and none of the plumbing: a pane needs a
+/// live session and a file source before it can exist, and the rule needs
+/// neither to be read or checked.
+fn save_closes_pane(closing: bool, saved_ok: bool, saved: u64, current: u64) -> bool {
+    closing && saved_ok && saved == current
+}
+
+/// The message strip under the editor, when there is something to say.
+struct Message {
+    /// The sentence.
+    text: SharedString,
+    /// Whether it is a failure, and so drawn in the danger colour and left up.
+    error: bool,
+}
+
+/// One open file: the editor, the path it came from, and the state of the save.
+pub struct EditorPane {
+    /// The text surface.
+    editor: Entity<EditorView>,
+    /// The session the file was opened out of.
+    ///
+    /// Kept for two things and neither of them is the transfer: the colour
+    /// scheme the text is drawn in, and the repaint that follows a change to it.
+    /// The [`FileSource`] below is what the file is actually read and written
+    /// through, and it outlives a disconnect — a save attempted after the
+    /// session ends fails with a sentence rather than with a missing pane.
+    session: Entity<Session>,
+    /// The filesystem the file lives on.
+    source: Arc<dyn FileSource>,
+    /// The directory holding the file, in the source's own spelling.
+    dir: String,
+    /// The file's name within [`EditorPane::dir`].
+    name: SharedString,
+    /// What was stripped on the way in and has to be put back on the way out.
+    file: TextFile,
+    /// Bumped by every buffer change.
+    ///
+    /// A save writes the text as it stood when it started, so an edit made while
+    /// the bytes are in flight must not be cleared by the save that did not
+    /// include it. The saved revision is compared against this when the write
+    /// lands, and only a match marks the pane clean.
+    revision: u64,
+    /// Whether a save is in flight, which is also the lock keeping a second one
+    /// from starting.
+    saving: bool,
+    /// Whether the save in flight is one the pane is being closed for.
+    ///
+    /// Set only by [`EditorPane::save_and_close`], and cleared by the very next
+    /// save that finishes however it finishes — so a failure, or a save the
+    /// buffer moved on from, leaves an ordinary pane behind rather than one
+    /// that will close itself the next time <kbd>Ctrl</kbd>+<kbd>S</kbd> works.
+    close_after_save: bool,
+    /// The line under the editor, if anything has been said.
+    message: Option<Message>,
+    /// Focus target of the pane as a whole; the editor inside has its own.
+    focus_handle: FocusHandle,
+    /// Keeps the buffer-change subscription alive.
+    _editor_events: Subscription,
+    /// Repaints the pane when the session's colour scheme changes under it.
+    _session: Subscription,
+}
+
+/// Registers the key bindings an [`EditorPane`] relies on.
+///
+/// Call once during application start-up, after [`crate::editor::init`].
+pub fn init(cx: &mut App) {
+    let modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+    cx.bind_keys([KeyBinding::new(
+        &format!("{modifier}-s"),
+        SaveFile,
+        Some(KEY_CONTEXT),
+    )]);
+}
+
+/// The save button's tooltip: the command, and the key that already is it.
+///
+/// Spelled with the platform's own modifier, the same choice [`init`] makes
+/// when it binds the key.
+fn save_shortcut_label() -> String {
+    let modifier = if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Ctrl"
+    };
+    format!("{} ({modifier}+S)", ts!("common.save"))
+}
+
+impl EditorPane {
+    /// A pane showing `file`, read from `name` in `dir` on `source`.
+    pub fn new(
+        session: Entity<Session>,
+        source: Arc<dyn FileSource>,
+        dir: String,
+        name: SharedString,
+        file: TextFile,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Filled in the constructor rather than after it, so the pane never
+        // exists holding an empty buffer. Whether the `Changed` this emits is
+        // seen by the subscription below does not matter either way: the dirty
+        // flag is read off the editor, and a load leaves the editor clean.
+        let editor = cx.new(|cx| {
+            let mut editor = EditorView::new(cx);
+            editor.set_text(&file.text, cx);
+            editor
+        });
+        let editor_events = cx.subscribe(&editor, |pane, _editor, event: &EditorEvent, cx| {
+            if matches!(event, EditorEvent::Changed) {
+                pane.on_changed(cx);
+            }
+        });
+        let session_changed = cx.observe(&session, |_pane, _session, cx| cx.notify());
+
+        Self {
+            editor,
+            session,
+            source,
+            dir,
+            name,
+            file,
+            revision: 0,
+            saving: false,
+            close_after_save: false,
+            message: None,
+            focus_handle: cx.focus_handle(),
+            _editor_events: editor_events,
+            _session: session_changed,
+        }
+    }
+
+    /// The session the file was opened out of.
+    pub fn session(&self) -> &Entity<Session> {
+        &self.session
+    }
+
+    /// The file's name, which is what the header and the tab strip show.
+    pub fn name(&self) -> &SharedString {
+        &self.name
+    }
+
+    /// The absolute path of the open file, in the source's own spelling.
+    ///
+    /// What tells "this file is already open" from "this is another file of the
+    /// same name somewhere else".
+    pub fn path(&self) -> String {
+        file_path(&self.dir, &self.name)
+    }
+
+    /// Whether the buffer has unsaved changes.
+    ///
+    /// Read off the editor rather than mirrored into a field of its own, so
+    /// there is one answer and not two that can disagree: the widget already
+    /// tracks this, and a load or a successful save clears it there.
+    pub fn is_dirty(&self, cx: &App) -> bool {
+        self.editor.read(cx).is_dirty()
+    }
+
+    /// Records a buffer change.
+    fn on_changed(&mut self, cx: &mut Context<Self>) {
+        self.revision = self.revision.wrapping_add(1);
+        // A message about the last save stops being true the moment the buffer
+        // moves on from it.
+        self.message = None;
+        cx.notify();
+    }
+
+    /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>S</kbd>.
+    fn save_action(&mut self, _: &SaveFile, _window: &mut Window, cx: &mut Context<Self>) {
+        self.save(cx);
+    }
+
+    /// Writes the buffer back to the file it came from.
+    ///
+    /// A clean buffer is still written: "save" that silently does nothing is
+    /// indistinguishable from "save" that failed, and a file whose contents
+    /// match may still have been changed underneath by something else.
+    fn save(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        let bytes = self.file.encode(&self.editor.read(cx).text());
+        let revision = self.revision;
+        let source = self.source.clone();
+        let dir = self.dir.clone();
+        let name = self.name.to_string();
+
+        self.saving = true;
+        self.message = None;
+        cx.notify();
+
+        cx.spawn(async move |pane, cx| {
+            let result = write_file(&source, &dir, &name, &bytes).await;
+            pane.update(cx, |pane, cx| pane.finish_save(revision, result, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Saves the buffer, and closes the pane if — and only if — the write
+    /// lands.
+    ///
+    /// The "Save" button of the workspace's close question. It returns at once:
+    /// the question goes down on the press, and the pane reports the transfer
+    /// where it already reports every other one, in its own header. Whether the
+    /// close follows is [`EditorPane::finish_save`]'s to decide, and it says no
+    /// to a failure — the pane stays open with the reason under it, which is the
+    /// only place the reason can be read.
+    ///
+    /// A save already in flight is not restarted; [`EditorPane::save`]'s lock
+    /// sees to that, and the pane rides on that write's result instead. Honest,
+    /// because those are the bytes going to the file — but if the buffer has
+    /// moved on since they left, the revision check keeps the pane open.
+    pub fn save_and_close(&mut self, cx: &mut Context<Self>) {
+        self.close_after_save = true;
+        self.save(cx);
+    }
+
+    /// Records how the save went, and closes the pane if it was saving to close.
+    fn finish_save(
+        &mut self,
+        revision: u64,
+        result: Result<(), FileError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.saving = false;
+        // Taken rather than read: whatever this save decides, it decides once.
+        // A failure — or a write the buffer moved on from — answers the close
+        // question with "no", and the save the user starts next, from the header
+        // or the keyboard, must not inherit an answer given about this one.
+        let closing = std::mem::take(&mut self.close_after_save);
+        let saved_ok = result.is_ok();
+        match result {
+            Ok(()) => {
+                // Only the revision that was actually written may clear the
+                // flag; anything typed while the bytes were in flight is still
+                // unsaved, and saying otherwise would lose it at the next close.
+                if revision == self.revision {
+                    self.editor.update(cx, |editor, cx| editor.mark_clean(cx));
+                }
+                self.message = Some(Message {
+                    text: ts!("editor.saved", name = self.name.to_string()),
+                    error: false,
+                });
+            }
+            Err(error) => {
+                log::warn!("could not save {}: {error}", self.path());
+                self.message = Some(Message {
+                    text: ts!("editor.save_failed", error = error.to_string()),
+                    error: true,
+                });
+            }
+        }
+        if save_closes_pane(closing, saved_ok, revision, self.revision) {
+            cx.emit(EditorPaneEvent::SavedForClose);
+        }
+        cx.notify();
+    }
+
+    /// The colours and the font the text surface is drawn in, from this
+    /// session's effective terminal settings.
+    ///
+    /// Recomputed every frame rather than stored, because all three — the
+    /// scheme, the font family and the font size — can change under an open
+    /// pane, from the settings or from a per-session override, and there is no
+    /// one event that says so. [`EditorView::set_palette`] and
+    /// [`EditorView::set_font`] repaint nothing when the answer has not moved,
+    /// which is every frame but the one after such a change.
+    ///
+    /// Both are pushed from here rather than read by the widget, because the
+    /// widget knows nothing about sessions; the one snapshot is taken once and
+    /// used for both, since resolving it clones a handful of strings.
+    fn sync_appearance(&mut self, cx: &mut Context<Self>) {
+        let effective = self.session.read(cx).effective(cx);
+        let palette = palette_for(&TerminalTheme::by_name_or_default(&effective.scheme));
+        let font = resolve_font(&effective, cx);
+        let font_size = px(effective.font_size);
+        self.editor.update(cx, |editor, cx| {
+            editor.set_palette(palette, cx);
+            editor.set_font(font, font_size, cx);
+        });
+    }
+}
+
+impl EventEmitter<EditorPaneEvent> for EditorPane {}
+
+impl Focusable for EditorPane {
+    /// The editor's handle, not the pane's: focusing a pane means putting the
+    /// caret in the file, and the header holds nothing the keyboard can reach.
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.read(cx).focus_handle(cx)
+    }
+}
+
+impl Render for EditorPane {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_appearance(cx);
+        // The chrome is application furniture and takes the application theme;
+        // only the text surface below follows the terminal scheme. Drawing the
+        // header in the scheme too would make the pane a window of its own
+        // rather than a pane of this one.
+        let theme = theme(cx);
+        let dirty = self.is_dirty(cx);
+        let saving = self.saving;
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap(px(6.))
+            .h(px(HEADER_HEIGHT))
+            .px(px(8.))
+            .bg(theme.surface)
+            .border_b_1()
+            .border_color(theme.border)
+            .text_size(px(11.))
+            .text_color(theme.text_muted)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text)
+                    .child(self.name.clone()),
+            )
+            .when(dirty, |header| {
+                header.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(9.))
+                        .text_color(theme.accent)
+                        .child(DIRTY_MARK),
+                )
+            })
+            .when(saving, |header| {
+                header.child(div().flex_none().child(ts!("editor.saving")))
+            })
+            // A worded button rather than an icon, and always there rather than
+            // only while dirty: the keyboard already saves, so the button's job
+            // is to *say* that saving is a thing this pane does — to the user
+            // who has never pressed Ctrl+S in it. The tooltip teaches the key.
+            .child(
+                div()
+                    .id("editor-pane-save")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .h(px(18.))
+                    .px(px(6.))
+                    .rounded_sm()
+                    .text_color(theme.text_muted)
+                    .hover(|style| style.bg(theme.surface_hover).text_color(theme.text))
+                    .tooltip(tooltip_label(save_shortcut_label()))
+                    .on_click(cx.listener(|pane, _: &ClickEvent, _window, cx| {
+                        pane.save(cx);
+                    }))
+                    .child(ts!("common.save")),
+            )
+            .child(
+                div()
+                    .id("editor-pane-close")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(px(16.))
+                    .rounded_sm()
+                    .text_size(px(12.))
+                    .text_color(theme.icon)
+                    .hover(|style| style.bg(theme.surface_hover).text_color(theme.text))
+                    .on_click(cx.listener(|_pane, _: &ClickEvent, _window, cx| {
+                        cx.emit(EditorPaneEvent::CloseRequested);
+                    }))
+                    .child(CLOSE_MARK),
+            );
+
+        let message = self.message.as_ref().map(|message| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(px(HEADER_HEIGHT))
+                .px(px(8.))
+                .bg(theme.surface)
+                .border_t_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(if message.error {
+                    theme.danger
+                } else {
+                    theme.text_muted
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(message.text.clone()),
+                )
+        });
+
+        div()
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus_handle)
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            // Before the focus listeners gpui runs after the frame, so the
+            // active-pane frame moves on the press rather than on the next
+            // input event. Propagation is left alone: the editor underneath
+            // still has to take the focus and start the selection.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_pane, _: &MouseDownEvent, _window, cx| {
+                    cx.emit(EditorPaneEvent::Focused);
+                }),
+            )
+            .on_action(cx.listener(Self::save_action))
+            .child(header)
+            .child(div().flex_1().min_h_0().child(self.editor.clone()))
+            .children(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_lf_file_round_trips_unchanged() {
+        let file = TextFile::decode(b"one\ntwo\n").expect("valid UTF-8");
+        assert_eq!(file.newlines, Newlines::Lf);
+        assert!(!file.bom);
+        assert_eq!(file.text, "one\ntwo\n");
+        assert_eq!(file.encode(&file.text), b"one\ntwo\n");
+    }
+
+    #[test]
+    fn crlf_is_normalised_in_and_restored_out() {
+        let file = TextFile::decode(b"one\r\ntwo\r\n").expect("valid UTF-8");
+        assert_eq!(file.newlines, Newlines::Crlf);
+        // The buffer never sees a carriage return, which is what lets every
+        // caret command count `\n` alone.
+        assert_eq!(file.text, "one\ntwo\n");
+        assert_eq!(file.encode(&file.text), b"one\r\ntwo\r\n");
+    }
+
+    #[test]
+    fn the_dominant_ending_decides_a_mixed_file() {
+        // Three CRLF lines and one lone LF: still a CRLF file, so saving it
+        // does not rewrite the three that were already right.
+        let file = TextFile::decode(b"a\r\nb\r\nc\r\nd\n").expect("valid UTF-8");
+        assert_eq!(file.newlines, Newlines::Crlf);
+        assert_eq!(file.encode(&file.text), b"a\r\nb\r\nc\r\nd\r\n");
+
+        // The other way round, with the lone LF in the majority. The minority
+        // CRLF is still stripped on the way in — no carriage return reaches the
+        // buffer, whichever style won — so the file is written back all LF.
+        let file = TextFile::decode(b"a\nb\nc\nd\r\n").expect("valid UTF-8");
+        assert_eq!(file.newlines, Newlines::Lf);
+        assert_eq!(file.text, "a\nb\nc\nd\n");
+        assert_eq!(file.encode(&file.text), b"a\nb\nc\nd\n");
+    }
+
+    #[test]
+    fn a_file_with_no_line_break_at_all_is_lf() {
+        let file = TextFile::decode(b"no newline here").expect("valid UTF-8");
+        assert_eq!(file.newlines, Newlines::Lf);
+        assert_eq!(file.encode(&file.text), b"no newline here");
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_kept_out_of_the_buffer_and_put_back() {
+        let mut bytes = BOM.to_vec();
+        bytes.extend_from_slice("hello".as_bytes());
+        let file = TextFile::decode(&bytes).expect("valid UTF-8");
+        assert!(file.bom);
+        // The mark must not reach the buffer: it would show as a zero width
+        // space the caret can be put inside of.
+        assert_eq!(file.text, "hello");
+        assert_eq!(file.encode(&file.text), bytes);
+    }
+
+    #[test]
+    fn a_bom_on_a_crlf_file_survives_both_transformations() {
+        let mut bytes = BOM.to_vec();
+        bytes.extend_from_slice(b"one\r\ntwo\r\n");
+        let file = TextFile::decode(&bytes).expect("valid UTF-8");
+        assert!(file.bom);
+        assert_eq!(file.newlines, Newlines::Crlf);
+        assert_eq!(file.text, "one\ntwo\n");
+        assert_eq!(file.encode(&file.text), bytes);
+    }
+
+    #[test]
+    fn bytes_that_are_not_utf8_are_refused_rather_than_mangled() {
+        // A lone 0x80 continuation byte: valid Latin-1, not valid UTF-8.
+        assert_eq!(
+            TextFile::decode(&[b'a', 0x80, b'b']),
+            Err(LoadError::NotUtf8)
+        );
+    }
+
+    #[test]
+    fn a_bom_in_front_of_invalid_bytes_is_still_a_refusal() {
+        let mut bytes = BOM.to_vec();
+        bytes.push(0xFF);
+        assert_eq!(TextFile::decode(&bytes), Err(LoadError::NotUtf8));
+    }
+
+    #[test]
+    fn a_carriage_return_typed_into_a_crlf_buffer_is_not_doubled() {
+        let file = TextFile::decode(b"one\r\n").expect("valid UTF-8");
+        // As though the user had pasted a Windows line ending into the buffer.
+        assert_eq!(file.encode("one\r\ntwo\n"), b"one\r\ntwo\r\n");
+    }
+
+    #[test]
+    fn multibyte_text_survives_a_round_trip() {
+        let source = "한 줄\r\n두 줄\r\n";
+        let file = TextFile::decode(source.as_bytes()).expect("valid UTF-8");
+        assert_eq!(file.text, "한 줄\n두 줄\n");
+        assert_eq!(file.encode(&file.text), source.as_bytes());
+    }
+
+    #[test]
+    fn an_ordinary_save_never_closes_the_pane() {
+        // The header button and Ctrl+S land here too, with the flag unset. A
+        // save that closed the file it saved would be a trap.
+        assert!(!save_closes_pane(false, true, 7, 7));
+    }
+
+    #[test]
+    fn a_save_asked_for_by_the_close_question_closes_on_success() {
+        assert!(save_closes_pane(true, true, 7, 7));
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_pane_where_the_reason_can_be_read() {
+        assert!(!save_closes_pane(true, false, 7, 7));
+    }
+
+    #[test]
+    fn an_edit_made_while_the_bytes_were_in_flight_keeps_the_pane_open() {
+        // The write carried revision 7 and the buffer is at 8: what was typed
+        // in between is unsaved, so the close question is unanswered still.
+        assert!(!save_closes_pane(true, true, 7, 8));
+    }
+
+    #[test]
+    fn paths_are_joined_the_way_the_panel_joins_them() {
+        assert_eq!(file_path("/etc", "hosts"), "/etc/hosts");
+        // A root already ends in the separator; a second one would name a
+        // different path on some servers and none on others.
+        assert_eq!(file_path("/", "hosts"), "/hosts");
+        assert_eq!(file_path("", "hosts"), "hosts");
+    }
+}

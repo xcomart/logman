@@ -55,6 +55,7 @@ files:
   select_upload_folder: 폴더 업로드
   select_download_folder: 저장
   menu_open: 열기
+  menu_edit: 편집
   menu_download: 다운로드…
   menu_rename: 이름 변경…
   menu_delete: 삭제…
@@ -95,6 +96,8 @@ files:
   create: 만들기
   created: "%{name}을(를) 만들었습니다."
   invalid_name: 사용할 수 없는 이름입니다.
+  edit_too_large: "%{limit} MB 미만인 파일만 편집할 수 있습니다."
+  edit_not_text: 이 파일은 UTF-8 텍스트가 아니라 여기서 편집할 수 없습니다.
   failed: "원격 파일: %{error}"
   local:
     title: 로컬 파일
@@ -304,6 +307,17 @@ input:
   menu_copy: 복사
   menu_paste: 붙여넣기
   menu_select_all: 모두 선택
+
+editor:
+  find: 찾기
+  replace: 바꾸기
+  saving: 저장 중…
+  saved: "%{name}을(를) 저장했습니다."
+  save_failed: "저장하지 못했습니다: %{error}"
+  close_title: 저장하지 않은 변경 사항
+  close_unsaved: "%{name}에 저장하지 않은 변경 사항이 있습니다. 닫고 버릴까요?"
+  close_discard: 변경 사항 버리기
+  close_cancel: 취소
 
 about:
   title: logman 정보
