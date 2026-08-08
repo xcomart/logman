@@ -453,6 +453,40 @@ fn editor_tab_label(name: &str, connection: &str) -> SharedString {
     }
 }
 
+/// The hover label of a tab's tunnel mark, or `None` for a session holding no
+/// forwarding — which is what leaves such a tab unmarked.
+///
+/// The transport names a rule the way the profile writes it,
+/// `8080:db:5432`, which reads as three ports until it is taken apart. The
+/// arrow puts the local end and the remote one on either side of the thing
+/// that actually happens, so the line says where traffic enters and where it
+/// comes out. Anything that is not in that shape — there is no such rule
+/// today, but this must not become the place a stranger one goes missing — is
+/// shown as it arrived.
+///
+/// One line however many rules there are, because a tooltip is one line by
+/// construction (see [`crate::ui::tooltip`]); a host forwarding more ports
+/// than fit on one is answered by the connection dialog, which lists them all.
+///
+/// Free rather than a method for the same reason as [`editor_tab_label`]: it
+/// is a sentence about a list of strings, and needs neither a session nor a
+/// window to be checked.
+fn tunnel_tooltip(tunnels: &[SharedString]) -> Option<SharedString> {
+    if tunnels.is_empty() {
+        return None;
+    }
+
+    let rules = tunnels
+        .iter()
+        .map(|label| match label.split_once(':') {
+            Some((local, remote)) => format!("{local} \u{2192} {remote}"),
+            None => label.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(ts!("tab.tip_tunnels", rules = rules))
+}
+
 /// One pane: the view showing a session, plus the wiring that keeps the
 /// workspace in step with it.
 struct PaneLeaf {
@@ -2666,8 +2700,18 @@ impl Workspace {
                 match tab.active_session(cx) {
                     Some(session) => {
                         let session = session.read(cx);
-                        TabItem::new(("session-tab", index), session.title())
-                            .status(session.tab_status())
+                        let item = TabItem::new(("session-tab", index), session.title())
+                            .status(session.tab_status());
+                        // Only the session that won the bind reports any, so
+                        // the mark appears on exactly one tab per rule: the tab
+                        // whose shell the forwarded traffic is actually riding
+                        // on. Opening the same profile again leaves the second
+                        // tab unmarked, which is the answer to the question the
+                        // mark exists for.
+                        match tunnel_tooltip(session.open_tunnels()) {
+                            Some(tooltip) => item.mark(icons::TUNNEL, tooltip),
+                            None => item,
+                        }
                     }
                     None => TabItem::new(("session-tab", index), tab.active_view().label(cx)),
                 }
@@ -4654,6 +4698,37 @@ mod tests {
         // than one that simply says less.
         assert_eq!(editor_tab_label("nginx.conf", "").as_ref(), "nginx.conf");
         assert_eq!(editor_tab_label("nginx.conf", "  ").as_ref(), "nginx.conf");
+    }
+
+    #[test]
+    fn a_session_holding_no_forwarding_has_nothing_to_mark() {
+        // `None` is what leaves the tab unmarked, so this is the whole of the
+        // rule that a tab which lost the bind — or never asked for a tunnel —
+        // looks exactly as it did before.
+        assert!(tunnel_tooltip(&[]).is_none());
+    }
+
+    #[test]
+    fn a_forwarding_is_named_from_the_local_end_to_the_remote_one() {
+        let tooltip = tunnel_tooltip(&["8080:db:5432".into()]).expect("a rule to name");
+        assert!(tooltip.contains("8080 \u{2192} db:5432"), "{tooltip}");
+
+        // Every rule is named, and on one line: the mark says how many
+        // forwardings ride on this tab, so a tooltip that stopped at the first
+        // would be answering a different question.
+        let both = tunnel_tooltip(&["8080:db:5432".into(), "6379:cache:6379".into()])
+            .expect("two rules to name");
+        assert!(both.contains("8080 \u{2192} db:5432"), "{both}");
+        assert!(both.contains("6379 \u{2192} cache:6379"), "{both}");
+        assert!(!both.contains('\n'), "{both}");
+    }
+
+    #[test]
+    fn a_label_that_is_not_a_rule_is_shown_as_it_arrived() {
+        // Nothing emits one today. If anything ever does, it has to reach the
+        // user as itself rather than being dropped for not parsing.
+        let tooltip = tunnel_tooltip(&["something else".into()]).expect("a label to name");
+        assert!(tooltip.contains("something else"), "{tooltip}");
     }
 
     #[test]

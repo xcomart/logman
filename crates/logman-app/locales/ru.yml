@@ -40,6 +40,7 @@ tab:
   close_right: Закрыть вкладки справа
   tip_list: Все вкладки
   tip_new: "Новый сеанс (%{shortcut})"
+  tip_tunnels: "Переадресация %{rules}"
 
 files:
   title: Удалённые файлы

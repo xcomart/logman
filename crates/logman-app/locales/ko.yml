@@ -40,6 +40,7 @@ tab:
   close_right: 오른쪽 탭 모두 닫기
   tip_list: 모든 탭
   tip_new: "새 세션 (%{shortcut})"
+  tip_tunnels: "포워딩 중 %{rules}"
 
 files:
   title: 원격 파일

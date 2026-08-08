@@ -40,6 +40,7 @@ tab:
   close_right: Fermer les onglets à droite
   tip_list: Tous les onglets
   tip_new: "Nouvelle session (%{shortcut})"
+  tip_tunnels: "Redirection %{rules}"
 
 files:
   title: Fichiers distants

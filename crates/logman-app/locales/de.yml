@@ -40,6 +40,7 @@ tab:
   close_right: Tabs rechts davon schließen
   tip_list: Alle Tabs
   tip_new: "Neue Sitzung (%{shortcut})"
+  tip_tunnels: "Weiterleitung %{rules}"
 
 files:
   title: Entfernte Dateien

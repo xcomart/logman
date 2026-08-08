@@ -333,6 +333,52 @@ impl Transport {
     }
 }
 
+/// The port forwardings a session currently owns.
+///
+/// Owns, not "was configured with": several tabs can be opened from one profile
+/// and they all ask for the same local ports, but only the session that got
+/// there first holds a given listener — every other one is told
+/// [`SshEvent::TunnelFailed`] for that rule and forwards nothing. Recording
+/// only what the transport reports as *opened* is therefore what makes this
+/// list an answer to "which tab is the tunnel actually running in", which is
+/// the question the mark in the tab strip exists to answer.
+///
+/// A type of its own, folding the events in itself, so that the rule can be
+/// asserted without standing a session — and a gpui app — up first, exactly as
+/// [`SessionStatus::tab_status`] can.
+#[derive(Debug, Default)]
+struct OpenTunnels {
+    /// One label per live forwarding, as `local_port:remote_host:remote_port`.
+    labels: Vec<SharedString>,
+}
+
+impl OpenTunnels {
+    /// Folds one transport event into the list.
+    fn observe(&mut self, event: &SshEvent) {
+        match event {
+            SshEvent::TunnelOpened { rule } => self.labels.push(SharedString::from(rule.clone())),
+            // Both terminal events take the transport with them, and the
+            // listeners live on the runtime behind it: by the time either of
+            // these arrives, the local ports are already closed.
+            SshEvent::Disconnected { .. } | SshEvent::Error(..) => self.clear(),
+            // A failure withdraws a rule if — and only if — it names one that
+            // is on the list. A listener that gives up after a run of failed
+            // accepts closes its port on the way out and reports the very
+            // label it opened under, so the mark has to go with it. The other
+            // two failures cannot match: a rule that never bound was never
+            // recorded, and a refused forwarding names one *connection* of a
+            // rule rather than the rule itself.
+            SshEvent::TunnelFailed { rule, .. } => self.labels.retain(|label| label != rule),
+            _ => {}
+        }
+    }
+
+    /// Forgets every forwarding, because the transport carrying them is gone.
+    fn clear(&mut self) {
+        self.labels.clear();
+    }
+}
+
 /// A single session — remote or local — together with the terminal it drives.
 pub struct Session {
     /// What the session connects to, and what a reconnect rebuilds from.
@@ -349,6 +395,11 @@ pub struct Session {
     terminal: TerminalModel,
     /// Current life cycle state.
     status: SessionStatus,
+    /// Port forwardings this session, and no other, is currently holding.
+    ///
+    /// Always empty for a local session: a pty forwards nothing, and nothing
+    /// ever reports a forwarding to one.
+    tunnels: OpenTunnels,
     /// Task draining the transport's event stream; dropping it stops the pump.
     _pump: Option<Task<()>>,
 }
@@ -467,6 +518,7 @@ impl Session {
                 TerminalTheme::by_name_or_default(&effective.scheme),
             ),
             status: SessionStatus::Connecting,
+            tunnels: OpenTunnels::default(),
             _pump: None,
         }
     }
@@ -498,6 +550,17 @@ impl Session {
     /// The current life cycle state.
     pub fn status(&self) -> &SessionStatus {
         &self.status
+    }
+
+    /// The port forwardings this session is holding open right now, as
+    /// `local_port:remote_host:remote_port`.
+    ///
+    /// Empty unless the session actually bound the ports: a second tab opened
+    /// from the same profile finds them taken, is told so, and answers with
+    /// nothing here — which is what lets the tab strip point at the one tab the
+    /// forwardings are really running in.
+    pub fn open_tunnels(&self) -> &[SharedString] {
+        &self.tunnels.labels
     }
 
     /// What this session is attached to, in one line: `user@host` for an SSH
@@ -656,6 +719,10 @@ impl Session {
         if let Some(transport) = self.transport.take() {
             transport.close();
         }
+        // Closing the transport closes the listeners with it, and no event
+        // reports that: the pump is dropped on the next line, so nothing would
+        // arrive to clear them.
+        self.tunnels.clear();
         self._pump = None;
         if self.status.is_live() {
             self.status = SessionStatus::Disconnected {
@@ -829,12 +896,24 @@ impl Session {
 
         self.transport = Some(transport);
         self.status = SessionStatus::Connecting;
+        // A reconnect binds every rule afresh, and may well lose ports it held
+        // a moment ago to a session that grabbed them in between. Nothing from
+        // the transport that just went away can arrive to say so — its pump is
+        // replaced on the next line — so the slate is wiped here.
+        self.tunnels.clear();
         self._pump = Some(pump);
         cx.notify();
     }
 
     /// Applies one SSH transport event to the session state.
     fn on_ssh_event(&mut self, event: SshEvent, cx: &mut Context<Self>) {
+        // Ahead of the match, and by handing the whole event over rather than
+        // by touching the list from three of the arms below: which events open
+        // and close a forwarding is a rule of its own, and one worth being able
+        // to assert on without a running session. The `cx.notify` at the end
+        // covers the change — the strip re-reads `open_tunnels` on the next
+        // frame, as it re-reads the status.
+        self.tunnels.observe(&event);
         match event {
             SshEvent::Connecting => self.status = SessionStatus::Connecting,
             SshEvent::HostKey {
@@ -851,6 +930,12 @@ impl Session {
             SshEvent::Data(bytes) | SshEvent::ExtendedData(bytes) => self.on_output(&bytes),
             SshEvent::ExitStatus(code) => {
                 log::debug!("{}: remote shell exited with {code}", self.label());
+            }
+            // The tab strip is the whole report: a forwarding that came up did
+            // what the user asked for, and a line in the terminal saying so
+            // would push the shell's first prompt down for nothing.
+            SshEvent::TunnelOpened { rule } => {
+                log::debug!("{}: tunnel {rule} is open", self.label());
             }
             // Non-fatal by contract: the shell is unaffected, so the session
             // status stays as it is and nothing in the tab strip changes.
@@ -1064,6 +1149,125 @@ mod tests {
         match &wsl.filesystem {
             LocalFilesystem::Wsl { distro } => assert_eq!(distro, "Ubuntu"),
             other => panic!("a WSL shell stands in a WSL filesystem, not in {other:?}"),
+        }
+    }
+
+    /// A rule as the transport names one, so the tests read like the events do.
+    const A_RULE: &str = "8080:db:5432";
+
+    /// A second one, to catch a list that only ever holds the last event.
+    const ANOTHER_RULE: &str = "6379:cache:6379";
+
+    /// What a session would answer [`Session::open_tunnels`] with.
+    fn open(tunnels: &OpenTunnels) -> Vec<&str> {
+        tunnels.labels.iter().map(SharedString::as_ref).collect()
+    }
+
+    /// Folds a run of events into a fresh list, as the pump would.
+    fn observed(events: &[SshEvent]) -> OpenTunnels {
+        let mut tunnels = OpenTunnels::default();
+        for event in events {
+            tunnels.observe(event);
+        }
+        tunnels
+    }
+
+    #[test]
+    fn a_session_lists_every_forwarding_it_bound() {
+        let tunnels = observed(&[
+            SshEvent::TunnelOpened {
+                rule: A_RULE.to_owned(),
+            },
+            SshEvent::TunnelOpened {
+                rule: ANOTHER_RULE.to_owned(),
+            },
+        ]);
+
+        assert_eq!(open(&tunnels), [A_RULE, ANOTHER_RULE]);
+    }
+
+    #[test]
+    fn a_session_that_lost_the_bind_lists_nothing() {
+        // What the second tab on one profile sees: the ports are already held
+        // by the first, so it is told so and forwards nothing. Its tab must
+        // stay unmarked — the mark says where the traffic goes, and a warning
+        // is the opposite of that.
+        let tunnels = observed(&[
+            SshEvent::TunnelFailed {
+                rule: A_RULE.to_owned(),
+                message: "could not bind 127.0.0.1:8080: address in use".to_owned(),
+            },
+            SshEvent::Ready,
+            SshEvent::Data(b"$ ".to_vec()),
+        ]);
+
+        assert!(open(&tunnels).is_empty(), "{:?}", open(&tunnels));
+    }
+
+    #[test]
+    fn a_listener_that_gives_up_takes_its_mark_with_it() {
+        // The one failure that names a rule already on the list: the accept
+        // loop reports the same label it opened under and then closes the port.
+        let tunnels = observed(&[
+            SshEvent::TunnelOpened {
+                rule: A_RULE.to_owned(),
+            },
+            SshEvent::TunnelOpened {
+                rule: ANOTHER_RULE.to_owned(),
+            },
+            SshEvent::TunnelFailed {
+                rule: A_RULE.to_owned(),
+                message: "the local listener failed 16 times in a row".to_owned(),
+            },
+        ]);
+
+        assert_eq!(open(&tunnels), [ANOTHER_RULE]);
+    }
+
+    #[test]
+    fn a_refused_connection_leaves_the_rule_marked() {
+        // A forwarding the server would not open names one *connection* of a
+        // rule, not the rule: the listener is still bound, still accepting, and
+        // still the reason the tab wears a mark.
+        let tunnels = observed(&[
+            SshEvent::TunnelOpened {
+                rule: A_RULE.to_owned(),
+            },
+            SshEvent::TunnelFailed {
+                rule: format!("{A_RULE} connection 3"),
+                message: "the server refused to forward to db:5432".to_owned(),
+            },
+        ]);
+
+        assert_eq!(open(&tunnels), [A_RULE]);
+    }
+
+    #[test]
+    fn the_end_of_a_session_is_the_end_of_its_forwardings() {
+        // Either way it ends: the listeners live on the transport's runtime, so
+        // a tab that has stopped connecting anything must not go on claiming to
+        // hold a port some other tab is free to take.
+        for terminal in [
+            SshEvent::Disconnected {
+                reason: "connection closed by the remote host".to_owned(),
+            },
+            SshEvent::Error(
+                logman_ssh::SshErrorKind::Io,
+                "the transport went away".to_owned(),
+            ),
+        ] {
+            let tunnels = observed(&[
+                SshEvent::TunnelOpened {
+                    rule: A_RULE.to_owned(),
+                },
+                terminal.clone(),
+            ]);
+
+            assert!(
+                open(&tunnels).is_empty(),
+                "{terminal:?} left {:?} behind",
+                open(&tunnels)
+            );
         }
     }
 

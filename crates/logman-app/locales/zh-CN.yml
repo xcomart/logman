@@ -40,6 +40,7 @@ tab:
   close_right: 关闭右侧标签页
   tip_list: 所有标签页
   tip_new: "新建会话 (%{shortcut})"
+  tip_tunnels: "转发中 %{rules}"
 
 files:
   title: 远程文件

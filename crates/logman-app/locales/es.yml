@@ -40,6 +40,7 @@ tab:
   close_right: Cerrar las pestañas de la derecha
   tip_list: Todas las pestañas
   tip_new: "Nueva sesión (%{shortcut})"
+  tip_tunnels: "Redirigiendo %{rules}"
 
 files:
   title: Archivos remotos

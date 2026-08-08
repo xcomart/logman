@@ -40,6 +40,7 @@ tab:
   close_right: 右側のタブを閉じる
   tip_list: すべてのタブ
   tip_new: "新規セッション (%{shortcut})"
+  tip_tunnels: "転送中 %{rules}"
 
 files:
   title: リモートファイル

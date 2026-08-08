@@ -80,6 +80,12 @@ tab:
   # button on each tab reuses `close` above: same command, same wording.
   tip_list: All tabs
   tip_new: "New session (%{shortcut})"
+  # Hover label of the mark on a tab whose session is holding its profile's
+  # port forwardings open. `rules` is a comma-separated list already written as
+  # `8080 → db:5432`, so the wording only has to say what is happening to them.
+  # Only one tab per rule ever carries the mark: opening the same profile twice
+  # leaves the second tab's listeners unbound, and unmarked.
+  tip_tunnels: "Forwarding %{rules}"
 
 # The file panel: the browser to the left of the terminal. Over an SSH session
 # it browses the server through SFTP; over a session running a shell on this
