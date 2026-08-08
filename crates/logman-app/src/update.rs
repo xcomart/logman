@@ -414,7 +414,45 @@ fn stage(
     let payload = find_payload(&unpacked, PAYLOAD)
         .ok_or_else(|| format!("{} does not contain {PAYLOAD}", asset.name))?;
 
-    swap(target, &payload)
+    swap(target, &payload)?;
+
+    // With the new bundle in place and the restart imminent, this is the last
+    // moment to make sure Gatekeeper will let it open.
+    #[cfg(target_os = "macos")]
+    clear_quarantine(target);
+
+    Ok(())
+}
+
+/// Strip the quarantine flag from the bundle just swapped in, best-effort.
+///
+/// A file this process downloads and unpacks should carry no quarantine of its
+/// own — logman is not quarantine-aware, and `tar` restores none from the
+/// CI-built archive — but Gatekeeper's rules have tightened release by release,
+/// and the one unacceptable outcome here is an update that leaves the user with
+/// an app macOS refuses to reopen. So the flag is cleared unconditionally: this
+/// is the same `xattr -r -d com.apple.quarantine` the README walks a first-time
+/// installer through, recursive because the flag lands on every file inside a
+/// quarantined bundle, and best-effort because the attribute is usually not
+/// there at all — a failure costs a debug line, never the update.
+#[cfg(target_os = "macos")]
+fn clear_quarantine(bundle: &Path) {
+    match Command::new("xattr")
+        .args(["-r", "-d", "com.apple.quarantine"])
+        .arg(bundle)
+        .output()
+    {
+        Ok(output) if output.status.success() => {}
+        // The usual answer on a clean bundle: "No such xattr". Worth a debug
+        // line and nothing more.
+        Ok(output) => log::debug!(
+            "xattr -r -d com.apple.quarantine {} exited with {}: {}",
+            bundle.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) => log::debug!("xattr could not be run: {error}"),
+    }
 }
 
 /// Stream `asset` into `to`, checking it against what the API promised.

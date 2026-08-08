@@ -74,7 +74,7 @@ jobs:
       # notarization and it does not satisfy Gatekeeper, so a downloaded copy
       # arrives quarantined and the first launch is refused. Since macOS 15
       # right-click -> Open no longer bypasses that for unnotarized apps;
-      # what works is `xattr -d com.apple.quarantine /Applications/logman.app`,
+      # what works is `xattr -r -d com.apple.quarantine /Applications/logman.app`,
       # or System Settings -> Privacy & Security -> Open Anyway after one
       # failed launch — the README's Installing section walks users through
       # both. What it buys is one
