@@ -327,6 +327,8 @@ editor:
   close_unsaved: "%{name} 有未保存的更改。关闭并丢弃吗？"
   close_discard: 丢弃更改
   close_cancel: 取消
+  language_plain: 纯文本
+  language_tip: 文件类型
 
 about:
   title: 关于 logman

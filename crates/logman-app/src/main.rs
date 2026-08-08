@@ -66,8 +66,8 @@ mod wsl;
 rust_i18n::i18n!("locales", fallback = "en");
 
 use gpui::{
-    AnyElement, App, Application, Bounds, ClickEvent, Context, Div, DragMoveEvent, ElementId,
-    Entity, EntityId, FocusHandle, Focusable, KeyBinding, Menu, MenuItem, MouseButton,
+    AnyElement, App, Application, Bounds, ClickEvent, Context, Corner, Div, DragMoveEvent,
+    ElementId, Entity, EntityId, FocusHandle, Focusable, KeyBinding, Menu, MenuItem, MouseButton,
     MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, Stateful,
     Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
     WindowControlArea, WindowOptions, actions, div, img, prelude::*, px, relative, size,
@@ -79,6 +79,7 @@ use uuid::Uuid;
 use about_dialog::{AboutDialog, AboutDialogEvent};
 use caption::apply_caption_theme;
 use connection::{ConnectionDialog, ConnectionDialogEvent};
+use editor::Language;
 use editor_pane::{EditorPane, EditorPaneEvent};
 use file_panel::{FilePanel, FilePanelEvent, OpenEditor};
 use i18n::ts;
@@ -341,12 +342,28 @@ impl PaneView {
     /// The session this pane *is*, if it is one.
     ///
     /// `None` for an editor, which merely came from one. That is what keeps an
-    /// open file on screen after the shell beside it exits: the disconnect
-    /// closes the panes showing that session, and this pane is not one of them.
+    /// open file on screen after the shell it was read from exits: the
+    /// disconnect closes the panes showing that session, and this pane is not
+    /// one of them.
     fn session(&self, cx: &App) -> Option<Entity<Session>> {
         match self {
             Self::Terminal(view) => Some(view.read(cx).session().clone()),
             Self::Editor(_) => None,
+        }
+    }
+
+    /// The session an editor pane was opened out of, if this pane is one.
+    ///
+    /// The counterpart of [`PaneView::session`] and pointedly not a widening of
+    /// it: that one answers "which session *is* this pane", which is what the
+    /// tab label, the status bar and the disconnect path all ask, and an editor
+    /// has to keep answering `None` there or a tab of open files would report
+    /// itself as a connection. This one answers "which filesystem is this file
+    /// on", which only the file panel asks.
+    fn editor_session(&self, cx: &App) -> Option<Entity<Session>> {
+        match self {
+            Self::Terminal(_) => None,
+            Self::Editor(pane) => Some(pane.read(cx).session().clone()),
         }
     }
 
@@ -355,7 +372,10 @@ impl PaneView {
     fn label(&self, cx: &App) -> SharedString {
         match self {
             Self::Terminal(view) => view.read(cx).session().read(cx).title(),
-            Self::Editor(pane) => pane.read(cx).name().clone(),
+            Self::Editor(pane) => {
+                let pane = pane.read(cx);
+                editor_tab_label(pane.name(), &pane.session().read(cx).title())
+            }
         }
     }
 
@@ -368,16 +388,88 @@ impl PaneView {
     }
 }
 
+/// Width of the status bar's file-type picker, in pixels.
+///
+/// Set by the longest thing in it — a language name, which is one word — rather
+/// than by the application menus' own width, which is set by a command that
+/// names what it acts on and carries a shortcut hint beside it.
+const LANGUAGE_MENU_WIDTH: f32 = 180.;
+
+/// The mark on the file-type button, pointing the way its list opens.
+const CHEVRON_UP: &str = "\u{25b4}";
+
+/// The caret's place in the file, as the status bar prints it.
+///
+/// `12/200 : 5` — the line, out of the lines there are, and then the column.
+/// Digits and punctuation, with not a word in it, for the same reason the grid
+/// size beside it is written `80x24`: a status bar has room for a number and no
+/// room for a sentence, and a number needs no translating. The line comes first
+/// and carries the total because "where am I in this file" is the question a
+/// reader actually has; the column answers a different one and is set off by the
+/// colon rather than crowded against it.
+///
+/// Free and pure so the format is checked without a window; every argument is
+/// already one-based when it arrives — see [`crate::editor::EditorView`].
+fn caret_summary(line: usize, lines: usize, column: usize) -> SharedString {
+    SharedString::from(format!("{line}/{lines} : {column}"))
+}
+
+/// What the status bar and its picker call `language`.
+///
+/// Every name but one comes from the syntax module, because every name but one
+/// is a proper name: `YAML` is `YAML` in every locale, and a definition's name
+/// is whatever its author wrote. [`Language::Plain`] is the exception — "plain
+/// text" describes a file rather than naming a format, and a reader of a
+/// translated interface should find it in their own language — so that one row
+/// is looked up here, where the strings are.
+fn language_label(language: Language) -> SharedString {
+    match language {
+        Language::Plain => ts!("editor.language_plain"),
+        named => SharedString::new_static(named.name()),
+    }
+}
+
+/// What the tab strip calls a tab holding one open file.
+///
+/// The file first and the connection after it, because the strip is read from
+/// the left and truncates on the right: what tells two tabs apart is usually the
+/// file, and the connection is the qualifier — the same order the file panel's
+/// own heading puts them in.
+///
+/// The connection is passed in rather than remembered when the file was opened,
+/// so a shell that retitles itself retitles the files opened out of it too. A
+/// session with no title to give — nothing but an empty profile name — leaves
+/// the tab called after the file alone rather than trailing a dash with nothing
+/// behind it.
+///
+/// Free rather than a method because it is a sentence, not a lookup: no word of
+/// it is translated — a name, a dash and a name — and none of it needs a pane,
+/// a session or a window in order to be checked.
+fn editor_tab_label(name: &str, connection: &str) -> SharedString {
+    if connection.trim().is_empty() {
+        SharedString::from(name.to_owned())
+    } else {
+        SharedString::from(format!("{name} - {connection}"))
+    }
+}
+
 /// One pane: the view showing a session, plus the wiring that keeps the
 /// workspace in step with it.
 struct PaneLeaf {
     /// The surface this pane draws.
     view: PaneView,
-    /// Repaints the workspace when the session's title or status changes.
+    /// Repaints the workspace when what it draws *about* this pane changes.
     ///
-    /// Terminals only: an editor pane watches its own session for the colour
-    /// scheme, and nothing about the workspace changes when the session behind
-    /// an open file does.
+    /// Two different subscriptions behind one field, because the two kinds of
+    /// pane have different things worth watching. A terminal's watches its
+    /// *session*: the tab strip prints its title and its status dot. An
+    /// editor's watches the *pane*, because the status bar prints the caret's
+    /// line and the file's language, and both are read off the pane — a caret
+    /// move changes nothing the workspace would otherwise be asked to redraw.
+    ///
+    /// `Option` because it was once terminals only; it is now always `Some`,
+    /// and stays an `Option` so that a pane kind with nothing to watch can be
+    /// added without threading a dummy subscription through.
     _observer: Option<Subscription>,
     /// Records this pane as the active one when a click focuses its view.
     ///
@@ -432,17 +524,66 @@ impl SessionTab {
     /// The session this tab speaks for: the active pane's, or the first one it
     /// has if the active pane is an editor.
     ///
-    /// The fallback is what keeps the tab label, the status bar and the file
-    /// panel describing a *session* while the keyboard happens to be in a file.
-    /// A tab whose last terminal has closed — an open file outliving the shell
-    /// it came from — has no session at all, and every caller says so in its own
-    /// words rather than inventing one.
+    /// The fallback is what keeps the tab label and the status bar describing a
+    /// *session* while the keyboard happens to be in a file of a split tab. A
+    /// tab with no terminal in it at all — a file opened into a tab of its own,
+    /// or one outliving the shell it came from — has no session, and every
+    /// caller says so in its own words rather than inventing one. The file panel
+    /// is the exception, and asks [`SessionTab::panel_session`] instead.
     fn active_session(&self, cx: &App) -> Option<Entity<Session>> {
         self.active_view().session(cx).or_else(|| {
             self.panes
                 .leaves()
                 .into_iter()
                 .find_map(|(_, leaf)| leaf.view.session(cx))
+        })
+    }
+
+    /// The session the file panel browses while this tab is active.
+    ///
+    /// [`SessionTab::active_session`] first, so a tab that has a terminal in it
+    /// browses exactly what it always did. Only a tab that has none — an open
+    /// file in a tab of its own, which is what "Edit" now makes — falls through
+    /// to the session that file was *read from*, which is the one filesystem the
+    /// panel could usefully be showing beside it.
+    ///
+    /// Kept apart from `active_session` rather than folded into it because the
+    /// two are asked by different callers for different reasons: the tab label,
+    /// the status dot and the tab menu's connection rows all read that one, and
+    /// answering them with an editor's origin would dress a tab of files up as a
+    /// live connection — offering to reconnect a session the tab is not showing.
+    fn panel_session(&self, cx: &App) -> Option<Entity<Session>> {
+        self.active_session(cx).or_else(|| {
+            self.active_view().editor_session(cx).or_else(|| {
+                self.panes
+                    .leaves()
+                    .into_iter()
+                    .find_map(|(_, leaf)| leaf.view.editor_session(cx))
+            })
+        })
+    }
+
+    /// The pane a close aimed at this whole tab has to ask about first.
+    ///
+    /// Only ever the tab's *only* pane; see [`tab_close_asks`] for why a split
+    /// tab is not covered.
+    fn unsaved_lone_editor(&self, cx: &App) -> Option<PaneId> {
+        let (id, leaf) = self.panes.first_leaf();
+        let unsaved = matches!(
+            &leaf.view,
+            PaneView::Editor(editor) if editor.read(cx).is_dirty(cx)
+        );
+        tab_close_asks(self.panes.leaf_count(), unsaved).then_some(id)
+    }
+
+    /// Whether closing this tab outright would lose edits nobody was asked
+    /// about.
+    fn holds_unsaved_work(&self, cx: &App) -> bool {
+        self.panes.leaves().into_iter().any(|(_, leaf)| {
+            matches!(
+                &leaf.view,
+                PaneView::Editor(editor) if editor.read(cx).is_dirty(cx)
+            )
         })
     }
 
@@ -466,6 +607,49 @@ impl SessionTab {
             .into_iter()
             .find(|(_, leaf)| leaf.view.entity_id() == view)
             .map(|(id, _)| id)
+    }
+}
+
+/// Whether closing a whole tab has to put the unsaved-changes question up
+/// first.
+///
+/// One pane, and that pane an edited file: that is the tab "Edit" opens, and the
+/// tab strip's own close button is now the usual way it goes, so the question
+/// has to be asked from there as it is from the pane's close button.
+///
+/// A *split* tab holding an edited file beside a shell is deliberately not
+/// covered. The question closes one pane, and this close was aimed at the whole
+/// tab, so answering it would leave the tab standing and the command unhonoured;
+/// asking once per file would mean a queue of modals. Such a tab can only be
+/// made by merging one, and the bulk closes below leave it alone entirely rather
+/// than discarding it — see [`Workspace::close_other_tabs`].
+const fn tab_close_asks(panes: usize, unsaved_editor: bool) -> bool {
+    panes == 1 && unsaved_editor
+}
+
+/// Where the tab at `index` sits once the tab at `removed` has been taken out.
+///
+/// `removed` is never `index`: everything after the hole moves down a slot, and
+/// a tab that is itself the hole has no slot to move to.
+const fn shifted(index: usize, removed: usize) -> usize {
+    if removed < index { index - 1 } else { index }
+}
+
+/// Where the focus sits once the tab at `removed` has been taken out.
+///
+/// Every index is numbered for the strip as it stands *before* the removal:
+/// `active` is where the focus is, and `survivor` is where it goes if the tab it
+/// was on is the one going — the tab the close was aimed from, which is never
+/// itself removed and which shifts along with everything else behind the hole.
+///
+/// Free and pure because the bulk closes both run it in a loop while the strip
+/// changes under them, and an off-by-one there is a focus landing on the wrong
+/// tab, which no test of the closing itself would catch.
+const fn active_after_close(active: usize, removed: usize, survivor: usize) -> usize {
+    if active == removed {
+        shifted(survivor, removed)
+    } else {
+        shifted(active, removed)
     }
 }
 
@@ -528,6 +712,18 @@ struct Workspace {
     /// The tab a right-click opened a context menu for, and where the pointer
     /// was when it did. `None` while no tab menu is showing.
     tab_context: Option<(usize, Point<Pixels>)>,
+    /// Where the pointer was when the status bar's file-type picker was opened,
+    /// and `None` while it is closed.
+    ///
+    /// The position rather than a flag because the menu opens at the pointer,
+    /// the way every other menu in the window does; what differs is that it
+    /// stands on that point and grows upward — see
+    /// [`Workspace::render_language_menu`].
+    ///
+    /// No pane is remembered with it: the menu acts on whatever the active pane
+    /// is when a row is picked, and it is dismissed by anything that could
+    /// change which pane that is.
+    language_menu: Option<Point<Pixels>>,
     /// The saved profile a right-click on the empty state opened a context menu
     /// for, and where the pointer was when it did.
     ///
@@ -757,6 +953,7 @@ impl Workspace {
             menu_open: false,
             tab_menu_open: false,
             tab_context: None,
+            language_menu: None,
             empty_context: None,
             titlebar,
             #[cfg(windows)]
@@ -938,11 +1135,13 @@ impl Workspace {
 
     /// Wires a freshly created editor pane up as a pane.
     ///
-    /// The terminal's arm of this also watches the session, because a session
-    /// that hangs up takes its pane with it. An editor's does not: the file is
-    /// still open, still editable, and still saveable if the source can be
-    /// reached — see [`EditorPane`] — so there is nothing here for a disconnect
-    /// to do.
+    /// Nothing here watches the *session*, unlike [`Workspace::new_pane`]: a
+    /// session that hangs up takes its terminal with it, but not a file — the
+    /// buffer is still open, still editable, and still saveable if the source
+    /// can be reached, see [`EditorPane`]. What is watched instead is the pane
+    /// itself, because the status bar prints where the caret is and what the
+    /// file is being coloured as, and a caret move touches nothing else the
+    /// workspace draws.
     fn new_editor_pane(
         &mut self,
         pane: Entity<EditorPane>,
@@ -963,10 +1162,11 @@ impl Workspace {
         let focus = cx.on_focus(&handle, window, move |this, _window, cx| {
             this.on_pane_focused(id, cx);
         });
+        let observer = cx.observe(&pane, |_this, _pane, cx| cx.notify());
 
         PaneLeaf {
             view: PaneView::Editor(pane),
-            _observer: None,
+            _observer: Some(observer),
             _clicked: clicked,
             _focus: focus,
         }
@@ -984,6 +1184,13 @@ impl Workspace {
             };
             if tab.active_pane != pane {
                 tab.active_pane = pane;
+                // The file-type picker names the pane it was opened over, and
+                // acts on whichever pane is active when a row is picked. Once
+                // those are two different panes it is asking about one file and
+                // answering about another, so it goes. A press elsewhere in the
+                // window is caught by the menu's own backdrop; this is for the
+                // keyboard, which moves the focus without one.
+                self.language_menu = None;
                 cx.notify();
             }
             return;
@@ -998,6 +1205,10 @@ impl Workspace {
         if index >= self.tabs.len() {
             return;
         }
+        // See [`Workspace::on_pane_focused`]: a picker opened over one file must
+        // not be answered against another. The shortcuts reach here without a
+        // press for the menu's backdrop to catch.
+        self.language_menu = None;
         self.active = index;
         self.reveal_active_tab();
         self.focus_active(window, cx);
@@ -1020,11 +1231,34 @@ impl Workspace {
         }
     }
 
-    /// Disconnects and removes the tab at `index`, panes and all.
+    /// Disconnects and removes the tab at `index`, panes and all — asking first
+    /// if the tab is one file with unsaved changes in it.
     ///
-    /// This is the tab strip's close button: a tab that was split closes as a
-    /// unit. Closing one pane at a time is [`Workspace::close_active_pane`].
+    /// This is the tab strip's close button and the tab menu's close row: a tab
+    /// that was split closes as a unit. Closing one pane at a time is
+    /// [`Workspace::close_active_pane`].
+    ///
+    /// The question is [`tab_close_asks`]'s to decide. Answering it comes back
+    /// through [`Workspace::confirm_close_editor`] and lands in
+    /// [`Workspace::remove_pane`], which takes the last pane of a tab down by
+    /// calling [`Workspace::close_tab_now`] — the unguarded half of this — so the
+    /// question is asked once rather than again by the close it authorised.
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        if let Some(pane) = tab.unsaved_lone_editor(cx) {
+            self.ask_before_closing(pane, window, cx);
+            return;
+        }
+        self.close_tab_now(index, window, cx);
+    }
+
+    /// Disconnects and removes the tab at `index` without asking about anything.
+    ///
+    /// Every caller has already settled whatever question the tab raised, or
+    /// there was none to raise; see [`Workspace::close_tab`].
+    fn close_tab_now(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
         }
@@ -1043,31 +1277,49 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Closes every tab except the one at `index`.
+    /// Closes every tab except the one at `index` — and except any tab holding
+    /// unsaved edits.
     ///
-    /// The survivor is the only tab left, so it is also the active one however
-    /// the strip stood before: whichever tab held the focus is either this one
-    /// or gone.
+    /// A bulk close asks nothing, because there is no honest way to ask: a
+    /// command aimed at a dozen tabs would have to put a dozen questions up in
+    /// turn, and a user working through them has no way back to the one they
+    /// already answered. So a tab with an edited file in it is simply left
+    /// standing — the command still empties the strip of everything that had
+    /// nothing to lose, and what is left is exactly what would have been lost.
+    /// Closing one of those tabs afterwards asks about it the ordinary way.
+    ///
+    /// The focus ends on the tab the close was aimed from unless it was already
+    /// on one of the survivors, in which case it stays where it is.
     fn close_other_tabs(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
         }
 
+        // Both indices follow the strip as it shrinks: `kept` is the tab this
+        // was aimed from, which never goes, and `active` is where the focus is.
+        let mut kept = index;
+        let mut active = self.active;
         // Back to front, so that removing a tab never moves one that is still
         // to be visited.
         for other in (0..self.tabs.len()).rev() {
-            if other != index {
-                self.retire_tab(other, cx);
+            if other == kept || self.tabs[other].holds_unsaved_work(cx) {
+                continue;
             }
+            self.retire_tab(other, cx);
+            active = active_after_close(active, other, kept);
+            kept = shifted(kept, other);
         }
 
-        self.active = 0;
+        self.active = active;
         self.reveal_active_tab();
         self.focus_active(window, cx);
         cx.notify();
     }
 
-    /// Closes every tab after the one at `index`.
+    /// Closes every tab after the one at `index`, bar any holding unsaved edits.
+    ///
+    /// A tab with an edited file in it is left standing, for the reason
+    /// [`Workspace::close_other_tabs`] gives.
     ///
     /// A tab in front of the clicked one keeps the focus if it had it — nothing
     /// it was showing has gone anywhere. Only an active tab that was itself
@@ -1078,13 +1330,18 @@ impl Workspace {
             return;
         }
 
+        // The clicked tab cannot move — everything closing sits behind it — so
+        // it is the survivor at the same index throughout.
+        let mut active = self.active;
         for other in (index + 1..self.tabs.len()).rev() {
+            if self.tabs[other].holds_unsaved_work(cx) {
+                continue;
+            }
             self.retire_tab(other, cx);
+            active = active_after_close(active, other, index);
         }
 
-        if self.active > index {
-            self.active = index;
-        }
+        self.active = active;
         self.reveal_active_tab();
         self.focus_active(window, cx);
         cx.notify();
@@ -1199,7 +1456,10 @@ impl Workspace {
             return;
         };
         if tab.panes.leaf_count() < 2 {
-            self.close_tab(index, window, cx);
+            // Unguarded: whatever the pane going had to be asked about was asked
+            // before this was called — by the close question, or by the save it
+            // ended in — and the tab is that pane.
+            self.close_tab_now(index, window, cx);
             return;
         }
 
@@ -1370,16 +1630,29 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Shows a file the panel has read, in a pane beside the one that asked.
+    /// Shows a file the panel has read, in a tab of its own.
     ///
-    /// Always a **horizontal** split, and always off the active pane: the file
-    /// was opened out of the panel on the left, and putting it to the right of
-    /// the shell keeps the reading order — filesystem, file, terminal is not an
-    /// order anybody would choose. There is no size gate here, unlike
-    /// [`Workspace::duplicate_split`]: that one refuses to make two terminals
-    /// out of a grid too small for either, and an editor has no grid to be too
-    /// small for. Refusing would leave the menu row doing nothing with nothing
-    /// said about it.
+    /// A tab rather than a split of the pane that asked. A split gives the file
+    /// half of a terminal that was already only as wide as it needed to be, and
+    /// it gives it *permanently*: there is no way back to the whole width while
+    /// the file is open. A tab costs the file nothing and the shell nothing, and
+    /// it is what every editor the user already has does with an opened file.
+    /// The strip is where tabs are switched, listed and closed, so the file gets
+    /// all of that for free — the close button included, which is why
+    /// [`Workspace::close_tab`] asks about unsaved changes.
+    ///
+    /// It lands right after the active tab, where a duplicated tab and a broken
+    /// out pane also land: the new tab belongs beside the one it came from
+    /// rather than at the far end of a strip the user may have to scroll.
+    ///
+    /// No check that the session's tab is still open, which the split needed
+    /// because it had to have a pane to split. The session itself arrives with
+    /// the file — [`OpenEditor::session`] holds the entity — so everything the
+    /// editor needs is here whether or not the tab that asked survived the read:
+    /// the bytes are in hand, the [`files::FileSource`] outlives a disconnect,
+    /// and the file panel keeps browsing that session through
+    /// [`SessionTab::panel_session`]. Refusing would throw a file away for a
+    /// reason the user cannot see.
     fn open_editor(&mut self, opened: &OpenEditor, window: &mut Window, cx: &mut Context<Self>) {
         let session = opened.session.entity_id();
         let path = editor_pane::file_path(&opened.dir, &opened.name);
@@ -1396,13 +1669,6 @@ impl Workspace {
             return;
         }
 
-        // The panel reads the file asynchronously, so the tab it was read out
-        // of can have been closed by the time the bytes land.
-        let Some(index) = self.tab_of_session(session, cx) else {
-            log::info!("the session {path} was read from is gone; not opening it");
-            return;
-        };
-
         let editor = cx.new(|cx| {
             EditorPane::new(
                 opened.session.clone(),
@@ -1415,18 +1681,17 @@ impl Workspace {
         });
         let leaf = self.new_editor_pane(editor, window, cx);
 
-        let target = self.tabs[index].active_pane();
-        let tab = &mut self.tabs[index];
-        let Some(pane) = tab.panes.split(target, Axis::Horizontal, leaf) else {
-            // `target` came out of this very tab a line ago, so this is
-            // unreachable; logged rather than ignored because reaching it would
-            // mean a loaded file has been dropped on the floor.
-            log::error!("the pane to split has vanished; {path} was not opened");
-            return;
+        // Right after the active tab, or at the head of an empty strip — which
+        // is where the file lands if the shell it was read from has since been
+        // closed and was the last one open.
+        let at = if self.tabs.is_empty() {
+            0
+        } else {
+            self.active + 1
         };
-        tab.active_pane = pane;
-
-        self.active = index;
+        log::info!("opening {path} in a tab of its own");
+        self.tabs.insert(at, SessionTab::single(leaf));
+        self.active = at;
         self.reveal_active_tab();
         self.focus_active(window, cx);
         cx.notify();
@@ -1445,17 +1710,6 @@ impl Workspace {
                 (editor.session().entity_id() == session && editor.path() == path)
                     .then_some((index, pane))
             })
-        })
-    }
-
-    /// The tab holding a terminal pane showing `session`, if any.
-    fn tab_of_session(&self, session: EntityId, cx: &App) -> Option<usize> {
-        self.tabs.iter().position(|tab| {
-            tab.panes
-                .leaves()
-                .into_iter()
-                .filter_map(|(_, leaf)| leaf.view.session(cx))
-                .any(|shown| shown.entity_id() == session)
         })
     }
 
@@ -1693,6 +1947,7 @@ impl Workspace {
         self.menu_open = false;
         self.tab_menu_open = false;
         self.tab_context = None;
+        self.language_menu = None;
         self.empty_context = None;
         // Cancelled rather than parked. The safe answer to "close it and lose
         // the changes?" is no, and a user who has just reached for a different
@@ -1839,11 +2094,16 @@ impl Workspace {
     /// panel compares the session against the one it already holds and returns
     /// without repainting when they match, which is every frame but the ones
     /// that actually switch.
+    ///
+    /// [`SessionTab::panel_session`] rather than the session the tab speaks for,
+    /// so that switching to an open file does not empty the panel: the file came
+    /// from a filesystem, and that filesystem is what the panel goes on showing
+    /// beside it — which is how the next file is opened.
     fn sync_file_panel(&self, cx: &mut Context<Self>) {
         let session = self
             .tabs
             .get(self.active)
-            .and_then(|tab| tab.active_session(cx));
+            .and_then(|tab| tab.panel_session(cx));
         self.panel
             .update(cx, |panel, cx| panel.set_session(session, cx));
     }
@@ -1882,10 +2142,11 @@ impl Workspace {
             return;
         }
         // Not `close_overlays`: a modal dialog outranks the strip — the guard
-        // above leaves it alone — while the two dropdowns are simply mutually
+        // above leaves it alone — while the other dropdowns are simply mutually
         // exclusive with this menu.
         self.menu_open = false;
         self.tab_menu_open = false;
+        self.language_menu = None;
         self.tab_context = Some((index, at));
         cx.notify();
     }
@@ -1894,6 +2155,51 @@ impl Workspace {
     fn close_tab_context(&mut self, cx: &mut Context<Self>) {
         if self.tab_context.take().is_some() {
             cx.notify();
+        }
+    }
+
+    /// Opens the status bar's file-type picker, with its foot at `at`.
+    ///
+    /// Guarded like [`Workspace::open_tab_context`]: a modal outranks the bar
+    /// underneath it, and the other dropdowns are mutually exclusive with this
+    /// one. Refused outright when the active pane is not a file, which is also
+    /// when the trigger is not drawn — the guard is for the frame between a
+    /// press and the pane changing under it.
+    fn open_language_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.dialog_open(cx) || self.active_editor().is_none() {
+            return;
+        }
+        self.menu_open = false;
+        self.tab_menu_open = false;
+        self.tab_context = None;
+        self.language_menu = Some(at);
+        cx.notify();
+    }
+
+    /// Puts the file-type picker away, if it is open.
+    fn close_language_menu(&mut self, cx: &mut Context<Self>) {
+        if self.language_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Colours the active file as `language`.
+    ///
+    /// A no-op on a tab whose active pane is not a file, which is only reachable
+    /// from a menu that outlived the pane it was opened over.
+    fn set_active_language(&mut self, language: Language, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor().cloned() else {
+            return;
+        };
+        editor.update(cx, |editor, cx| editor.set_language(language, cx));
+        cx.notify();
+    }
+
+    /// The open file the keyboard is in, if the active pane is one.
+    fn active_editor(&self) -> Option<&Entity<EditorPane>> {
+        match self.tabs.get(self.active)?.active_view() {
+            PaneView::Editor(editor) => Some(editor),
+            PaneView::Terminal(_) => None,
         }
     }
 
@@ -1909,6 +2215,7 @@ impl Workspace {
         }
         self.menu_open = false;
         self.tab_menu_open = false;
+        self.language_menu = None;
         self.empty_context = Some((id, at));
         cx.notify();
     }
@@ -2352,8 +2659,10 @@ impl Workspace {
                 // A split tab is labelled after its active pane, so the strip
                 // says what the user is looking at rather than what the tab
                 // happened to be opened as. A tab holding nothing but open files
-                // is named after the active one of them and wears no status dot:
-                // there is no connection left for a dot to report on.
+                // — which is what "Edit" opens — is named after the active one
+                // of them and wears no status dot: the tab is not a connection,
+                // so there is nothing for a dot to report on. See
+                // [`editor_tab_label`] for what such a tab is called.
                 match tab.active_session(cx) {
                     Some(session) => {
                         let session = session.read(cx);
@@ -3123,6 +3432,113 @@ impl Workspace {
         }
     }
 
+    /// Renders the file-type picker, if it is open.
+    ///
+    /// Anchored by its **bottom** left corner, which is the whole reason
+    /// [`ContextMenu::anchor`] exists: the trigger sits in the last two dozen
+    /// pixels of the window, so a list hanging down from it would be snapped
+    /// back over the point it was opened from and cover the answer it is asking
+    /// about. Standing it on the pointer opens it into the window instead.
+    ///
+    /// Narrower than the application's own menus as well. These rows are one
+    /// word each — `JSON`, `Rust` — and the width that fits "Split right of
+    /// current tab" reads as a dialog that lost its contents.
+    ///
+    /// The list is [`Language::all`] every time it is built rather than once:
+    /// what is in it depends on the syntax registry, and building it on the
+    /// press is what keeps this from being a second copy of that list.
+    fn render_language_menu(&self, cx: &mut Context<Self>) -> Option<ContextMenu> {
+        let position = self.language_menu?;
+        // The picker acts on the active pane, so a pane that stopped being a
+        // file while the menu stood leaves nothing for the rows to pick for.
+        self.active_editor()?;
+        let this = cx.entity();
+
+        // Every row is live, the one already in force included. A greyed row
+        // runs nothing *and* leaves the menu standing — which is right for a
+        // command that cannot be run and wrong for a list of answers, where the
+        // obvious way to say "never mind" is to pick what is already picked. The
+        // current language needs no mark of its own either: it is written on the
+        // button this list is standing on, a row's height below it.
+        let entries = Language::all()
+            .into_iter()
+            .map(|language| {
+                let this = this.clone();
+                MenuEntry::new(language_label(language)).on_activate(move |_window, cx| {
+                    this.update(cx, |workspace, cx| {
+                        workspace.set_active_language(language, cx);
+                    });
+                })
+            })
+            .collect();
+
+        Some(
+            ContextMenu::new("language-menu")
+                .position(position)
+                .anchor(Corner::BottomLeft)
+                .width(px(LANGUAGE_MENU_WIDTH))
+                .entries(entries)
+                .on_dismiss(move |_window, cx| {
+                    this.update(cx, |workspace, cx| workspace.close_language_menu(cx));
+                }),
+        )
+    }
+
+    /// Renders the right end of the status bar while the keyboard is in a file:
+    /// what it is being coloured as, and where the caret is in it.
+    ///
+    /// The language is a control and the position is not, which is why only one
+    /// of them takes a hover and a pointer cursor. The chevron points *up*
+    /// because that is where the list opens, and it is what says the name is a
+    /// button at all — a status bar is otherwise a place where nothing can be
+    /// clicked.
+    fn render_editor_status(
+        &self,
+        editor: &Entity<EditorPane>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let pane = editor.read(cx);
+        let label = language_label(pane.language(cx));
+        let (line, lines, column) = pane.caret_summary(cx);
+        let this = cx.entity();
+
+        vec![
+            div()
+                .id("status-language")
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap(px(4.))
+                .h(px(18.))
+                .px(px(6.))
+                .rounded_sm()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.surface_hover).text_color(theme.text))
+                .tooltip(tooltip_label(ts!("editor.language_tip")))
+                // On the press rather than on the click, so the list is up by
+                // the time the button comes back up — the same moment every
+                // other menu in the window opens at, and the reason a second
+                // press lands on the backdrop and closes it again.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    move |event: &MouseDownEvent, _window, cx| {
+                        let at = event.position;
+                        this.update(cx, |workspace, cx| workspace.open_language_menu(at, cx));
+                    },
+                )
+                .child(div().whitespace_nowrap().child(label))
+                .child(div().flex_none().text_size(px(8.)).child(CHEVRON_UP))
+                .into_any_element(),
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .child(caret_summary(line, lines, column))
+                .into_any_element(),
+        ]
+    }
+
     /// Renders the bottom status bar.
     fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
@@ -3157,6 +3573,21 @@ impl Workspace {
                 ),
             };
 
+        // The left of the bar speaks for the tab's session and the right for
+        // the *pane*: a terminal reports the grid it is drawing, and a file
+        // reports what it is being coloured as and where the caret is. The two
+        // are never both worth showing, since only one surface has the keyboard.
+        let trailing = match self.active_editor().cloned() {
+            Some(editor) => self.render_editor_status(&editor, &theme, cx),
+            None => vec![
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .child(grid)
+                    .into_any_element(),
+            ],
+        };
+
         div()
             .flex()
             .flex_row()
@@ -3178,9 +3609,10 @@ impl Workspace {
             .child(div().flex_none().whitespace_nowrap().child(target))
             // The status summary carries the failure reason, which can be far
             // wider than the window; letting it shrink and ellipsize keeps the
-            // grid size pinned to the right edge instead of pushing it out.
+            // right end of the bar pinned to the right edge instead of pushing
+            // it out.
             .child(div().flex_1().min_w_0().truncate().child(status))
-            .child(div().flex_none().whitespace_nowrap().child(grid))
+            .children(trailing)
             .into_any_element()
     }
 }
@@ -3389,6 +3821,7 @@ impl Render for Workspace {
         // while there is no tab; a session opened from the menu itself takes
         // the state — and with `close_overlays`, the menu — off the screen.
         let empty_context = self.render_empty_context(cx);
+        let language_menu = self.render_language_menu(cx);
         let close_confirm = self.render_close_confirm(cx);
         let dialog = self
             .dialog
@@ -3483,6 +3916,7 @@ impl Render for Workspace {
             // place in this list.
             .children(tab_context)
             .children(empty_context)
+            .children(language_menu)
             .children(dialog)
             .children(settings)
             .children(about)
@@ -3973,6 +4407,12 @@ fn main() {
         // of the user's own themes, and the same goes for the scheme every
         // session is about to be opened with.
         theme_store::reload(cx);
+        // The ten languages logman ships as definition files, and whatever the
+        // user has put beside them — here for the same reason the palettes are:
+        // an editor opened later has to find them already registered. Read once
+        // and never again, since an editor holds an index into this registry;
+        // a definition added while logman is running arrives on the next launch.
+        editor::syntax::custom::install();
         apply_ui_theme(&settings.ui_theme, cx);
 
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
@@ -4030,12 +4470,17 @@ fn main() {
     });
 }
 
-/// What the welcome screen's box does when its column outgrows the window.
+/// The rules the workspace can be held to without a window, and the one thing
+/// that needs one.
 ///
-/// Only [`centered_scroll`] is put under test, and only through what its scroll
-/// handle reports: the arrangement is entirely a question of layout, and the
-/// handle is where gpui writes down the answer — the box it measured, and how
-/// far past it the column ran.
+/// Everything the tab strip decides — what a tab of an open file is called,
+/// whether closing it has to ask, where the focus lands as tabs are taken out —
+/// is a rule about names and indices, and each is written as a free function
+/// precisely so that it can be checked here without a session, a pane or a
+/// window. What is left is [`centered_scroll`], which is entirely a question of
+/// layout: it is put under test through what its scroll handle reports, since
+/// the handle is where gpui writes down the answer — the box it measured, and
+/// how far past it the column ran.
 #[cfg(test)]
 mod tests {
     use std::ops::Deref;
@@ -4193,5 +4638,69 @@ mod tests {
             f32::from(column.size.height) > COLUMN + SCROLL_MARGIN,
             "the column was scrolled to its last button rather than past it"
         );
+    }
+
+    #[test]
+    fn a_tab_of_one_file_is_named_after_the_file_and_the_connection() {
+        assert_eq!(
+            editor_tab_label("nginx.conf", "web-01").as_ref(),
+            "nginx.conf - web-01"
+        );
+    }
+
+    #[test]
+    fn a_connection_with_no_name_to_give_leaves_the_file_name_alone() {
+        // "nginx.conf - " reads as a label that was cut off, which is worse
+        // than one that simply says less.
+        assert_eq!(editor_tab_label("nginx.conf", "").as_ref(), "nginx.conf");
+        assert_eq!(editor_tab_label("nginx.conf", "  ").as_ref(), "nginx.conf");
+    }
+
+    #[test]
+    fn only_a_tab_that_is_one_unsaved_file_asks_before_it_closes() {
+        assert!(tab_close_asks(1, true));
+        // Nothing is at stake, so the close button is not a question.
+        assert!(!tab_close_asks(1, false));
+        // A split tab: the question closes one pane, and this close was aimed
+        // at the whole tab.
+        assert!(!tab_close_asks(2, true));
+    }
+
+    #[test]
+    fn closing_a_tab_behind_the_active_one_leaves_the_focus_where_it_is() {
+        assert_eq!(active_after_close(1, 3, 0), 1);
+    }
+
+    #[test]
+    fn closing_a_tab_in_front_of_the_active_one_moves_it_down_a_slot() {
+        assert_eq!(active_after_close(3, 1, 0), 2);
+    }
+
+    #[test]
+    fn the_caret_is_printed_as_the_line_out_of_the_lines_and_then_the_column() {
+        assert_eq!(caret_summary(12, 200, 5).as_ref(), "12/200 : 5");
+        // A file of one line still reads as a fraction rather than as a bare
+        // number: the second half is what says how much file there is.
+        assert_eq!(caret_summary(1, 1, 1).as_ref(), "1/1 : 1");
+    }
+
+    #[test]
+    fn a_named_format_is_labelled_by_its_own_name() {
+        // Straight out of the syntax module, untranslated, because `JSON` is
+        // `JSON` in every locale. Plain text is the one row that is looked up,
+        // and what it comes back as depends on which locale is loaded — which
+        // is the i18n module's test to make, not this one's.
+        assert_eq!(language_label(Language::Json).as_ref(), "JSON");
+        assert_eq!(language_label(Language::Dockerfile).as_ref(), "Dockerfile");
+        assert!(!language_label(Language::Plain).is_empty());
+    }
+
+    #[test]
+    fn closing_the_active_tab_hands_the_focus_to_the_survivor() {
+        // A survivor in front of the hole does not move.
+        assert_eq!(active_after_close(2, 2, 0), 0);
+        // One behind it moves down with everything else: the tab that was
+        // fourth is third once the second has gone.
+        assert_eq!(active_after_close(1, 1, 3), 2);
     }
 }

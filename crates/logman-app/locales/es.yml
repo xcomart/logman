@@ -327,6 +327,8 @@ editor:
   close_unsaved: "%{name} tiene cambios sin guardar. ¿Cerrarlo y perderlos?"
   close_discard: Descartar los cambios
   close_cancel: Cancelar
+  language_plain: Texto sin formato
+  language_tip: Tipo de archivo
 
 about:
   title: Acerca de logman

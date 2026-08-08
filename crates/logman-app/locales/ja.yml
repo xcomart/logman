@@ -327,6 +327,8 @@ editor:
   close_unsaved: "%{name} には未保存の変更があります。閉じて破棄しますか？"
   close_discard: 変更を破棄
   close_cancel: キャンセル
+  language_plain: プレーンテキスト
+  language_tip: ファイルの種類
 
 about:
   title: logman について

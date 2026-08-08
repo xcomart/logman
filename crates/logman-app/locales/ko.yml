@@ -327,6 +327,8 @@ editor:
   close_unsaved: "%{name}에 저장하지 않은 변경 사항이 있습니다. 닫고 버릴까요?"
   close_discard: 변경 사항 버리기
   close_cancel: 취소
+  language_plain: 일반 텍스트
+  language_tip: 파일 종류
 
 about:
   title: logman 정보

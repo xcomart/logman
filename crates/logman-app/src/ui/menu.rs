@@ -176,6 +176,7 @@ fn menu_backdrop(
 fn menu_panel(
     id: ElementId,
     entries: Vec<MenuEntry>,
+    width: Pixels,
     on_dismiss: Option<DismissHandler>,
     theme: &Theme,
 ) -> AnyElement {
@@ -250,7 +251,7 @@ fn menu_panel(
         .flex()
         .flex_col()
         .flex_none()
-        .w(px(PANEL_WIDTH))
+        .w(width)
         .py(px(4.))
         .bg(theme.background)
         .border_1()
@@ -280,6 +281,8 @@ fn menu_panel(
 pub struct ContextMenu {
     id: ElementId,
     position: Point<Pixels>,
+    anchor: Corner,
+    width: Pixels,
     entries: Vec<MenuEntry>,
     on_dismiss: Option<DismissHandler>,
 }
@@ -292,18 +295,45 @@ impl ContextMenu {
         Self {
             id: id.into(),
             position: point(px(0.), px(0.)),
+            anchor: Corner::TopLeft,
+            width: px(PANEL_WIDTH),
             entries: Vec::new(),
             on_dismiss: None,
         }
     }
 
-    /// Puts the top-left corner of the panel at `position`, in window
+    /// Puts the panel's [`ContextMenu::anchor`] corner at `position`, in window
     /// coordinates.
     ///
     /// A panel that would hang off an edge is pulled back inside the window
     /// instead.
     pub fn position(mut self, position: Point<Pixels>) -> Self {
         self.position = position;
+        self
+    }
+
+    /// Chooses which corner of the panel sits at the position, and so which way
+    /// the menu grows from it.
+    ///
+    /// [`Corner::TopLeft`] by default, which is what a right-click wants: the
+    /// list hangs down and to the right of the pointer, away from it. A trigger
+    /// along the bottom of the window — the status bar — wants
+    /// [`Corner::BottomLeft`] instead, so the list stands *on* the trigger and
+    /// opens upward into the window rather than being snapped back over the
+    /// thing it was opened from.
+    pub fn anchor(mut self, anchor: Corner) -> Self {
+        self.anchor = anchor;
+        self
+    }
+
+    /// Narrows or widens the panel.
+    ///
+    /// The default is the width of the application's own menus, which is set by
+    /// their longest row — a pane command naming what it acts on, plus a
+    /// shortcut hint. A menu of one-word rows, such as a list of file formats,
+    /// reads as a mis-sized dialog at that width and takes its own.
+    pub fn width(mut self, width: Pixels) -> Self {
+        self.width = width;
         self
     }
 
@@ -333,6 +363,7 @@ impl RenderOnce for ContextMenu {
         let panel = menu_panel(
             ElementId::from((self.id.clone(), "panel")),
             self.entries,
+            self.width,
             self.on_dismiss,
             &theme,
         );
@@ -352,7 +383,7 @@ impl RenderOnce for ContextMenu {
             .child(
                 deferred(
                     anchored()
-                        .anchor(Corner::TopLeft)
+                        .anchor(self.anchor)
                         .position(self.position)
                         .snap_to_window_with_margin(px(WINDOW_MARGIN))
                         .child(panel),
@@ -524,6 +555,7 @@ impl RenderOnce for MenuButton {
         let panel = menu_panel(
             ElementId::from((self.id.clone(), "panel")),
             self.entries,
+            px(PANEL_WIDTH),
             on_dismiss,
             &theme,
         );
@@ -608,6 +640,8 @@ mod tests {
     /// own state.
     struct Harness {
         rows: Vec<(SharedString, bool)>,
+        position: Point<Pixels>,
+        anchor: Corner,
         activated: Rc<RefCell<Vec<usize>>>,
         dismissed: Rc<Cell<usize>>,
     }
@@ -629,7 +663,8 @@ mod tests {
 
             div().size_full().child(
                 ContextMenu::new("menu")
-                    .position(point(px(MENU_X), px(MENU_Y)))
+                    .position(self.position)
+                    .anchor(self.anchor)
                     .entries(entries)
                     .on_dismiss(move |_, _| dismissed.set(dismissed.get() + 1)),
             )
@@ -655,9 +690,19 @@ mod tests {
     }
 
     /// Opens a window on a menu of `rows`, each a label and whether it is
-    /// enabled.
+    /// enabled, hanging down and to the right of the anchor.
     fn open(
         rows: Vec<(SharedString, bool)>,
+        cx: &mut TestAppContext,
+    ) -> (Handles, VisualTestContext) {
+        open_anchored(rows, point(px(MENU_X), px(MENU_Y)), Corner::TopLeft, cx)
+    }
+
+    /// The same, with the panel's `anchor` corner at `position`.
+    fn open_anchored(
+        rows: Vec<(SharedString, bool)>,
+        position: Point<Pixels>,
+        anchor: Corner,
         cx: &mut TestAppContext,
     ) -> (Handles, VisualTestContext) {
         cx.update(super::super::init);
@@ -671,6 +716,8 @@ mod tests {
             let dismissed = handles.dismissed.clone();
             move |_, _| Harness {
                 rows,
+                position,
+                anchor,
                 activated,
                 dismissed,
             }
@@ -735,5 +782,45 @@ mod tests {
         click(&mut cx, point(px(OUTSIDE), px(OUTSIDE)));
         assert_eq!(menu.drain(), Vec::<usize>::new());
         assert_eq!(menu.dismissals(), 2);
+    }
+
+    /// What the status bar's file-type picker needs: a menu that *stands on*
+    /// its anchor instead of hanging from it, because the anchor is in the last
+    /// two dozen pixels of the window and a list hanging down from there would
+    /// be snapped back over the thing it was opened from.
+    #[gpui::test]
+    fn a_bottom_anchored_menu_opens_upward_from_its_position(cx: &mut TestAppContext) {
+        // Far enough down the window that a two-row panel standing on it still
+        // clears the top edge, so nothing is snapped and the arithmetic holds.
+        let foot = px(300.);
+        let (menu, mut cx) = open_anchored(
+            vec![
+                (SharedString::new_static("JSON"), true),
+                (SharedString::new_static("YAML"), true),
+            ],
+            point(px(MENU_X), foot),
+            Corner::BottomLeft,
+            cx,
+        );
+
+        // The last row sits directly above the anchor, under the panel's own
+        // padding and border; the first is a row further up again.
+        let last = px(f32::from(foot) - PANEL_TOP - ROW_HEIGHT / 2.);
+        let first = px(f32::from(last) - ROW_HEIGHT);
+        click(&mut cx, point(px(INSIDE_THE_PANEL), last));
+        assert_eq!(menu.drain(), vec![1]);
+
+        click(&mut cx, point(px(INSIDE_THE_PANEL), first));
+        assert_eq!(menu.drain(), vec![0]);
+
+        // And nothing of the panel hangs below the anchor: a press just under
+        // it reaches the backdrop, which is what the bar it opened from would
+        // otherwise be covered by.
+        click(
+            &mut cx,
+            point(px(INSIDE_THE_PANEL), px(f32::from(foot) + 4.)),
+        );
+        assert_eq!(menu.drain(), Vec::<usize>::new());
+        assert!(menu.dismissals() > 0);
     }
 }

@@ -327,6 +327,8 @@ editor:
   close_unsaved: "%{name} enthält nicht gespeicherte Änderungen. Schließen und verwerfen?"
   close_discard: Änderungen verwerfen
   close_cancel: Abbrechen
+  language_plain: Nur Text
+  language_tip: Dateityp
 
 about:
   title: Über logman

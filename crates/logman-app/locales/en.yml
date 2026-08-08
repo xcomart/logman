@@ -626,6 +626,17 @@ editor:
   # act, because the act — closing — is not the part worth confirming.
   close_discard: Discard changes
   close_cancel: Cancel
+  # The status bar's file-type indicator, which is also a button: it names what
+  # the open file is being coloured as, and opens a list of every format the
+  # editor knows. Only two strings, because every other row of that list is a
+  # proper name — YAML, Dockerfile, the name a syntax definition gave itself —
+  # and a proper name is the same in every language.
+  # The row and the label for a file being coloured as nothing in particular.
+  # A description rather than a name, which is why this one is translated.
+  language_plain: Plain text
+  # Tooltip of the indicator. A noun: it names what the button shows, the way
+  # `files.title` names the panel.
+  language_tip: File type
 
 # The about box. The version, the licence name and the names of the libraries
 # are values, not words, and are never translated.

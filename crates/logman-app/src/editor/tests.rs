@@ -312,6 +312,71 @@ fn a_read_only_editor_refuses_every_change(cx: &mut TestAppContext) {
     assert_eq!(editor.caret(&mut cx), 2);
 }
 
+// --- where the caret is ------------------------------------------------------
+
+#[gpui::test]
+fn the_caret_reports_its_place_the_way_a_reader_counts(cx: &mut TestAppContext) {
+    let (editor, mut cx) = open("one\ntwo\nthree\n", cx);
+
+    // The very start of the file is line one, column one — not the zero the
+    // buffer counts in, which is the whole reason these accessors exist.
+    assert_eq!(editor.read(&mut cx, EditorView::caret_position), (1, 1));
+    // Four lines: a file ending in a newline has an empty last one, and the
+    // caret can be put on it.
+    assert_eq!(editor.read(&mut cx, EditorView::line_count), 4);
+
+    // Onto the third line, two graphemes in.
+    editor.update(&mut cx, |editor, cx| editor.move_to(10, cx));
+    assert_eq!(editor.read(&mut cx, EditorView::caret_position), (3, 3));
+
+    // And the end of the buffer, which is the empty line after the last break.
+    editor.update(&mut cx, |editor, cx| {
+        let end = editor.text().len();
+        editor.move_to(end, cx);
+    });
+    assert_eq!(editor.read(&mut cx, EditorView::caret_position), (4, 1));
+}
+
+#[gpui::test]
+fn the_column_counts_graphemes_and_not_bytes(cx: &mut TestAppContext) {
+    // Three Hangul syllables of three bytes each, and a family emoji written as
+    // three four-byte people joined by two zero-width joiners.
+    let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    let (editor, mut cx) = open(&format!("한국어{family}x"), cx);
+    editor.update(&mut cx, |editor, cx| {
+        let end = editor.text().len();
+        editor.move_to(end, cx);
+    });
+
+    // Twenty-eight bytes in, and five things a reader would count: three
+    // syllables, one family, one `x`. A byte column would say 29.
+    assert_eq!(editor.caret(&mut cx), 28);
+    assert_eq!(editor.read(&mut cx, EditorView::caret_position), (1, 6));
+}
+
+#[gpui::test]
+fn an_empty_buffer_is_one_line_with_the_caret_at_its_head(cx: &mut TestAppContext) {
+    let (editor, mut cx) = open("", cx);
+    assert_eq!(editor.read(&mut cx, EditorView::line_count), 1);
+    assert_eq!(editor.read(&mut cx, EditorView::caret_position), (1, 1));
+}
+
+#[gpui::test]
+fn a_caret_move_is_announced_so_a_host_can_follow_it(cx: &mut TestAppContext) {
+    // What the status bar's line number rides on: the editor draws the caret
+    // itself, so nothing else would repaint if the move were kept quiet.
+    let (editor, mut cx) = open("one\ntwo\n", cx);
+    editor.drain_events();
+
+    cx.simulate_keystrokes("down");
+    assert_eq!(editor.read(&mut cx, EditorView::caret_position), (2, 1));
+    assert!(
+        editor
+            .drain_events()
+            .contains(&EditorEvent::SelectionChanged)
+    );
+}
+
 // --- undo and redo -----------------------------------------------------------
 
 #[gpui::test]

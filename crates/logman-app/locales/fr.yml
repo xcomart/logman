@@ -327,6 +327,8 @@ editor:
   close_unsaved: "%{name} contient des modifications non enregistrées. Le fermer et les perdre ?"
   close_discard: Abandonner les modifications
   close_cancel: Annuler
+  language_plain: Texte brut
+  language_tip: Type de fichier
 
 about:
   title: À propos de logman

@@ -616,6 +616,33 @@ impl EditorView {
         }
     }
 
+    /// The caret's place in the file the way a person counts it: the line and
+    /// the column, both from one.
+    ///
+    /// The column is counted in *graphemes*, not bytes, which is the only
+    /// count that answers "how far along the line is the caret" — the same
+    /// measure a vertical move aims for, so the number in a status bar agrees
+    /// with where <kbd>↑</kbd> puts the caret. A byte column would say 7 in the
+    /// middle of a Korean word and 3 for the same place in an English one.
+    ///
+    /// One-based here rather than at the caller, because there is only one
+    /// reason to ask — to show it — and every caller would add the same one.
+    pub fn caret_position(&self) -> (usize, usize) {
+        let caret = self.caret();
+        (
+            self.buffer.line_of(caret) + 1,
+            self.buffer.grapheme_column(caret) + 1,
+        )
+    }
+
+    /// How many lines the buffer holds.
+    ///
+    /// A buffer ending in a newline counts the empty line after it, which is the
+    /// line the caret can be put on and so the line a reader counts.
+    pub fn line_count(&self) -> usize {
+        self.buffer.line_count()
+    }
+
     /// Moves the caret to `offset`, collapsing the selection.
     pub fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         let offset = self.clamp(offset);

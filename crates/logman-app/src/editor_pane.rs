@@ -1,4 +1,4 @@
-//! One file, open for editing, as a pane of a session tab.
+//! One file, open for editing, in a tab of its own.
 //!
 //! [`crate::editor`] is a text widget and nothing more: it holds a rope and
 //! knows how to draw and edit it, and it deliberately has no idea where the
@@ -498,10 +498,13 @@ impl EditorPane {
             match event {
                 EditorEvent::Changed => pane.on_changed(cx),
                 EditorEvent::ContextMenu { position } => pane.open_context(*position, cx),
-                // Nothing here follows the caret: the header shows the file and
-                // not the position in it, and the menu reads the selection when
-                // it is built rather than tracking it.
-                EditorEvent::SelectionChanged => {}
+                // The pane draws nothing that follows the caret — the header
+                // shows the file, not the place in it — but the status bar does,
+                // and it reads the position off this pane. The notification is
+                // what carries a caret move up to the workspace observing it;
+                // without it an arrow key would leave a stale line number on
+                // screen until something else asked for a frame.
+                EditorEvent::SelectionChanged => cx.notify(),
             }
         });
         let session_changed = cx.observe(&session, |_pane, _session, cx| cx.notify());
@@ -540,6 +543,36 @@ impl EditorPane {
     /// same name somewhere else".
     pub fn path(&self) -> String {
         file_path(&self.dir, &self.name)
+    }
+
+    /// Where the caret is and how much file there is around it: the one-based
+    /// line and column, and the number of lines.
+    ///
+    /// Read straight off the editor for the same reason [`EditorPane::is_dirty`]
+    /// is: the widget already knows, and a copy kept here would be a second
+    /// answer that could disagree with the caret on screen. The three come back
+    /// together because the status bar prints them together and would otherwise
+    /// take three borrows of the same widget to build one string.
+    pub fn caret_summary(&self, cx: &App) -> (usize, usize, usize) {
+        let editor = self.editor.read(cx);
+        let (line, column) = editor.caret_position();
+        (line, editor.line_count(), column)
+    }
+
+    /// The language the file is being coloured as.
+    pub fn language(&self, cx: &App) -> Language {
+        self.editor.read(cx).language()
+    }
+
+    /// Colours the file as `language` from here on.
+    ///
+    /// What the status bar's picker calls. The choice sticks: nothing detects
+    /// the language again once the file is open — [`EditorPane::new`] does it
+    /// once, from the name — so a file the detector placed wrongly stays where
+    /// the user put it for as long as it is open.
+    pub fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.set_language(language, cx));
     }
 
     /// Whether the buffer has unsaved changes.

@@ -327,6 +327,8 @@ editor:
   close_unsaved: "В %{name} есть несохранённые изменения. Закрыть и потерять их?"
   close_discard: Отменить изменения
   close_cancel: Отмена
+  language_plain: Обычный текст
+  language_tip: Тип файла
 
 about:
   title: О программе logman
