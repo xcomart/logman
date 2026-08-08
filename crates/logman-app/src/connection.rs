@@ -25,9 +25,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Once;
 
 use gpui::{
-    AnyElement, App, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
-    Point, Render, ScrollHandle, SharedString, Window, actions, div, prelude::*, px,
+    AnyElement, App, Context, DragMoveEvent, ElementId, Entity, EventEmitter, FocusHandle,
+    Focusable, Hsla, IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseUpEvent, PathPromptOptions, Pixels, Point, Render, ScrollHandle, SharedString, Window,
+    actions, div, prelude::*, px,
 };
 use logman_core::{
     AuthMethod, ProfileStore, SecretStore, SessionOverrides, SessionProfile, TunnelRule,
@@ -41,9 +42,30 @@ use crate::i18n::ts;
 #[cfg(windows)]
 use crate::session::{LocalShell, local_shells};
 use crate::ui::{
-    Button, ButtonVariant, Checkbox, ContextMenu, MenuEntry, SchemePicker, SchemeSwatch, Segmented,
-    TextInput, form_row, modal, theme,
+    Button, ButtonVariant, Checkbox, ContextMenu, DraggedThumb, MenuEntry, SchemePicker,
+    SchemeSwatch, Scrollbar, ScrollbarAxis, ScrollbarState, Segmented, TextInput, form_row,
+    hide_later, hide_now, modal, scroll_to, scrolled, theme,
 };
+
+/// The dialog's two scrolling surfaces, and the element id of each one's overlay
+/// scroll indicator.
+///
+/// A single drag listener on the dialog root answers both, so it has to be able
+/// to tell which bar a drag belongs to; these ids are how, and pairing each with
+/// the surface it names keeps the two from being wired up crosswise.
+const SCROLLBARS: [(&str, Surface); 2] = [
+    ("connection-body-scrollbar", Surface::Body),
+    ("connection-list-scrollbar", Surface::List),
+];
+
+/// Which of the dialog's scrolling surfaces is meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    /// The dialog body, which scrolls behind the footer.
+    Body,
+    /// The saved-profile column, which scrolls inside the body.
+    List,
+}
 
 /// Port pre-filled into the form and used when the port field is left empty.
 const DEFAULT_PORT: u16 = 22;
@@ -433,6 +455,15 @@ pub struct ConnectionDialog {
     /// Scroll position of everything above the footer, so that expanding the
     /// overrides section can reveal it.
     body_scroll: ScrollHandle,
+    /// Scroll position of the saved-profile column.
+    ///
+    /// Kept only so that the column's overlay bar has something to measure and
+    /// to be dragged against; nothing else scrolls the list.
+    list_scroll: ScrollHandle,
+    /// Whether the body's overlay scroll indicator is on screen.
+    body_scrollbar: ScrollbarState,
+    /// Whether the profile column's overlay scroll indicator is on screen.
+    list_scrollbar: ScrollbarState,
     /// Display name of the connection.
     name_input: Entity<TextInput>,
     /// Host name or address.
@@ -546,6 +577,9 @@ impl ConnectionDialog {
             focus_handle: cx.focus_handle(),
             pending_focus: None,
             body_scroll: ScrollHandle::new(),
+            list_scroll: ScrollHandle::new(),
+            body_scrollbar: ScrollbarState::new(),
+            list_scrollbar: ScrollbarState::new(),
             name_input,
             host_input,
             port_input,
@@ -594,6 +628,106 @@ impl ConnectionDialog {
                     });
                 })
         })
+    }
+
+    /// The handle and bar state of one scrolling surface.
+    fn surface(&mut self, surface: Surface) -> (&ScrollHandle, &mut ScrollbarState) {
+        match surface {
+            Surface::Body => (&self.body_scroll, &mut self.body_scrollbar),
+            Surface::List => (&self.list_scroll, &mut self.list_scrollbar),
+        }
+    }
+
+    /// The same pair, for the renders that only read them.
+    fn surface_ref(&self, surface: Surface) -> (&ScrollHandle, &ScrollbarState) {
+        match surface {
+            Surface::Body => (&self.body_scroll, &self.body_scrollbar),
+            Surface::List => (&self.list_scroll, &self.list_scrollbar),
+        }
+    }
+
+    /// The overlay scroll indicator of one surface, as it stands.
+    fn scrollbar(&self, id: &'static str, surface: Surface) -> Scrollbar {
+        let (handle, state) = self.surface_ref(surface);
+        Scrollbar::for_handle(id, ScrollbarAxis::Vertical, handle).fade(state.fade())
+    }
+
+    /// The same bar, listening for the pointer reaching the edge it rides.
+    ///
+    /// Only the bars that are drawn need it: the one the drag path builds is
+    /// there to be measured, and never reaches an element tree.
+    fn hovering_scrollbar(
+        &self,
+        id: &'static str,
+        surface: Surface,
+        cx: &mut Context<Self>,
+    ) -> Scrollbar {
+        self.scrollbar(id, surface).on_hover(cx.listener(
+            move |dialog, hovered: &bool, _window, cx| {
+                dialog.hover_scrollbar(surface, *hovered, cx);
+            },
+        ))
+    }
+
+    /// Puts each surface's bar up whenever it has been scrolled, and starts the
+    /// clock that takes it down again.
+    fn watch_scroll(&mut self, cx: &mut Context<Self>) {
+        for (_, surface) in SCROLLBARS {
+            let (handle, state) = self.surface(surface);
+            let scrolled = scrolled(handle, ScrollbarAxis::Vertical);
+            if let Some(epoch) = state.moved(scrolled) {
+                hide_later(epoch, cx, move |dialog| Some(dialog.surface(surface).1));
+            }
+        }
+    }
+
+    /// Scrolls whichever surface's thumb has been dragged.
+    fn drag_scrollbar(&mut self, event: &DragMoveEvent<DraggedThumb>, cx: &mut Context<Self>) {
+        for (id, surface) in SCROLLBARS {
+            let Some(progress) = self.scrollbar(id, surface).dragged(event, cx) else {
+                continue;
+            };
+
+            let (handle, state) = self.surface(surface);
+            state.hold();
+            scroll_to(handle, ScrollbarAxis::Vertical, progress);
+            cx.notify();
+            return;
+        }
+    }
+
+    /// Lets go of whichever thumb was being held, and starts its clock again.
+    fn release_scrollbars(&mut self, cx: &mut Context<Self>) {
+        for (_, surface) in SCROLLBARS {
+            if let Some(epoch) = self.surface(surface).1.release() {
+                hide_later(epoch, cx, move |dialog| Some(dialog.surface(surface).1));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Puts one surface's bar up while the pointer rests on the edge it rides,
+    /// and starts it going the moment the pointer leaves.
+    ///
+    /// Told which surface rather than asked to work it out: the profile column
+    /// scrolls inside the body, so a pointer on the column's edge is inside both
+    /// surfaces at once, and only the strip it actually reached knows which of
+    /// the two bars was being asked for.
+    fn hover_scrollbar(&mut self, surface: Surface, hovered: bool, cx: &mut Context<Self>) {
+        let state = self.surface(surface).1;
+        if hovered {
+            if state.hover_enter() {
+                cx.notify();
+            }
+            return;
+        }
+
+        let Some(epoch) = state.hover_leave() else {
+            return;
+        };
+        hide_now(self, epoch, cx, move |dialog| {
+            Some(dialog.surface(surface).1)
+        });
     }
 
     /// Re-translate the placeholders of the fields that have a worded one.
@@ -1546,6 +1680,7 @@ impl ConnectionDialog {
     /// The saved-profile column.
     fn render_profile_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = theme(cx);
+        let bar = self.hovering_scrollbar(SCROLLBARS[1].0, Surface::List, cx);
         let this = cx.entity();
         let selected = self.editing;
 
@@ -1683,33 +1818,62 @@ impl ConnectionDialog {
                     .child(ts!("connection.saved_profiles")),
             )
             .child(
+                // A box of exactly the list's size, there only to hold the
+                // overlay bar: the list cannot hold it itself, because its own
+                // children are what scroll away underneath. Sized by the list
+                // rather than stretched, so the bar's track and the bordered
+                // box the eye sees are the same rectangle.
                 div()
-                    .id("connection-profile-list")
+                    .relative()
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
-                    .p(px(4.))
-                    .max_h(px(LIST_MAX_HEIGHT))
-                    .overflow_y_scroll()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.surface)
-                    // Pinned above everything the store holds, and separated by
-                    // a rule: they are not saved profiles, they are always
-                    // there, and they scroll away with them rather than staying
-                    // stuck to the top of a long list.
-                    .children(self.render_local_rows(cx))
-                    .when(empty, |this| {
-                        this.child(
-                            div()
-                                .p(px(8.))
-                                .text_size(px(12.))
-                                .text_color(theme.text_muted)
-                                .child(ts!("connection.empty_list")),
-                        )
-                    })
-                    .children(rows),
+                    .flex_none()
+                    .child(
+                        div()
+                            .id("connection-profile-list")
+                            .track_scroll(&self.list_scroll)
+                            // A wheel turned over the list stops here whenever
+                            // the list has anywhere to go: gpui otherwise
+                            // scrolls every container under the pointer, and
+                            // the body would drift along with every turn aimed
+                            // at the list. gpui's own scroll handler runs
+                            // before this one, so the list has already moved
+                            // by the time the event is stopped. A list that
+                            // fits lets the wheel through — there is nothing
+                            // here for it to mean.
+                            .on_scroll_wheel(cx.listener(|dialog, _, _window, cx| {
+                                if dialog.list_scroll.max_offset().height > px(0.) {
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .p(px(4.))
+                            .max_h(px(LIST_MAX_HEIGHT))
+                            .overflow_y_scroll()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.surface)
+                            // Pinned above everything the store holds, and
+                            // separated by a rule: they are not saved profiles,
+                            // they are always there, and they scroll away with
+                            // them rather than staying stuck to the top of a
+                            // long list.
+                            .children(self.render_local_rows(cx))
+                            .when(empty, |this| {
+                                this.child(
+                                    div()
+                                        .p(px(8.))
+                                        .text_size(px(12.))
+                                        .text_color(theme.text_muted)
+                                        .child(ts!("connection.empty_list")),
+                                )
+                            })
+                            .children(rows),
+                    )
+                    .children(bar.render(&theme)),
             )
     }
 
@@ -2377,6 +2541,9 @@ impl Render for ConnectionDialog {
         }
 
         self.apply_pending_focus(window, cx);
+        self.watch_scroll(cx);
+        let theme = theme(cx);
+        let body_bar = self.hovering_scrollbar(SCROLLBARS[0].0, Surface::Body, cx);
 
         let local = self.is_local_selected();
         let title = if local {
@@ -2398,29 +2565,39 @@ impl Render for ConnectionDialog {
             .min_h_0()
             .gap(px(12.))
             .child(
+                // The middle box exists only to hold the body's overlay bar,
+                // for the same reason the profile column has one of its own.
                 div()
-                    .id("connection-body")
-                    .track_scroll(&self.body_scroll)
+                    .relative()
                     .flex()
                     .flex_col()
                     .min_h_0()
-                    .gap(px(12.))
-                    .overflow_y_scroll()
                     .child(
                         div()
+                            .id("connection-body")
+                            .track_scroll(&self.body_scroll)
                             .flex()
-                            .flex_row()
-                            .flex_none()
-                            .items_start()
-                            .gap(px(16.))
-                            .child(self.render_profile_list(cx))
-                            .child(self.render_target_panel(cx)),
+                            .flex_col()
+                            .min_h_0()
+                            .gap(px(12.))
+                            .overflow_y_scroll()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .flex_none()
+                                    .items_start()
+                                    .gap(px(16.))
+                                    .child(self.render_profile_list(cx))
+                                    .child(self.render_target_panel(cx)),
+                            )
+                            // A local session is never saved, so there is
+                            // nothing for a per-session override to be attached
+                            // to — and nothing to forward a port over either.
+                            .children((!local).then(|| self.render_overrides(cx)))
+                            .children((!local).then(|| self.render_tunnels(cx))),
                     )
-                    // A local session is never saved, so there is nothing for a
-                    // per-session override to be attached to — and nothing to
-                    // forward a port over either.
-                    .children((!local).then(|| self.render_overrides(cx)))
-                    .children((!local).then(|| self.render_tunnels(cx))),
+                    .children(body_bar.render(&theme)),
             )
             .child(self.render_footer(cx));
 
@@ -2446,6 +2623,28 @@ impl Render for ConnectionDialog {
             .on_action(cx.listener(Self::focus_next))
             .on_action(cx.listener(Self::focus_prev))
             .on_key_down(cx.listener(Self::on_key_down))
+            // Both overlay bars are answered from here: gpui hands a drag move
+            // to every listener of that type wherever it sits, and this is the
+            // one element mounted for the whole of either drag — the profile
+            // column is rebuilt from scratch whenever the list changes under it,
+            // and the body scrolls away under its own bar.
+            .on_drag_move::<DraggedThumb>(cx.listener(
+                |dialog, event: &DragMoveEvent<DraggedThumb>, _window, cx| {
+                    dialog.drag_scrollbar(event, cx);
+                },
+            ))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|dialog, _: &MouseUpEvent, _window, cx| {
+                    dialog.release_scrollbars(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|dialog, _: &MouseUpEvent, _window, cx| {
+                    dialog.release_scrollbars(cx);
+                }),
+            )
             .child(modal(
                 "connection-modal",
                 title,

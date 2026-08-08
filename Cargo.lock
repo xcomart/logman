@@ -3880,7 +3880,7 @@ dependencies = [
 
 [[package]]
 name = "logman-app"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3897,10 +3897,12 @@ dependencies = [
  "parking_lot",
  "raw-window-handle",
  "ring",
+ "ropey",
  "russh",
  "rust-i18n",
  "serde",
  "serde_json",
+ "serde_norway",
  "sys-locale",
  "tempfile",
  "unicode-segmentation",
@@ -3913,7 +3915,7 @@ dependencies = [
 
 [[package]]
 name = "logman-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "directories",
@@ -3928,7 +3930,7 @@ dependencies = [
 
 [[package]]
 name = "logman-pty"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "alacritty_terminal",
  "futures",
@@ -3941,7 +3943,7 @@ dependencies = [
 
 [[package]]
 name = "logman-ssh"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3959,7 +3961,7 @@ dependencies = [
 
 [[package]]
 name = "logman-term"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -5664,6 +5666,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ropey"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93411e420bcd1a75ddd1dc3caf18c23155eda2c090631a85af21ba19e97093b5"
+dependencies = [
+ "smallvec",
+ "str_indices",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6337,6 +6349,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_norway"
+version = "0.9.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e408f29489b5fd500fab51ff1484fc859bb655f32c671f307dcd733b72e8168c"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml-norway",
+]
+
+[[package]]
 name = "serde_repr"
 version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6748,6 +6773,12 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "str_indices"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 
 [[package]]
 name = "strict-num"
@@ -7545,6 +7576,12 @@ dependencies = [
  "crypto-common 0.2.2",
  "ctutils",
 ]
+
+[[package]]
+name = "unsafe-libyaml-norway"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b39abd59bf32521c7f2301b52d05a6a2c975b6003521cbd0c6dc1582f0a22104"
 
 [[package]]
 name = "untrusted"

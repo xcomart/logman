@@ -73,7 +73,8 @@ type OpenChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 /// One row of a [`MenuButton`] or [`ContextMenu`] dropdown.
 ///
 /// A row is either a command — a label, an optional shortcut hint and a
-/// callback — or a horizontal rule built with [`MenuEntry::separator`].
+/// callback, run unless [`MenuEntry::enabled`] says otherwise — or a horizontal
+/// rule built with [`MenuEntry::separator`].
 pub struct MenuEntry {
     /// Text shown on the left of the row.
     label: SharedString,
@@ -83,16 +84,19 @@ pub struct MenuEntry {
     on_activate: Option<ActivateHandler>,
     /// Whether the row is a rule rather than a command.
     separator: bool,
+    /// Whether the row may be run at all; see [`MenuEntry::enabled`].
+    enabled: bool,
 }
 
 impl MenuEntry {
-    /// Creates a command row with no shortcut hint and no callback.
+    /// Creates an enabled command row with no shortcut hint and no callback.
     pub fn new(label: impl Into<SharedString>) -> Self {
         Self {
             label: label.into(),
             shortcut: None,
             on_activate: None,
             separator: false,
+            enabled: true,
         }
     }
 
@@ -103,6 +107,7 @@ impl MenuEntry {
             shortcut: None,
             on_activate: None,
             separator: true,
+            enabled: true,
         }
     }
 
@@ -120,6 +125,22 @@ impl MenuEntry {
     /// The menu closes itself afterwards, so the callback does not have to.
     pub fn on_activate(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_activate = Some(Rc::new(handler));
+        self
+    }
+
+    /// Shows the row without letting it be run.
+    ///
+    /// A disabled row is drawn muted, takes no hover and no pointer cursor, and
+    /// carries no click handler at all — so a click on it runs nothing *and*
+    /// leaves the menu open, since the panel occludes the backdrop a press
+    /// otherwise dismisses the menu from. That is the point of showing the row
+    /// rather than leaving it out: a command that is missing tells the reader
+    /// nothing, while one that is greyed out says the surface has it and this is
+    /// not the moment. Menus whose rows come and go — the file panel's, which is
+    /// built around what was clicked — are better off leaving them out; menus
+    /// that are the same list every time are better off greying them.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
         self
     }
 }
@@ -155,6 +176,7 @@ fn menu_backdrop(
 fn menu_panel(
     id: ElementId,
     entries: Vec<MenuEntry>,
+    width: Pixels,
     on_dismiss: Option<DismissHandler>,
     theme: &Theme,
 ) -> AnyElement {
@@ -172,6 +194,14 @@ fn menu_panel(
         }
 
         let on_dismiss = on_dismiss.clone();
+        let MenuEntry {
+            label,
+            shortcut,
+            on_activate,
+            enabled,
+            ..
+        } = entry;
+
         div()
             .id(ElementId::from(("menu-entry", index)))
             .flex()
@@ -184,25 +214,28 @@ fn menu_panel(
             .mx(px(4.))
             .rounded_sm()
             .text_size(px(13.))
-            .text_color(theme.text)
-            .cursor_pointer()
-            .hover(|style| style.bg(theme.surface_hover))
-            .on_click(move |_, window, cx| {
-                if let Some(activate) = entry.on_activate.clone() {
-                    activate(window, cx);
-                }
-                if let Some(dismiss) = on_dismiss.clone() {
-                    dismiss(window, cx);
-                }
+            .text_color(if enabled {
+                theme.text
+            } else {
+                theme.text_muted
             })
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .whitespace_nowrap()
-                    .child(entry.label.clone()),
-            )
-            .children(entry.shortcut.clone().map(|shortcut| {
+            // Everything that makes a row look and behave like a control hangs
+            // off this one condition, so a disabled row is inert by carrying no
+            // handler rather than by carrying one that thinks better of it.
+            .when(enabled, |this| {
+                this.cursor_pointer()
+                    .hover(|style| style.bg(theme.surface_hover))
+                    .on_click(move |_, window, cx| {
+                        if let Some(activate) = on_activate.clone() {
+                            activate(window, cx);
+                        }
+                        if let Some(dismiss) = on_dismiss.clone() {
+                            dismiss(window, cx);
+                        }
+                    })
+            })
+            .child(div().flex_1().min_w_0().whitespace_nowrap().child(label))
+            .children(shortcut.map(|shortcut| {
                 div()
                     .flex_none()
                     .text_size(px(11.))
@@ -218,7 +251,7 @@ fn menu_panel(
         .flex()
         .flex_col()
         .flex_none()
-        .w(px(PANEL_WIDTH))
+        .w(width)
         .py(px(4.))
         .bg(theme.background)
         .border_1()
@@ -248,6 +281,8 @@ fn menu_panel(
 pub struct ContextMenu {
     id: ElementId,
     position: Point<Pixels>,
+    anchor: Corner,
+    width: Pixels,
     entries: Vec<MenuEntry>,
     on_dismiss: Option<DismissHandler>,
 }
@@ -260,18 +295,45 @@ impl ContextMenu {
         Self {
             id: id.into(),
             position: point(px(0.), px(0.)),
+            anchor: Corner::TopLeft,
+            width: px(PANEL_WIDTH),
             entries: Vec::new(),
             on_dismiss: None,
         }
     }
 
-    /// Puts the top-left corner of the panel at `position`, in window
+    /// Puts the panel's [`ContextMenu::anchor`] corner at `position`, in window
     /// coordinates.
     ///
     /// A panel that would hang off an edge is pulled back inside the window
     /// instead.
     pub fn position(mut self, position: Point<Pixels>) -> Self {
         self.position = position;
+        self
+    }
+
+    /// Chooses which corner of the panel sits at the position, and so which way
+    /// the menu grows from it.
+    ///
+    /// [`Corner::TopLeft`] by default, which is what a right-click wants: the
+    /// list hangs down and to the right of the pointer, away from it. A trigger
+    /// along the bottom of the window — the status bar — wants
+    /// [`Corner::BottomLeft`] instead, so the list stands *on* the trigger and
+    /// opens upward into the window rather than being snapped back over the
+    /// thing it was opened from.
+    pub fn anchor(mut self, anchor: Corner) -> Self {
+        self.anchor = anchor;
+        self
+    }
+
+    /// Narrows or widens the panel.
+    ///
+    /// The default is the width of the application's own menus, which is set by
+    /// their longest row — a pane command naming what it acts on, plus a
+    /// shortcut hint. A menu of one-word rows, such as a list of file formats,
+    /// reads as a mis-sized dialog at that width and takes its own.
+    pub fn width(mut self, width: Pixels) -> Self {
+        self.width = width;
         self
     }
 
@@ -301,6 +363,7 @@ impl RenderOnce for ContextMenu {
         let panel = menu_panel(
             ElementId::from((self.id.clone(), "panel")),
             self.entries,
+            self.width,
             self.on_dismiss,
             &theme,
         );
@@ -320,7 +383,7 @@ impl RenderOnce for ContextMenu {
             .child(
                 deferred(
                     anchored()
-                        .anchor(Corner::TopLeft)
+                        .anchor(self.anchor)
                         .position(self.position)
                         .snap_to_window_with_margin(px(WINDOW_MARGIN))
                         .child(panel),
@@ -492,6 +555,7 @@ impl RenderOnce for MenuButton {
         let panel = menu_panel(
             ElementId::from((self.id.clone(), "panel")),
             self.entries,
+            px(PANEL_WIDTH),
             on_dismiss,
             &theme,
         );
@@ -533,5 +597,230 @@ impl RenderOnce for MenuButton {
             .items_center()
             .children(open.then_some(overlays))
             .child(trigger)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::ops::Deref;
+
+    use gpui::{
+        Context, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Render, TestAppContext,
+        VisualTestContext,
+    };
+
+    use super::*;
+
+    /// Where the harness anchors the menu: far enough from every edge that
+    /// nothing is snapped back inside, so the row arithmetic below holds.
+    const MENU_X: f32 = 100.;
+
+    /// Top of the panel, for the same reason.
+    const MENU_Y: f32 = 50.;
+
+    /// Height of one command row, as [`menu_panel`] lays it out.
+    const ROW_HEIGHT: f32 = 28.;
+
+    /// What the panel puts above its first row: its border and its padding.
+    const PANEL_TOP: f32 = 5.;
+
+    /// A column inside the panel, which is [`PANEL_WIDTH`] wide.
+    const INSIDE_THE_PANEL: f32 = MENU_X + 60.;
+
+    /// A point the panel does not cover, so a press there reaches the backdrop.
+    const OUTSIDE: f32 = 10.;
+
+    /// A view holding one open menu, as the surface that owns a right-click
+    /// would.
+    ///
+    /// The rows are kept as descriptions rather than as entries: a
+    /// [`MenuEntry`] owns callbacks and cannot be cloned, so the harness builds
+    /// them again on every draw, the way a real view rebuilds its menu from its
+    /// own state.
+    struct Harness {
+        rows: Vec<(SharedString, bool)>,
+        position: Point<Pixels>,
+        anchor: Corner,
+        activated: Rc<RefCell<Vec<usize>>>,
+        dismissed: Rc<Cell<usize>>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let dismissed = self.dismissed.clone();
+            let entries = self
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(index, (label, enabled))| {
+                    let activated = self.activated.clone();
+                    MenuEntry::new(label.clone())
+                        .enabled(*enabled)
+                        .on_activate(move |_, _| activated.borrow_mut().push(index))
+                })
+                .collect();
+
+            div().size_full().child(
+                ContextMenu::new("menu")
+                    .position(self.position)
+                    .anchor(self.anchor)
+                    .entries(entries)
+                    .on_dismiss(move |_, _| dismissed.set(dismissed.get() + 1)),
+            )
+        }
+    }
+
+    /// What a test reads back out of a running harness.
+    struct Handles {
+        activated: Rc<RefCell<Vec<usize>>>,
+        dismissed: Rc<Cell<usize>>,
+    }
+
+    impl Handles {
+        /// The rows run since the last look.
+        fn drain(&self) -> Vec<usize> {
+            self.activated.borrow_mut().drain(..).collect()
+        }
+
+        /// How many times the menu has asked to close.
+        fn dismissals(&self) -> usize {
+            self.dismissed.get()
+        }
+    }
+
+    /// Opens a window on a menu of `rows`, each a label and whether it is
+    /// enabled, hanging down and to the right of the anchor.
+    fn open(
+        rows: Vec<(SharedString, bool)>,
+        cx: &mut TestAppContext,
+    ) -> (Handles, VisualTestContext) {
+        open_anchored(rows, point(px(MENU_X), px(MENU_Y)), Corner::TopLeft, cx)
+    }
+
+    /// The same, with the panel's `anchor` corner at `position`.
+    fn open_anchored(
+        rows: Vec<(SharedString, bool)>,
+        position: Point<Pixels>,
+        anchor: Corner,
+        cx: &mut TestAppContext,
+    ) -> (Handles, VisualTestContext) {
+        cx.update(super::super::init);
+
+        let handles = Handles {
+            activated: Rc::new(RefCell::new(Vec::new())),
+            dismissed: Rc::new(Cell::new(0)),
+        };
+        let window = cx.add_window({
+            let activated = handles.activated.clone();
+            let dismissed = handles.dismissed.clone();
+            move |_, _| Harness {
+                rows,
+                position,
+                anchor,
+                activated,
+                dismissed,
+            }
+        });
+        let cx = VisualTestContext::from_window(*window.deref(), cx);
+        cx.run_until_parked();
+
+        (handles, cx)
+    }
+
+    /// The middle of row `index`, on its label.
+    fn row_middle(index: usize) -> Point<Pixels> {
+        point(
+            px(INSIDE_THE_PANEL),
+            px(MENU_Y + PANEL_TOP + ROW_HEIGHT * index as f32 + ROW_HEIGHT / 2.),
+        )
+    }
+
+    /// Presses and releases the left button over `position`.
+    fn click(cx: &mut VisualTestContext, position: Point<Pixels>) {
+        cx.simulate_event(MouseDownEvent {
+            position,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    /// The two halves of what a greyed row means: the callback never runs, and
+    /// the menu is still there afterwards — a row that did nothing *and* closed
+    /// the menu would read as a command that silently failed.
+    #[gpui::test]
+    fn a_disabled_row_runs_nothing_and_leaves_the_menu_open(cx: &mut TestAppContext) {
+        let (menu, mut cx) = open(
+            vec![
+                (SharedString::new_static("Copy"), true),
+                (SharedString::new_static("Cut"), false),
+            ],
+            cx,
+        );
+
+        click(&mut cx, row_middle(1));
+        assert_eq!(menu.drain(), Vec::<usize>::new());
+        assert_eq!(menu.dismissals(), 0, "the menu stays where it is");
+
+        // The row above it, which is the same in every way but enabled, still
+        // runs and still closes the menu.
+        click(&mut cx, row_middle(0));
+        assert_eq!(menu.drain(), vec![0]);
+        assert_eq!(menu.dismissals(), 1);
+
+        // And the backdrop under the panel still dismisses, as it did before any
+        // of this: only the panel swallows presses.
+        click(&mut cx, point(px(OUTSIDE), px(OUTSIDE)));
+        assert_eq!(menu.drain(), Vec::<usize>::new());
+        assert_eq!(menu.dismissals(), 2);
+    }
+
+    /// What the status bar's file-type picker needs: a menu that *stands on*
+    /// its anchor instead of hanging from it, because the anchor is in the last
+    /// two dozen pixels of the window and a list hanging down from there would
+    /// be snapped back over the thing it was opened from.
+    #[gpui::test]
+    fn a_bottom_anchored_menu_opens_upward_from_its_position(cx: &mut TestAppContext) {
+        // Far enough down the window that a two-row panel standing on it still
+        // clears the top edge, so nothing is snapped and the arithmetic holds.
+        let foot = px(300.);
+        let (menu, mut cx) = open_anchored(
+            vec![
+                (SharedString::new_static("JSON"), true),
+                (SharedString::new_static("YAML"), true),
+            ],
+            point(px(MENU_X), foot),
+            Corner::BottomLeft,
+            cx,
+        );
+
+        // The last row sits directly above the anchor, under the panel's own
+        // padding and border; the first is a row further up again.
+        let last = px(f32::from(foot) - PANEL_TOP - ROW_HEIGHT / 2.);
+        let first = px(f32::from(last) - ROW_HEIGHT);
+        click(&mut cx, point(px(INSIDE_THE_PANEL), last));
+        assert_eq!(menu.drain(), vec![1]);
+
+        click(&mut cx, point(px(INSIDE_THE_PANEL), first));
+        assert_eq!(menu.drain(), vec![0]);
+
+        // And nothing of the panel hangs below the anchor: a press just under
+        // it reaches the backdrop, which is what the bar it opened from would
+        // otherwise be covered by.
+        click(
+            &mut cx,
+            point(px(INSIDE_THE_PANEL), px(f32::from(foot) + 4.)),
+        );
+        assert_eq!(menu.drain(), Vec::<usize>::new());
+        assert!(menu.dismissals() > 0);
     }
 }

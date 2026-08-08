@@ -30,6 +30,12 @@ A multi-platform GUI SSH terminal written in Rust, built on
   included, with a progress bar while they move — and a draggable edge. Over an
   SSH session it browses the server through SFTP; over a local one it browses
   this computer.
+- **An editor built in**: right-click a file in the panel and pick **Edit**, and
+  it opens in a tab of its own — line numbers, undo, find and replace, a comment
+  toggle, and syntax highlighting for sixteen formats out of the box, with more
+  describable in a YAML file of your own. It is drawn in the session's own
+  color scheme and terminal font, and <kbd>Ctrl</kbd>+<kbd>S</kbd> writes it
+  back over the same connection it came from.
 - **A local terminal too** (Linux and macOS): the connection dialog offers your
   own login shell above the saved profiles, and it opens in a tab like any other
   session — no host, no credentials, and splitting one starts the new shell in
@@ -222,6 +228,78 @@ Without it the panel simply starts in the login directory and stays wherever
 you navigate it. Browsing by hand always wins until the shell announces a new
 directory, at which point the panel follows again.
 
+### Editing a file
+
+Right-click a file in the panel and choose **Edit**. It opens in a tab of its
+own, labelled `hosts - web01` — the file first and the connection after it,
+because a tab strip is read from the left and what tells two of them apart is
+usually the file. The panel on the left goes on browsing the filesystem the file
+came from, and asking to edit a file that is already open moves to its tab
+rather than opening a second buffer over the same bytes.
+
+**Text only, and not much of it.** A file over 10 MB is refused off the listing,
+before anything is transferred; one that is not valid UTF-8 is refused once its
+bytes arrive. Both refusals land on the panel's own status line. There is no
+encoding picker and no byte view, so a file the editor cannot decode is one it
+would silently corrupt on save. What it does keep is the byte order mark and the
+line ending style: a CRLF file with a BOM, opened and saved untouched, is
+written back byte for byte.
+
+<kbd>Ctrl</kbd>+<kbd>S</kbd> (<kbd>Cmd</kbd>+<kbd>S</kbd> on macOS) or the
+**Save** button in the pane's header writes the file back the way it was read. A
+dot beside the name marks unsaved changes, and the strip under the editor
+reports the save or the reason it failed. Closing a file that has unsaved
+changes asks first, with three answers — **Save**, **Discard changes** and
+**Cancel** — and the save takes the pane down only once the write has actually
+landed, so a failure leaves the pane standing with the reason under it. A file
+whose session has since ended stays open too; it is the save that fails.
+
+The buffer has a line number gutter, undo and redo, find and replace
+(<kbd>Ctrl</kbd>+<kbd>F</kbd> and <kbd>Ctrl</kbd>+<kbd>H</kbd>), a comment toggle
+(<kbd>Ctrl</kbd>+<kbd>/</kbd>), indent and outdent on <kbd>Tab</kbd> and
+<kbd>Shift</kbd>+<kbd>Tab</kbd>, and a right-click menu holding all of it, each
+row greyed when the buffer cannot answer it. Composing Korean or Japanese works
+the way it does in a session. The text is drawn in the session's terminal color
+scheme, in the terminal font family and at the terminal font size, so a file
+opened beside the shell it came from matches it — and changing any of the three
+repaints an open file with it.
+
+**Six formats have a scanner of their own**: shell, YAML, JSON, TOML,
+`conf`/INI and Dockerfile, picked from the whole file name, from the extension,
+or from a `#!` line when there is neither. Ten more ship as definition files —
+C, C++, C#, Go, Java, JavaScript, Python, Rust, SQL and TypeScript. The right
+end of the status bar names what the open file is being colored as; pressing it
+opens the list of every format the editor knows, upwards, and the choice sticks
+for as long as the file is open. Beside it stands the caret's place, written
+`12/200 : 5` — the line, the lines there are, and the column.
+
+**A language of your own** is one `*.yml` file per language in the `syntaxes`
+directory beside `settings.json`, the file's stem being the language's id:
+
+```yaml
+name: Nginx
+files:
+  extensions: [nginx]
+  names: [nginx.conf]
+comment: "#"
+strings:
+  - quote: '"'
+keywords:
+  keyword: [server, location, upstream, listen, proxy_pass]
+variables: ["$"]
+```
+
+Every key but `name` is optional. The whole schema — block comments, multi-line
+strings, keyword groups, shebangs, section and key coloring, and what a
+line-at-a-time scanner cannot express — is documented at the head of
+`crates/logman-app/src/editor/syntax/custom.rs`. Three rules are worth knowing
+without reading it. **The directory is read once, at start-up**, so a new or
+changed definition takes effect on the next launch. **A definition can add a
+language but never take one of the six built-in ones over**, so a `yaml.yml`
+does not change what a `.yaml` file is. And a file whose stem matches one of the
+ten shipped ids — `python.yml` — replaces that definition outright, which is how
+one of them gets changed.
+
 ### Shortcuts
 
 | Key | Action |
@@ -251,6 +329,29 @@ it costs the remote shell nothing.
 
 Select text by dragging across the grid; scroll back with the mouse wheel.
 
+In an open file, on top of the arrow keys, <kbd>Home</kbd>, <kbd>End</kbd> and
+the page keys:
+
+| Key | Action |
+| --- | --- |
+| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the file |
+| <kbd>Ctrl</kbd>+<kbd>F</kbd> / <kbd>Ctrl</kbd>+<kbd>H</kbd> | Open the find bar, with or without the replace row |
+| <kbd>F3</kbd> / <kbd>Shift</kbd>+<kbd>F3</kbd> | Next / previous match |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd> | Replace every match |
+| <kbd>Esc</kbd> | Close the find bar |
+| <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> | Undo / redo — <kbd>Ctrl</kbd>+<kbd>Y</kbd> redoes as well |
+| <kbd>Ctrl</kbd>+<kbd>/</kbd> | Comment or uncomment the selected lines |
+| <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> | Indent / outdent |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd> | Copy, cut, paste — unshifted, since there is no remote shell here to keep them for |
+| <kbd>Ctrl</kbd>+<kbd>A</kbd> | Select the whole file |
+| <kbd>Ctrl</kbd>+<kbd>Home</kbd> / <kbd>Ctrl</kbd>+<kbd>End</kbd> | Start / end of the file |
+| <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd> | Previous / next word, and with <kbd>Shift</kbd> to select |
+
+On macOS these take <kbd>Cmd</kbd> as well, with one exception: the word-wise
+moves and deletions — <kbd>Ctrl</kbd>+<kbd>←</kbd>,
+<kbd>Ctrl</kbd>+<kbd>Backspace</kbd> and their siblings — take <kbd>Alt</kbd>
+there, the way they do in every other macOS text field.
+
 ### Where things are stored
 
 | | |
@@ -265,6 +366,11 @@ passphrases are never written to either file** — they go to the Windows
 Credential Manager, the macOS Keychain, or the freedesktop Secret Service, and
 only when "Remember … in the system keychain" is ticked. Without a usable
 keychain the application still runs; it just asks for the secret every time.
+
+Three directories sit beside them, none of which exists until there is something
+in it: `themes` and `schemes` hold palettes of your own, and `syntaxes` the
+editor's language definitions — see [Editing a file](#editing-a-file). Nothing
+is ever written to that last one; it is read at start-up and left alone.
 
 ### Settings
 
@@ -373,6 +479,11 @@ The heavy lifting is done by these projects:
 Supporting crates:
 [serde](https://github.com/serde-rs/serde) /
 [serde_json](https://github.com/serde-rs/json) (profiles and settings),
+[serde_norway](https://github.com/cafkafk/serde-yaml) (the editor's
+user-supplied syntax definitions),
+[ropey](https://github.com/cessen/ropey) (the editor's document),
+[tempfile](https://github.com/Stebalien/tempfile) (staging a file being opened
+or saved),
 [uuid](https://github.com/uuid-rs/uuid) (profile identity),
 [anyhow](https://github.com/dtolnay/anyhow) /
 [thiserror](https://github.com/dtolnay/thiserror) (errors),
@@ -390,7 +501,6 @@ Windows only: [windows-rs](https://github.com/microsoft/windows-rs) (DWM
 caption colors), [raw-window-handle](https://github.com/rust-windowing/raw-window-handle)
 (HWND access), [winresource](https://github.com/BenjaminRi/winresource)
 (icon embedding). Tests additionally use
-[tempfile](https://github.com/Stebalien/tempfile) and
 [rand](https://github.com/rust-random/rand).
 
 ### Testing
@@ -429,6 +539,27 @@ and no external server is needed.
   Transfers and deletes run one at a time per session and cannot be cancelled
   once started. The panel's edge can be dragged, but the width is session state
   and reverts to the default on the next start.
+- **The editor opens UTF-8 text and nothing else**, up to 10 MB. There is no
+  encoding picker, no byte view and no read-only fallback for a file it cannot
+  decode.
+- **A save is not atomic.** The file is overwritten in place, because the
+  write-a-sibling-and-rename that would make it atomic depends on a rename over
+  an existing path, which SFTP version 3 leaves unspecified — OpenSSH refuses it
+  where other servers replace silently. A save that fails part way says so and
+  leaves the file as the write left it.
+- **Nothing watches an open file.** A file changed on the server underneath is
+  not noticed, and the next save writes over it.
+- **An open file is a tab, not a split.** It cannot be split — every split
+  logman offers opens a second connection, and a file is not one — though its
+  tab can still be pulled in beside another. Closing several tabs at once
+  ("Close other tabs", "Close tabs to the right") skips the ones holding unsaved
+  changes rather than asking about them.
+- **Find is plain substring matching**, not a regular expression, and replace
+  acts on every match at once: there is no replace-this-one-and-move-on.
+- **No soft wrapping, no code folding and no multiple cursors** in the editor,
+  each left out deliberately rather than pending.
+- **Syntax definitions are read once, at start-up**, and can only add a
+  language — the six built-in ones cannot be taken over by a file of your own.
 - **Panes cannot be rearranged by dragging.** A divider drag changes the
   proportions of an existing split and nothing else — there is no way to move a
   pane to another position, and a split layout is not remembered across

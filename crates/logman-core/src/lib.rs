@@ -35,7 +35,8 @@ pub mod settings;
 
 pub use known_hosts::{HostKeyStatus, KnownHosts};
 pub use paths::{
-    config_dir, config_file, known_hosts_file, schemes_dir, settings_file, ui_themes_dir,
+    config_dir, config_file, known_hosts_file, schemes_dir, settings_file, syntaxes_dir,
+    ui_themes_dir,
 };
 pub use profile::{AuthMethod, ProfileStore, SessionOverrides, SessionProfile, TunnelRule};
 pub use secrets::{SecretStore, init as init_secrets};

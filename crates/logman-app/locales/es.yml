@@ -55,6 +55,7 @@ files:
   select_upload_folder: Subir carpeta
   select_download_folder: Guardar
   menu_open: Abrir
+  menu_edit: Editar
   menu_download: Descargar…
   menu_rename: Cambiar nombre…
   menu_delete: Eliminar…
@@ -95,6 +96,8 @@ files:
   create: Crear
   created: "Se creó %{name}."
   invalid_name: Ese nombre no se puede usar.
+  edit_too_large: "Solo se pueden editar los archivos de menos de %{limit} MB."
+  edit_not_text: Ese archivo no es texto UTF-8, así que no se puede editar aquí.
   failed: "Archivos remotos: %{error}"
   local:
     title: Archivos locales
@@ -304,6 +307,28 @@ input:
   menu_copy: Copiar
   menu_paste: Pegar
   menu_select_all: Seleccionar todo
+
+editor:
+  find: Buscar
+  replace: Reemplazar
+  menu_cut: Cortar
+  menu_copy: Copiar
+  menu_paste: Pegar
+  menu_select_all: Seleccionar todo
+  menu_undo: Deshacer
+  menu_redo: Rehacer
+  menu_toggle_comment: Comentar o descomentar
+  menu_find: Buscar…
+  menu_replace: Reemplazar…
+  saving: Guardando…
+  saved: "Se guardó %{name}."
+  save_failed: "No se pudo guardar: %{error}"
+  close_title: Cambios sin guardar
+  close_unsaved: "%{name} tiene cambios sin guardar. ¿Cerrarlo y perderlos?"
+  close_discard: Descartar los cambios
+  close_cancel: Cancelar
+  language_plain: Texto sin formato
+  language_tip: Tipo de archivo
 
 about:
   title: Acerca de logman

@@ -55,6 +55,7 @@ files:
   select_upload_folder: Загрузить папку
   select_download_folder: Сохранить
   menu_open: Открыть
+  menu_edit: Изменить
   menu_download: Скачать…
   menu_rename: Переименовать…
   menu_delete: Удалить…
@@ -95,6 +96,8 @@ files:
   create: Создать
   created: "Папка %{name} создана."
   invalid_name: Это имя нельзя использовать.
+  edit_too_large: "Редактировать можно только файлы размером менее %{limit} МБ."
+  edit_not_text: Этот файл не является текстом UTF-8, поэтому его нельзя здесь редактировать.
   failed: "Удалённые файлы: %{error}"
   local:
     title: Локальные файлы
@@ -304,6 +307,28 @@ input:
   menu_copy: Копировать
   menu_paste: Вставить
   menu_select_all: Выделить всё
+
+editor:
+  find: Найти
+  replace: Заменить
+  menu_cut: Вырезать
+  menu_copy: Копировать
+  menu_paste: Вставить
+  menu_select_all: Выделить всё
+  menu_undo: Отменить
+  menu_redo: Повторить
+  menu_toggle_comment: Переключить комментарий
+  menu_find: Найти…
+  menu_replace: Заменить…
+  saving: Сохранение…
+  saved: "Файл %{name} сохранён."
+  save_failed: "Не удалось сохранить: %{error}"
+  close_title: Несохранённые изменения
+  close_unsaved: "В %{name} есть несохранённые изменения. Закрыть и потерять их?"
+  close_discard: Отменить изменения
+  close_cancel: Отмена
+  language_plain: Обычный текст
+  language_tip: Тип файла
 
 about:
   title: О программе logman

@@ -55,6 +55,7 @@ files:
   select_upload_folder: 上传文件夹
   select_download_folder: 保存
   menu_open: 打开
+  menu_edit: 编辑
   menu_download: 下载…
   menu_rename: 重命名…
   menu_delete: 删除…
@@ -95,6 +96,8 @@ files:
   create: 创建
   created: "已创建 %{name}。"
   invalid_name: 无法使用该名称。
+  edit_too_large: "只能编辑小于 %{limit} MB 的文件。"
+  edit_not_text: 该文件不是 UTF-8 文本，无法在此编辑。
   failed: "远程文件：%{error}"
   local:
     title: 本地文件
@@ -304,6 +307,28 @@ input:
   menu_copy: 复制
   menu_paste: 粘贴
   menu_select_all: 全选
+
+editor:
+  find: 查找
+  replace: 替换
+  menu_cut: 剪切
+  menu_copy: 复制
+  menu_paste: 粘贴
+  menu_select_all: 全选
+  menu_undo: 撤销
+  menu_redo: 重做
+  menu_toggle_comment: 切换注释
+  menu_find: 查找…
+  menu_replace: 替换…
+  saving: 正在保存…
+  saved: "已保存 %{name}。"
+  save_failed: "无法保存：%{error}"
+  close_title: 未保存的更改
+  close_unsaved: "%{name} 有未保存的更改。关闭并丢弃吗？"
+  close_discard: 丢弃更改
+  close_cancel: 取消
+  language_plain: 纯文本
+  language_tip: 文件类型
 
 about:
   title: 关于 logman

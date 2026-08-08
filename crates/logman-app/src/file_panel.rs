@@ -49,13 +49,14 @@ use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{
     AnyElement, App, AsyncApp, ClickEvent, ClipboardItem, Context, Div, DragMoveEvent, ElementId,
-    Entity, EntityId, ExternalPaths, FocusHandle, Focusable, Modifiers, MouseButton,
+    Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, Focusable, Modifiers, MouseButton,
     MouseDownEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollHandle, SharedString,
     Subscription, WeakEntity, Window, div, prelude::*, px, relative,
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::app_settings;
+use crate::editor_pane::{LoadError, MAX_EDIT_BYTES, TextFile, read_file};
 use crate::files::{FileEntry, FileError, FileSource};
 use crate::i18n::ts;
 use crate::icons;
@@ -244,6 +245,24 @@ impl Notice {
             key(local, "files.failed", "files.local.failed"),
             error = error.to_string()
         ))
+    }
+}
+
+/// The status line for a file that could not be opened for editing.
+///
+/// The two refusals the editor itself raises are worded here rather than in
+/// [`crate::editor_pane`], because they are the panel's to explain: they are
+/// answers to a menu row the panel offered. A transport failure is folded
+/// through the same sentence every other panel command uses, so "the server
+/// said no" reads the same whether it was a listing or a file that was refused.
+fn edit_notice(error: &LoadError, local: bool) -> Notice {
+    match error {
+        LoadError::TooLarge => Notice::Error(ts!(
+            "files.edit_too_large",
+            limit = MAX_EDIT_BYTES / 1024 / 1024
+        )),
+        LoadError::NotUtf8 => Notice::Error(ts!("files.edit_not_text")),
+        LoadError::Transport(error) => Notice::from_error(error, local),
     }
 }
 
@@ -631,6 +650,39 @@ impl SessionState {
         self.anchor = None;
         self.prompt = None;
     }
+}
+
+/// What the panel asks the workspace for.
+///
+/// One variant, and it is the one thing the panel cannot do for itself: a pane
+/// belongs to a tab, and the panel does not own the tabs. Everything else the
+/// menu offers happens inside the panel.
+pub enum FilePanelEvent {
+    /// A file the user asked to edit, already fetched and decoded.
+    ///
+    /// The reading and every refusal that comes with it — too large, not text,
+    /// the transfer failed — happen here rather than in the pane, because this
+    /// is where the status line is that explains a refusal. What the workspace
+    /// receives is therefore always a file that can be shown.
+    OpenEditor(Box<OpenEditor>),
+}
+
+/// A file the panel has read and wants a pane for.
+///
+/// Boxed into [`FilePanelEvent`] because it carries the whole file: a variant as
+/// large as its payload would make every other event as expensive to move.
+pub struct OpenEditor {
+    /// The session the file was read out of, which is what decides the colours
+    /// the pane draws it in.
+    pub session: Entity<Session>,
+    /// The filesystem it lives on, kept so the pane can write it back.
+    pub source: Arc<dyn FileSource>,
+    /// The directory holding it, in the source's own spelling.
+    pub dir: String,
+    /// Its name within [`OpenEditor::dir`].
+    pub name: SharedString,
+    /// Its contents, and what has to be restored to write them back.
+    pub file: TextFile,
 }
 
 /// The remote file panel.
@@ -1537,6 +1589,58 @@ impl FilePanel {
             return;
         }
         self.go(session, source, Target::Exact(join(&path, name)), cx);
+    }
+
+    /// Opens the selected file in an editor pane, if it can be edited at all.
+    ///
+    /// The whole file is fetched here rather than in the pane, so that every
+    /// refusal lands on the status line the user is already looking at instead
+    /// of inside a pane that would have to be opened to say it could not be.
+    /// The size is checked off the listing, before anything is transferred; the
+    /// encoding cannot be, since only the bytes can answer it.
+    fn edit(&mut self, cx: &mut Context<Self>) {
+        let Some((id, source, directory)) = self.acting_on(cx) else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        // Read out of the borrow before anything below wants `self` mutably.
+        let Some((name, size)) = self
+            .states
+            .get(&id)
+            .and_then(SessionState::only_selected)
+            .filter(|entry| !entry.is_dir)
+            .map(|entry| (SharedString::from(entry.name.clone()), entry.size))
+        else {
+            return;
+        };
+
+        let is_local = self.source_is_local(id);
+        if size > MAX_EDIT_BYTES {
+            self.show_notice(id, edit_notice(&LoadError::TooLarge, is_local), cx);
+            return;
+        }
+
+        cx.spawn(async move |panel, cx| {
+            let loaded = match read_file(&source, &directory, &name).await {
+                Ok(bytes) => TextFile::decode(&bytes),
+                Err(error) => Err(LoadError::Transport(error)),
+            };
+            panel
+                .update(cx, |panel, cx| match loaded {
+                    Ok(file) => cx.emit(FilePanelEvent::OpenEditor(Box::new(OpenEditor {
+                        session,
+                        source,
+                        dir: directory,
+                        name,
+                        file,
+                    }))),
+                    Err(error) => panel.show_notice(id, edit_notice(&error, is_local), cx),
+                })
+                .ok();
+        })
+        .detach();
     }
 
     /// Moves to the parent of the current directory.
@@ -2821,6 +2925,19 @@ impl FilePanel {
                     }
                 }));
             }
+            // The file counterpart of `menu_open`, and deliberately in the same
+            // slot: over a directory the obvious thing to do is go into it,
+            // over a file it is to look inside it. Only over one file, because
+            // the row opens one pane, and never over a directory, which has no
+            // contents a text buffer could hold.
+            if only.is_some_and(|entry| !entry.is_dir) {
+                primary.push(MenuEntry::new(ts!("files.menu_edit")).on_activate({
+                    let this = this.clone();
+                    move |_window, cx| {
+                        this.update(cx, |panel, cx| panel.edit(cx));
+                    }
+                }));
+            }
             let copy_out = key(is_local, "files.menu_download", "files.local.menu_copy_out");
             primary.push(MenuEntry::new(ts!(copy_out)).on_activate({
                 let this = this.clone();
@@ -3117,6 +3234,8 @@ impl FilePanel {
         )
     }
 }
+
+impl EventEmitter<FilePanelEvent> for FilePanel {}
 
 impl Focusable for FilePanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -4366,6 +4485,36 @@ mod tests {
             labels(&only),
             ["/", "a-directory-with-a-very-long-name-indeed"]
         );
+    }
+
+    #[test]
+    fn every_refusal_to_edit_reaches_the_status_line_as_a_failure() {
+        // All three are refusals, so none of them may expire on its own the way
+        // an `Info` does: the file the user asked for is not open, and only a
+        // later success can honestly take that sentence down.
+        assert!(matches!(
+            edit_notice(&LoadError::TooLarge, false),
+            Notice::Error(_)
+        ));
+        assert!(matches!(
+            edit_notice(&LoadError::NotUtf8, false),
+            Notice::Error(_)
+        ));
+        // A transport failure is folded through the same sentence every other
+        // panel command uses, so the wording of the failure is preserved whole.
+        let transport = LoadError::Transport(FileError::Backend("denied".to_owned()));
+        let Notice::Error(said) = edit_notice(&transport, false) else {
+            panic!("a failed transfer must not be reported as an aside");
+        };
+        assert!(said.contains("denied"), "the reason was dropped: {said}");
+    }
+
+    #[test]
+    fn the_size_cap_is_stated_in_whole_megabytes() {
+        // The sentence spells the unit and interpolates a number, so the number
+        // has to be one: `10485760 MB` would be a nonsense limit.
+        assert_eq!(MAX_EDIT_BYTES % (1024 * 1024), 0);
+        assert_eq!(MAX_EDIT_BYTES / 1024 / 1024, 10);
     }
 
     #[test]
