@@ -93,6 +93,26 @@ jobs:
           cp assets/icon.icns "$app/Contents/Resources/rulogman.icns"
           sed "s/__VERSION__/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
           plutil -lint "$app/Contents/Info.plist"
+          # The Services menu titles in the user's language. AppKit reads a
+          # service's title out of `ServicesMenu.strings` in whichever `.lproj`
+          # matches, keyed by the English string the Info.plist declared, and
+          # falls back to that string when there is none — so a bundle without
+          # these still works, in English. There is one per language rulogman
+          # itself is translated into, `zh-CN` spelt `zh-Hans` because that is
+          # the name AppKit knows the localisation by.
+          #
+          # Copying them has a second effect worth knowing about, and it is a
+          # welcome one: an `.lproj` directory is what tells AppKit the bundle
+          # is localised for that language at all, so from here the standard
+          # menu strings the framework supplies — the *Services* submenu's own
+          # title, *Hide*, *Quit*, the window buttons' tooltips — come out in
+          # the same language as the rest of the application instead of in
+          # English. Nothing else in the bundle is localised through these
+          # directories: rulogman's own strings are compiled into the binary.
+          cp -R packaging/macos/*.lproj "$app/Contents/Resources/"
+          for strings in "$app"/Contents/Resources/*.lproj/ServicesMenu.strings; do
+            plutil -lint "$strings"
+          done
           # --deep is deprecated for signing and pointless here (the bundle has
           # no nested code), but it is still the documented way to verify one.
           codesign --force --sign - "$app"

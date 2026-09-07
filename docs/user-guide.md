@@ -87,6 +87,24 @@ default for a type; `open -a rulogman /var/log` does the same from a shell, and
 opening a second folder that way adds a tab to the window already up rather than
 starting rulogman twice. On Windows, pass the path to `rulogman.exe`.
 
+macOS has a second, shorter way to the same place. Right-click a folder in the
+Finder and rulogman offers two entries under **Services** — the submenu near the
+bottom of the context menu, which the Finder skips and lists the entries
+directly in when there are only a few:
+
+- **New rulogman Window Here** opens a window of its own with a shell standing
+  in that folder. If rulogman was not running, the window it starts with is the
+  one you get, rather than an empty one beside it.
+- **New rulogman Tab Here** adds the shell as a tab of the window already in
+  front, which is what *Open with* does.
+
+Both are offered for folders only, and both work from any application that puts
+a folder on the pasteboard, not only the Finder. If neither appears, macOS has
+them switched off: **System Settings → Keyboard → Keyboard Shortcuts →
+Services**, under **Files and Folders**, has a checkbox for each. A newly
+installed rulogman is listed there once Launch Services has registered the
+bundle, which its first launch takes care of.
+
 On Linux, rulogman can also be set as the desktop's default terminal — on KDE,
 **System Settings → Default Applications → Terminal emulator**. Chosen that
 way, a file manager's *Open Terminal Here* starts rulogman with the folder as

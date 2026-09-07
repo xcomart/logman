@@ -30,6 +30,15 @@
 //! entries, which is why [`split_launch_args`] takes *everything* after the flag
 //! as the command rather than only the word following it.
 //!
+//! macOS has a fourth door, and it is the one thing here that arrives with a
+//! request attached rather than only a place. A bundle may declare *services* —
+//! the entries in the Finder's right-click *Services* submenu — and rulogman
+//! declares two: open a shell in this folder in a new window, or in a new tab
+//! of the window already in front. The folders arrive as `file://` URLs like
+//! every other selection and go through [`start_dirs`] unchanged; which of the
+//! two entries was chosen arrives as the entry's own `NSUserData` string, and
+//! [`service_target`] is where that string is read.
+//!
 //! One thing on the command line is not a path at all: `--dashboard <name>`
 //! asks for a saved dashboard to be opened as the window comes up, the same
 //! arrangement the welcome screen lists. It is read off the argv by
@@ -85,6 +94,22 @@ const DASHBOARD_HOST: &str = "dashboard";
 /// that turns one down says the same thing.
 const URL_FORM: &str =
     "a rulogman URL is rulogman://dashboard/<name>, with the name percent-encoded";
+
+/// The `NSUserData` of the macOS service that asks for a window of its own.
+///
+/// Half of a contract written down in two places: this constant and the
+/// `NSUserData` of the matching entry in `packaging/macos/Info.plist`. macOS
+/// hands a services provider nothing but this string to tell one of an
+/// application's entries from another — the menu title the user actually read
+/// is localised and never reaches the application — so the two spellings have
+/// to be kept in step by hand, and a change to either without the other shows
+/// up as the warning [`service_target`] logs.
+const SERVICE_WINDOW: &str = "window";
+
+/// The `NSUserData` of the macOS service that asks for a tab in the window
+/// already in front. The other half of the same contract; see
+/// [`SERVICE_WINDOW`].
+const SERVICE_TAB: &str = "tab";
 
 /// What a launch asked for, once the three kinds of request in an argv have
 /// been told apart.
@@ -258,6 +283,49 @@ fn exec_command(argv: Vec<OsString>) -> Option<Vec<String>> {
 #[cfg(unix)]
 pub fn command_start_dir() -> Option<PathBuf> {
     std::env::current_dir().ok()
+}
+
+/// Where a macOS service asked for the folders it was invoked on to be opened.
+///
+/// The one thing a service says that a path never does. A Finder selection
+/// handed to *New rulogman Window Here* and the same selection handed to *New
+/// rulogman Tab Here* are the same folders and the same request in every
+/// respect but this, so the difference is carried beside them rather than
+/// folded into them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceTarget {
+    /// A window of its own, with a tab per folder in it.
+    Window,
+    /// A tab per folder in the window that is already in front.
+    Tab,
+}
+
+/// What the `NSUserData` of the service the user chose asks for, or `None` with
+/// the reason logged.
+///
+/// The vocabulary is [`SERVICE_WINDOW`] and [`SERVICE_TAB`], and it is the
+/// application's own: gpui copies the string out of the bundle description
+/// unexamined, so nothing but this function has an opinion about what it may
+/// say. Matched without regard to case because the string is a plist value
+/// somebody types by hand, and there is no reading of `Window` that is not
+/// `window`.
+///
+/// `None` is a bundle that has drifted from this file — an entry whose
+/// `NSUserData` was renamed, or a new one added without a case here — and never
+/// something a user can produce, which is why it is logged with the whole of
+/// what is accepted rather than shown.
+pub fn service_target(user_data: &str) -> Option<ServiceTarget> {
+    let target = user_data.trim();
+    if target.eq_ignore_ascii_case(SERVICE_WINDOW) {
+        Some(ServiceTarget::Window)
+    } else if target.eq_ignore_ascii_case(SERVICE_TAB) {
+        Some(ServiceTarget::Tab)
+    } else {
+        log::warn!(
+            "a service asked for {user_data:?}, which is neither {SERVICE_WINDOW:?} nor {SERVICE_TAB:?}"
+        );
+        None
+    }
 }
 
 /// Files one `--dashboard` value under the names to open, or drops it with the
@@ -1038,6 +1106,29 @@ mod tests {
 
         assert_eq!(rest, ["file:///var/log", "/etc"]);
         assert_eq!(names, ["Morning", "Night"]);
+    }
+
+    #[test]
+    fn a_service_names_the_window_or_the_tab_it_wants() {
+        assert_eq!(service_target("window"), Some(ServiceTarget::Window));
+        assert_eq!(service_target("tab"), Some(ServiceTarget::Tab));
+    }
+
+    #[test]
+    fn a_services_user_data_is_read_without_regard_to_case_or_surrounding_space() {
+        // Both are things a hand-edited plist entry can end up holding, and
+        // neither has a second reading.
+        assert_eq!(service_target("Window"), Some(ServiceTarget::Window));
+        assert_eq!(service_target(" TAB\n"), Some(ServiceTarget::Tab));
+    }
+
+    #[test]
+    fn a_service_that_asks_for_something_else_is_not_answered_here() {
+        // A bundle that has drifted from this file, which is the only way to
+        // get here — the empty string is the entry that declared no
+        // `NSUserData` at all.
+        assert_eq!(service_target(""), None);
+        assert_eq!(service_target("split"), None);
     }
 
     #[test]

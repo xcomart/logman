@@ -54,10 +54,11 @@ opens a Linux shell standing in the distribution's own filesystem, which the
 files panel beside it browses as such. Give rulogman a path — on the command
 line, or by opening a folder with it from a file manager — and it starts one
 there instead of showing the start screen, a tab per path, with a file taken to
-mean the directory holding it; on Linux it can also stand in as the desktop's
-default terminal, opening in whatever folder it was launched from — and running
-whatever a *Run in terminal* launcher, or a `rulogman -e btop`, names after
-`-e`. See
+mean the directory holding it; on macOS a right-click on a folder in the Finder
+offers *New rulogman Window Here* and *New rulogman Tab Here* under **Services**
+as well; on Linux it can also stand in as the desktop's default terminal,
+opening in whatever folder it was launched from — and running whatever a *Run in
+terminal* launcher, or a `rulogman -e btop`, names after `-e`. See
 [A shell on this computer](docs/user-guide.md#a-shell-on-this-computer).
 
 **Tabs and split panes.** Every session gets a tab, with its own connection and
@@ -421,6 +422,15 @@ a diff against the upstream tree at that revision shows exactly what is carried:
   `org_kde_kwin_blur`, so a blurred background appearance did nothing on KDE
   X11; `update_blur_region` keeps KWin's `_KDE_NET_WM_BLUR_BEHIND_REGION` in
   step with the window.
+- **`Application::on_service_request`.** macOS lets a bundle declare entries
+  under `NSServices` — the ones in the Finder's right-click *Services* submenu —
+  and choosing one wakes the application with the selection on a pasteboard.
+  gpui knows about `application:openURLs:` and nothing about services, and an
+  application cannot add the missing half itself: the provider has to be
+  registered on `NSApplication` before the run loop starts, which is inside
+  `Platform::run`. This is what puts *New rulogman Window Here* and *New
+  rulogman Tab Here* in that submenu. The core carries a defaulted trait method,
+  so the three non-Apple backends are untouched.
 - **macOS 26 blur behind.** Liquid Glass rebuilds the private layer tree under
   an `NSVisualEffectView`, so upstream's effect-view path on macOS 26 (Tahoe)
   and later leaves a window merely translucent, with nothing blurred behind

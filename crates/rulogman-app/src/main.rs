@@ -85,9 +85,9 @@ use futures::channel::mpsc;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, DragMoveEvent, ElementId, Entity, EntityId,
     FocusHandle, Focusable, Global, KeyBinding, Menu, MenuItem, MouseButton, MouseDownEvent,
-    MouseUpEvent, Pixels, Point, QuitMode, ScrollHandle, SharedString, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions, actions,
-    div, img, point, prelude::*, px, size,
+    MouseUpEvent, Pixels, Point, QuitMode, ScrollHandle, ServiceRequest, SharedString,
+    Subscription, TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowHandle,
+    WindowOptions, actions, div, img, point, prelude::*, px, size,
 };
 use rulogman_core::{
     Dashboard, DashboardPane, DashboardStore, FilesSettings, LayoutAxis, LayoutNode,
@@ -2332,6 +2332,17 @@ impl Workspace {
         };
         let panel_open = Self::panel_opens_for(None, cx);
         self.adopt_session(session, panel_open, window, cx);
+    }
+
+    /// Whether this workspace is showing the start screen rather than a
+    /// session.
+    ///
+    /// Asked from outside the window, which is why it exists at all: the tabs
+    /// are this type's own business and every other question about them is
+    /// answered in here. The one caller is [`open_start_dirs_in_new_window`],
+    /// looking for a window it may fill instead of opening another beside it.
+    fn has_no_tabs(&self) -> bool {
+        self.tabs.is_empty()
     }
 
     /// Gives a freshly built session a view, a pane and a tab of its own, and
@@ -7032,6 +7043,26 @@ fn bind_shortcuts(cx: &mut App) {
     cx.bind_keys(bindings);
 }
 
+/// Something the desktop handed a running rulogman, on its way to the UI
+/// thread.
+///
+/// Both arrive on a platform callback that has no `App` to work with, and both
+/// have to be answered on the thread that owns the windows, so both take the
+/// same channel — and taking the same channel is what keeps them in the order
+/// they were made. What the two have in common is a list of folders; what tells
+/// them apart is that a service also says *where* the folders should be opened,
+/// and that is the whole of why this is an enum rather than a `Vec<String>`.
+enum Arrival {
+    /// URLs from `application:openURLs:`: a `file://` per folder a Finder *Open
+    /// with* named, or a `rulogman://dashboard/<name>`. See
+    /// [`launch::split_open_urls`].
+    Urls(Vec<String>),
+    /// One of the services the bundle declares, with the folders it was invoked
+    /// on and the `NSUserData` saying which entry the user picked. See
+    /// [`launch::service_target`].
+    Service(ServiceRequest),
+}
+
 fn main() {
     env_logger::init();
 
@@ -7092,14 +7123,29 @@ fn main() {
     // the app was already running or is starting because of it. It is the only
     // thing a second launch can say at all: `open -a rulogman` hands a running
     // application no argv, so a URL is how everything after the first launch
-    // asks for anything. The callback
-    // has no `App` to work with, so it does the one thing it can: hands the
-    // URLs to a channel the run closure below drains on the UI thread. On
+    // asks for anything.
+    //
+    // The two services the bundle declares come in through the same door and
+    // are the same request but for one word. *New rulogman Window Here* and
+    // *New rulogman Tab Here* — the entries in the Finder's right-click
+    // *Services* submenu — hand over a folder selected in some other
+    // application, in the same `file://` spelling an *Open with* uses, plus the
+    // `NSUserData` of the entry the user picked, which is the only way macOS
+    // says which one it was: the menu title they actually read is localised and
+    // never reaches the application. See [`launch::service_target`].
+    //
+    // The callbacks
+    // have no `App` to work with, so they do the one thing they can: hand what
+    // arrived to a channel the run closure below drains on the UI thread. One
+    // channel rather than two, because what is at the far end is one queue of
+    // requests and answering them out of the order they were made would open
+    // the second folder in the window the first one was still about to make. On
     // Linux and Windows nothing ever sends on it, since both platforms put the
     // paths — and the `rulogman://` URL a browser or `xdg-open` hands over —
-    // in the argv read above; registering it regardless costs a callback that
-    // is never called.
-    let (opened_urls, mut urls) = mpsc::unbounded();
+    // in the argv read above; registering them regardless costs two callbacks
+    // that are never called.
+    let (arrivals, mut arrivals_rx) = mpsc::unbounded();
+    let opened_urls = arrivals.clone();
     // `LastWindowClosed` rather than the default, which is this only away from
     // macOS: there an app whose last window closes stays in the Dock with its
     // menu bar, and *New Window* would still be reachable from it — but there is
@@ -7113,7 +7159,10 @@ fn main() {
     app.on_open_urls(move |urls| {
         // Failing means the receiver is gone, which means the app is on its way
         // out and there is no window left to open a tab in.
-        let _ = opened_urls.unbounded_send(urls);
+        let _ = opened_urls.unbounded_send(Arrival::Urls(urls));
+    });
+    app.on_service_request(move |request| {
+        let _ = arrivals.unbounded_send(Arrival::Service(request));
     });
 
     // The icon set has to be installed before the app runs: `svg()` resolves
@@ -7223,26 +7272,55 @@ fn main() {
         // asks for has to land in a window that is already open rather than in
         // a new one.
         cx.spawn(async move |cx| {
-            // The loop ends on its own when the application does: the sender
-            // lives in the `on_open_urls` callback the platform owns, so the
-            // stream closes as the platform is torn down and this task never
-            // reaches an `App` that is no longer there.
-            while let Some(batch) = urls.next().await {
-                // The two kinds of request the scheme makes reachable, told
-                // apart before either is answered: a `file://` names a folder,
-                // a `rulogman://dashboard/<name>` names a dashboard.
-                let (paths, names) = launch::split_open_urls(batch);
-                let dirs = launch::start_dirs(paths);
-                cx.update(|cx| {
-                    open_start_dirs(dirs, cx);
-                    // Names only — never [`open_startup_dashboards`]. The
-                    // dashboards marked *open at startup* were opened when this
-                    // process came up; a URL arriving an hour later asks for
-                    // the one dashboard it names and nothing else, and reading
-                    // the marks again would pile the morning's tabs on top of
-                    // it every time somebody opened a link.
-                    open_named_dashboards(names, cx);
-                });
+            // The loop ends on its own when the application does: the senders
+            // live in the callbacks the platform owns, so the stream closes as
+            // the platform is torn down and this task never reaches an `App`
+            // that is no longer there.
+            while let Some(arrival) = arrivals_rx.next().await {
+                match arrival {
+                    Arrival::Urls(batch) => {
+                        // The two kinds of request the scheme makes reachable,
+                        // told apart before either is answered: a `file://`
+                        // names a folder, a `rulogman://dashboard/<name>` names
+                        // a dashboard.
+                        let (paths, names) = launch::split_open_urls(batch);
+                        let dirs = launch::start_dirs(paths);
+                        cx.update(|cx| {
+                            open_start_dirs(dirs, cx);
+                            // Names only — never [`open_startup_dashboards`].
+                            // The dashboards marked *open at startup* were
+                            // opened when this process came up; a URL arriving
+                            // an hour later asks for the one dashboard it names
+                            // and nothing else, and reading the marks again
+                            // would pile the morning's tabs on top of it every
+                            // time somebody opened a link.
+                            open_named_dashboards(names, cx);
+                        });
+                    }
+                    Arrival::Service(request) => {
+                        // Folders and nothing else: the bundle declares
+                        // `NSSendFileTypes` = `public.folder` for both entries,
+                        // so a service never carries a `rulogman://` URL and
+                        // there is nothing here to split apart. `start_dirs`
+                        // still stands between the pasteboard and the
+                        // workspace, since a folder can have gone between the
+                        // Finder drawing the menu and the user reading it.
+                        let dirs = launch::start_dirs(request.urls);
+                        // An entry this build does not know is answered as a
+                        // tab rather than dropped: the folders are the request
+                        // and the target is only where to put it, so the worse
+                        // of the two answers is still the right one. See
+                        // [`launch::service_target`], which logs what it saw.
+                        let target = launch::service_target(&request.user_data)
+                            .unwrap_or(launch::ServiceTarget::Tab);
+                        cx.update(|cx| match target {
+                            launch::ServiceTarget::Window => {
+                                open_start_dirs_in_new_window(dirs, cx)
+                            }
+                            launch::ServiceTarget::Tab => open_start_dirs(dirs, cx),
+                        });
+                    }
+                }
             }
         })
         .detach();
@@ -7477,6 +7555,60 @@ fn open_start_dirs(dirs: Vec<PathBuf>, cx: &mut App) {
         // For the second launch rather than the first: the user asked for this
         // window by opening something with it, and on macOS the app it woke is
         // otherwise left in the background.
+        window.activate_window();
+    });
+    if let Err(error) = opened {
+        log::warn!("could not open a shell for the paths given: {error}");
+    }
+}
+
+/// Opens a window of its own for the directories a service named, and brings it
+/// forward.
+///
+/// The *New rulogman Window Here* half of the pair the bundle declares, and the
+/// only place in the application where a request from outside makes a window
+/// rather than a tab. [`open_start_dirs`] is the other half, and everything
+/// after the window is chosen is the same in both.
+///
+/// A window with nothing in it is taken over rather than added to. A service
+/// invoked while rulogman is not running starts it, and by the time the request
+/// is drained the run closure has already opened the window every launch opens
+/// — showing the start screen, since the launch itself named no paths. Opening
+/// a second window on top of that leaves the first one standing empty behind it,
+/// which is not what *in a new window* meant: what the user asked for is a
+/// window showing their folder, and an empty one is a window that has yet to be
+/// given anything. Any tabless workspace will do, not merely the one this
+/// launch opened, because a window the user emptied by closing its last tab is
+/// in exactly the same state and equally has nothing to lose.
+///
+/// Nothing at all happens for an empty list. A service whose folders have all
+/// gone since the Finder drew the menu has asked for nothing, and answering it
+/// with an empty window would be the one outcome worse than answering it with
+/// nothing.
+fn open_start_dirs_in_new_window(dirs: Vec<PathBuf>, cx: &mut App) {
+    if dirs.is_empty() {
+        return;
+    }
+    let window = match workspace_windows(cx)
+        .into_iter()
+        .find(|window| window.read(cx).is_ok_and(Workspace::has_no_tabs))
+    {
+        Some(window) => window,
+        None => match open_workspace_window(cx) {
+            Ok(window) => window,
+            Err(error) => {
+                log::warn!("could not open a window for the paths given: {error:#}");
+                return;
+            }
+        },
+    };
+    let opened = window.update(cx, |workspace, window, cx| {
+        for dir in dirs {
+            workspace.open_local_directory(dir, window, cx);
+        }
+        // The application is in the background whenever a service reaches it —
+        // the user was in the Finder — so the window it just made would
+        // otherwise open behind whatever they were looking at.
         window.activate_window();
     });
     if let Err(error) = opened {
