@@ -43,6 +43,8 @@ tab:
   split_below: 現在のタブの下に分割して追加
   duplicate_right: 新しい接続で右に分割
   duplicate_below: 新しい接続で下に分割
+  save_layout: レイアウトをダッシュボードに保存
+  add_tail: "%{file} を追加 — %{connection}"
   duplicate: タブを複製
   close: タブを閉じる
   close_others: 他のタブを閉じる
@@ -130,7 +132,9 @@ files:
 empty:
   hint: "%{shortcut} を押してホストに接続します。"
   saved_profiles: 保存済みプロファイル
+  dashboards: ダッシュボード
   menu_edit: 編集…
+  menu_tail: "%{name} を追尾"
 
 statusbar:
   no_session: セッションなし
@@ -169,6 +173,38 @@ settings:
   keepalive_hint: 秒 (0 で無効)
   timeout: 接続タイムアウト
   timeout_hint: 秒
+  dashboards:
+    title: ダッシュボード
+    hint: ダッシュボードは複数のリモートファイルを同時に追跡し、それぞれを到達できる接続経由で 1 つのタブに並べて表示します。
+    none: ファイルなし
+    one: 1 個のファイル
+    many: "%{count} 個のファイル"
+    add: ダッシュボードを追加
+    remove: ダッシュボードを削除
+    name: 名前
+    open_at_startup: 起動時に開く
+    profile: 接続
+    path: ファイル
+    add_pane: ファイルを追加
+    remove_pane: 削除
+    missing_profile: (削除された接続)
+    incomplete: ダッシュボードの各ファイルに接続を指定するか、そのファイルを削除してください。
+  highlights:
+    title: ハイライト
+    hint: "ルールは、追跡中のファイルでパターンに一致した行を色付けします。最初に一致したルールが優先されます。色は #7f1d1d のような16進数か、ターミナルのカラースキームのスロット名 — %{colours} — で指定でき、スロット名はセッションが使うスキームに追随します。"
+    pattern: パターン
+    scope_match: 一致部分
+    scope_line: 行全体
+    foreground: 文字
+    background: 背景
+    bold: 太字
+    ignore_case: 大文字と小文字を区別しない
+    enabled: 有効
+    add: ルールを追加
+    remove: 削除
+    reset: 既定のルールに戻す
+    bad_pattern: "正規表現として無効です: %{pattern}"
+    bad_colour: "不明な色です: %{colour}"
   manage:
     duplicate: 複製
     edit: 編集
@@ -312,6 +348,20 @@ connection:
     charset_default: デフォルト
     inherits_value: "%{value} を継承"
     inherits_lines: "%{value} 行を継承"
+  hops:
+    title: 踏み台ホスト
+    none: 直接接続
+    one: 踏み台ホスト 1 台
+    many: "踏み台ホスト %{count} 台"
+    hint: セッションは各踏み台ホストへ順にログインし、最後の 1 台が接続先ホストへの接続を開きます。ここで入力した認証情報はシステムのキーチェーンに保存されます。
+    host: ホスト
+    port: ポート
+    username: ユーザー
+    add: 踏み台ホストを追加
+    remove: 削除
+    incomplete: 未完成の踏み台ホストを完成させるか削除してください。
+    secret_save_failed: "%{host} の認証情報を保存できませんでした (%{error})。"
+    secret_delete_failed: "削除した踏み台ホスト %{host} の保存済み認証情報を消去できませんでした (%{error})。"
   tunnels:
     title: SSH トンネル
     none: 転送するポートなし
@@ -324,6 +374,16 @@ connection:
     add: トンネルを追加
     remove: 削除
     incomplete: 未完成のトンネルルールを完成させるか削除してください。
+  tails:
+    title: 追尾するファイル
+    none: 追尾するファイルなし
+    one: 1 ファイルを追尾
+    many: "%{count} ファイルを追尾"
+    hint: 各ファイルはセッション確立後、`tail -f` と同じように追尾されます。リモートホスト上の絶対パスを入力してください。
+    add: ファイルを追加
+    remove: 削除
+    custom_highlights: 個別のハイライト
+    incomplete: "追跡するファイルに rulogman が使用できないハイライトルールがあります。パターンと色を確認してください。"
 
 session:
   connecting: 接続中
@@ -332,6 +392,8 @@ session:
   failed: "%{kind}: %{message}"
   reconnect: 再接続
   restart: 再起動
+  hop_secret_missing: "踏み台ホスト %{hop} の秘密情報が保存されていません。この接続の設定で入力し直してください。"
+  hop_agent_unsupported: "踏み台ホスト %{hop} は SSH エージェント認証を使いますが、SSH エージェント認証にはまだ対応していません。"
   overlay:
     connecting: "%{host} に接続しています..."
     disconnected: "%{host} から切断されました"

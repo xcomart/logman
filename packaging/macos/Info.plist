@@ -47,6 +47,94 @@
             </array>
         </dict>
     </array>
+    <!-- What the application may be told to open by URL, which on macOS is the
+         only thing a *second* launch can say at all: `open -a rulogman` hands
+         an application that is already running no argv, and only
+         `application:openURLs:` reaches it. `rulogman://dashboard/<name>` —
+         the name percent-encoded — opens a saved dashboard exactly as the
+         command line's `dashboard` option does, so `open
+         "rulogman://dashboard/Morning"` works whether rulogman is already
+         running or not. `Viewer` rather than `Editor` for the same reason the
+         document type above is: rulogman shows what the URL names and owns
+         nothing of it. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.aihouse.rulogman</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>rulogman</string>
+            </array>
+        </dict>
+    </array>
+    <!-- What the application offers to do with a folder someone selected
+         somewhere else, which is the third door into the same request the two
+         keys above open. A service declared here appears in the Finder's
+         right-click *Services* submenu — and in the Services submenu of every
+         application's own menu — and choosing one wakes rulogman, starting it
+         first if it is not running, with the selection on a pasteboard. This
+         is how Terminal.app's own *New Terminal at Folder* is built, and it is
+         the entry a user reaches for when they want a shell where they are
+         looking rather than an application to open a folder with.
+         `NSMessage` is `handleService` for both because it is not ours to
+         choose: gpui installs exactly that selector on the services provider,
+         and an entry naming anything else would reach nothing. `NSPortName`
+         is the bundle name. What separates the two entries is `NSUserData`,
+         which arrives verbatim in the request and is read by
+         `launch::service_target` — the two spellings there and the two here
+         are one contract kept by hand.
+         `NSSendFileTypes` is folders alone, as Terminal.app's is: rulogman
+         opens a shell for a file too, by standing in the directory holding
+         it, but an entry offered on every file in the Finder is an entry in
+         the way. `NSRequiredContext` is empty and must still be present —
+         Apple's documentation is explicit that a service without it is not
+         presented automatically. The menu titles below are the English ones;
+         `Resources/<lang>.lproj/ServicesMenu.strings` translates them, keyed
+         by exactly these strings. -->
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>New rulogman Window Here</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>handleService</string>
+            <key>NSPortName</key>
+            <string>rulogman</string>
+            <key>NSUserData</key>
+            <string>window</string>
+            <key>NSSendFileTypes</key>
+            <array>
+                <string>public.folder</string>
+            </array>
+            <key>NSRequiredContext</key>
+            <dict/>
+        </dict>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>New rulogman Tab Here</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>handleService</string>
+            <key>NSPortName</key>
+            <string>rulogman</string>
+            <key>NSUserData</key>
+            <string>tab</string>
+            <key>NSSendFileTypes</key>
+            <array>
+                <string>public.folder</string>
+            </array>
+            <key>NSRequiredContext</key>
+            <dict/>
+        </dict>
+    </array>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>

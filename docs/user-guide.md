@@ -13,6 +13,7 @@ version.
 - [Getting started](#getting-started)
 - [Tabs and sessions](#tabs-and-sessions)
 - [Split panes](#split-panes)
+- [Dashboards](#dashboards)
 - [The files panel](#the-files-panel)
 - [The editor](#the-editor)
 - [The terminal](#the-terminal)
@@ -40,7 +41,8 @@ the binary, desktop entry and icons under `~/.local` for the current user; the
 The window opens at 1100×700, centred, showing the start screen: the wordmark, a
 hint naming the new-session shortcut, a **New session** button, one button per
 shell this computer can start, and — once you have connected to something at
-least once — a list of saved profiles.
+least once — a list of saved profiles, with any [dashboards](#dashboards) you
+have made listed above them.
 
 ![The start screen: the rulogman wordmark, a New session button, rows for a PowerShell, a cmd and a WSL Ubuntu shell, and three saved profiles under them](screenshots/start.png)
 
@@ -85,6 +87,24 @@ default for a type; `open -a rulogman /var/log` does the same from a shell, and
 opening a second folder that way adds a tab to the window already up rather than
 starting rulogman twice. On Windows, pass the path to `rulogman.exe`.
 
+macOS has a second, shorter way to the same place. Right-click a folder in the
+Finder and rulogman offers two entries under **Services** — the submenu near the
+bottom of the context menu, which the Finder skips and lists the entries
+directly in when there are only a few:
+
+- **New rulogman Window Here** opens a window of its own with a shell standing
+  in that folder. If rulogman was not running, the window it starts with is the
+  one you get, rather than an empty one beside it.
+- **New rulogman Tab Here** adds the shell as a tab of the window already in
+  front, which is what *Open with* does.
+
+Both are offered for folders only, and both work from any application that puts
+a folder on the pasteboard, not only the Finder. If neither appears, macOS has
+them switched off: **System Settings → Keyboard → Keyboard Shortcuts →
+Services**, under **Files and Folders**, has a checkbox for each. A newly
+installed rulogman is listed there once Launch Services has registered the
+bundle, which its first launch takes care of.
+
 On Linux, rulogman can also be set as the desktop's default terminal — on KDE,
 **System Settings → Default Applications → Terminal emulator**. Chosen that
 way, a file manager's *Open Terminal Here* starts rulogman with the folder as
@@ -97,6 +117,31 @@ directory opens a shell in that same directory, while the desktop icon and
 application menu, which both start it in your home, still open the start
 screen.
 
+**`--dashboard` overrides that fallback.** A launch that names a dashboard is a
+launch that has already been told what to open, so the launch directory is not
+read back out and no shell is opened for it; the dashboard's tab is what comes
+up. Paths are unaffected — the flag is pulled out of the command line before the
+paths are, so `rulogman --dashboard Morning /var/log` opens both, the dashboard
+first. See
+[Opening at startup and from the command line](#opening-at-startup-and-from-the-command-line).
+
+**`-e` runs a command instead of a shell.** Set as the desktop's default
+terminal, rulogman is also what a desktop entry marked *Run in terminal*
+launches, and the only thing KDE tells a terminal it does not otherwise know is
+`-e` followed by the command. Everything after the flag is that command line, so
+`rulogman -e htop --utf-force` runs `htop --utf-force` and leaves the second
+flag to htop rather than reading it itself:
+
+```bash
+rulogman -e btop
+```
+
+The command runs in rulogman's own working directory — the folder the launcher
+started it in, or the one you typed it in — and it overrides the launch-directory
+fallback for the same reason `--dashboard` does: the launch has already said
+what to open. When the command exits its tab stays put, holding everything it
+printed, so a program that fails on its first line can still be read.
+
 ### The connection dialog
 
 <kbd>Ctrl</kbd>+<kbd>T</kbd> (<kbd>Cmd</kbd>+<kbd>T</kbd> on macOS), the **New
@@ -106,9 +151,9 @@ right.
 
 ![The Connect dialog with the web-01 profile loaded: saved profiles on the left under the local shells, the name, host, port, username and authentication fields on the right, and an expanded SSH tunnels section carrying one rule from 8080 to db.internal:5432](screenshots/connect-dialog.png)
 
-*The two collapsible sections along the bottom — **Session overrides** and **SSH
-tunnels** — summarise themselves while closed, so a profile's extras are
-readable without opening either.*
+*The collapsible sections along the bottom — **Session overrides**, **Jump
+hosts**, **SSH tunnels** and **Tail files** — summarise themselves while closed,
+so a profile's extras are readable without opening any of them.*
 
 The form:
 
@@ -235,6 +280,216 @@ it is in this window or in one you moved it to.
 A rule can still fail, and then the terminal says so in yellow: something
 outside rulogman holding the local port, or a remote host the server cannot reach.
 A tab whose rules all failed holds nothing and wears no mark.
+
+### Jump hosts
+
+**Jump hosts** is the collapsible section above **SSH tunnels**, and it holds the
+machines the connection is dialled *through* rather than to — the bastion in
+front of a private network, and anything behind that one. It is an ordered list,
+read top to bottom, and the target host of the form is always the last stop.
+
+Each hop carries its own fields:
+
+| Field | What it does |
+| --- | --- |
+| **Host** | The hop's host name or address. Required. |
+| **Port** | Digits only, 22 by default. Anything outside 1–65535 is refused. |
+| **User** | The login name on that hop. Required. |
+| **Authentication** | **Password** or **Private key**. The SSH agent is not supported here any more than it is for the target. |
+| **Key file** | Path of the private key, shown in private key mode. |
+| **Password** / **Passphrase** | Masked. The secret for this hop alone. |
+
+**A secret you type here is remembered in the system keychain**, and there is no
+checkbox to say otherwise. A bastion is a machine you go through on the way to
+work rather than a machine you visit, and a bastion password nobody remembered
+would be a password asked for on every single connection. As with the target's
+own password, leaving the field empty on a later edit keeps the secret already
+stored and typing something new replaces it; removing the hop deletes what was
+stored for it, and so does deleting the profile.
+
+Connecting walks the list. rulogman dials the first hop and logs into it, then
+asks *it* to open a channel to the second, and so on until the last hop opens
+the channel to the host in the form — which is what OpenSSH's `-J` /
+`ProxyJump` does, and by the same means, a `direct-tcpip` channel:
+
+```mermaid
+flowchart LR
+    app["rulogman on<br/>this computer"] --> b["bastion:22<br/>logged in with<br/>the hop's own credentials"]
+    b --> h2["a channel opened<br/>by the bastion"] --> j2["jump-2:22"]
+    j2 --> ch["a channel opened<br/>by jump-2"] --> target["web-01:22<br/>the connection's host"]
+    target --> use["the shell, the files panel,<br/>the tunnels, the tail panes"]
+```
+
+**Every hop is verified under its own host key**, against the same `known_hosts`
+as any other server — a hop seen for the first time is trusted on first use and
+recorded, and a hop whose fingerprint has changed fails the connection where it
+stands. See [Host key policy](#host-key-policy).
+
+Two things are refused early. **An unfinished hop blocks Connect**, exactly as an
+unfinished tunnel rule does: a hop missing its host or user, a private-key hop
+with no key path, a port outside the range. And **a password hop with nothing
+stored fails the session before anything is dialled**, with a message naming the
+hop and telling you to enter its secret in the connection's settings — there is
+nowhere to ask for it once the connection is under way.
+
+Failures on the way through name the hop that produced them rather than the host
+you asked for, since that is where the fix is:
+
+```text
+jump host bastion:22 refused the connection to web-01:22 — most likely AllowTcpForwarding is disabled
+```
+
+**The hops belong to the profile, not to the tab.** Everything opened on that
+connection goes the same way: its shell, a split of that shell, the files panel's
+SFTP channel, the panes that follow files, and any dashboard pane that names this
+connection.
+
+### Followed files
+
+**Tail files** is the last collapsible section of the form, under **SSH
+tunnels**. It lists absolute paths on the remote machine, one per row, with
+**Add file** and **Remove**; the collapsed header counts them, *2 files
+followed*, so a profile's watchlist is readable without opening the section. A
+row left blank is simply dropped when you connect — an empty path asks for
+nothing, so there is nothing to refuse over.
+
+**Connecting a profile that lists files opens the shell and the files together,
+in one tab.** The shell takes the top of the tab and the files stack under it in
+the order the rows are in, rows of equal height, so a tab opened on a web server
+comes up as a prompt over its access log over its error log.
+
+Each of those panes is a session of its own — its own SSH connection, on the same
+credentials and through the same [jump hosts](#jump-hosts) — running
+
+```bash
+tail -n 200 -F /var/log/nginx/access.log
+```
+
+so it opens on the last two hundred lines and follows the file from there. The
+flag is `-F` rather than `-f` deliberately: a log rotated out from under the
+pane is reopened by name and followed again, instead of the pane going quiet for
+the rest of the day.
+
+A tail pane wears a header strip carrying the path, and the connection's name at
+the right end when the tab has panes from more than one host. **The path is
+shortened from the left** when the pane is too narrow for it —
+`/var/log/nginx/access.log` becomes `/v/l/nginx/access.log` — because the file
+name is what tells two logs apart and the directories above it are what you
+already know; the name itself is never shortened, and resting the pointer on the
+strip shows the path in full.
+
+Three things about such a pane differ from a shell:
+
+- **Keyboard input is ignored.** Nothing you type reaches the remote command, so
+  a <kbd>Ctrl</kbd>+<kbd>C</kbd> aimed at the pane beside it cannot kill the
+  tail. Everything else about the terminal works: the scrollback holds what has
+  gone past, and the selection and copy keys behave as they do anywhere else.
+- **There is no files panel over it.** The pane is a view of one file, and it has
+  no shell to browse alongside.
+- **It never takes the profile's port forwardings.** Those belong to the shell —
+  see [Port forwarding](#port-forwarding).
+
+When the connection behind a tail pane drops, the pane shows the same overlay
+card any session does, **Reconnect** included, and reconnecting starts the tail
+again from its last two hundred lines.
+
+**A file can also be followed on its own.** The right-click menu of a saved
+connection on the start screen, and the right-click menu of a tab already open on
+one, both carry a row per path the profile follows, named after the file —
+**Tail access.log** — and choosing one opens that file in a tab of its own,
+with no shell beside it. If the profile's credentials are not saved, the
+connection dialog opens first, pre-filled; the file is followed as soon as you
+connect.
+
+Several connections' files can be watched together in one tab, which is what a
+[dashboard](#dashboards) is.
+
+### Highlighting a followed file
+
+**A tail pane recolours the lines it shows.** A highlight rule is a regular
+expression and the colours to paint what it matches in, and every pane
+following a file runs the same list over every line that arrives — the panes
+under a profile's shell, a file opened on its own, and the panes of a
+[dashboard](#dashboards) alike. Highlighting only ever changes colours:
+nothing is filtered, folded or hidden, so the pane still shows you the file
+exactly as `tail` sends it.
+
+A rule carries:
+
+| Part | What it means |
+| --- | --- |
+| **Pattern** | A regular expression, in Rust's `regex` syntax — `\b(error\|fail)\b`. |
+| **Match** / **Line** | How far the colour reaches. **Match** paints the matched text alone; **Line** paints the whole line the match was found on, including the rows a long line wraps onto. |
+| **Text** / **Background** | The two colours. Either can be left empty, and an empty one leaves that half of the line as the terminal drew it. |
+| **Bold** | Draws the highlighted span bold. |
+| **Ignore case** | On by default, since a log writes `ERROR`, `Error` and `error` and means the same thing by all three. |
+| **On** | Clear it to keep a rule without applying it — for the rule you want back next week rather than retyped. |
+
+**A colour is either a hex value or the name of a slot in the colour scheme.**
+`#7f1d1d`, or its three-digit short form `#c00`, says exactly what to draw. A
+slot name — `black`, `red`, `green`, `yellow`, `blue`, `purple`, `cyan` and
+`white`, each with a `bright_` twin, plus `foreground` and `background` — is
+resolved through the pane's own [colour scheme](#themes-and-colour-schemes),
+the global one or the profile's override, so a rule written that way stays
+legible whether the session is running a light palette or a dark one. Hex is
+there for the colour your scheme has no slot for, which is a choice you make
+with your own scheme in front of you. `magenta` and `bright_magenta` are
+accepted as spellings of `purple` and `bright_purple`.
+
+**The first rule that matches wins.** The list is tried from the top down, and
+text an earlier rule has already coloured is left alone by the ones below it;
+once a **Line** rule has claimed a line, the rest of the list is skipped for
+that line entirely. So order the list severest first — a `fatal` rule under an
+`error` rule would never be seen, because `FATAL: request failed` matches both
+and the `error` rule would take the line. A **Line** rule's background is
+painted edge to edge across the pane rather than stopping where the text does,
+and the selection is drawn on top of whatever the rules produced, so
+[selecting](#selecting-copying-and-pasting) in a coloured pane still looks like
+a selection. A rule whose pattern does not compile is skipped, with a line in
+the log, and the others still apply.
+
+**Until you write rules of your own you get the preset**, five severity levels
+in this order:
+
+| Pattern | Scope | Colours |
+| --- | --- | --- |
+| `\b(fatal\|panic\|critical\|emerg)\b` | Line | `bright_white` on `red`, bold |
+| `\b(error\|err\|exception\|traceback\|failed\|failure)\b` | Line | `bright_red` |
+| `\b(warn\|warning)\b` | Line | `yellow` |
+| `\b(debug\|trace)\b` | Line | `bright_black` |
+| `\b(info)\b` | Match | `green` |
+
+All five ignore case, and every pattern is anchored on word boundaries so that
+`error` does not light up `terror` or a path called `/errors/`. The four
+severities take the whole line because a log line is one record and the record
+is what you want pulled out of the wall of text; `info` takes the word alone,
+because it is the level most lines already are and colouring every one of them
+would come to colouring none. And because the colours are slot names rather
+than hex, the preset follows whatever scheme the session is running. The list
+you use everywhere is edited in the settings dialog — see
+[Highlighting](#highlighting).
+
+**One file can be coloured differently from the rest.** Each row of **Tail
+files** carries a **Custom highlighting** tick. Ticking it for the first time
+opens a rule list belonging to that row, seeded with the rules currently in
+force — the preset, or your global list — so you begin by editing a copy of
+what the pane was already doing rather than from an empty box. Those rules then
+replace the global ones for that file alone. Clearing the tick goes back to
+inheriting, and a ticked row whose list you have emptied is highlighting
+switched off for that one file.
+
+A pattern that does not compile, or a colour that is neither hex nor a slot
+name, blocks **Connect** the way an unfinished
+[tunnel rule](#port-forwarding) does, with the text at fault named in the
+message strip.
+
+Per-file rules reach the panes opened after the change; a pane already open
+keeps the rules it was opened with, since the list travelled with it when it
+started. Global rules are the other way about — saving the settings recolours
+every open pane at once, background tabs included, as a
+[colour scheme does](#when-a-change-takes-effect). A dashboard pane that names
+the same file on the same connection is that file's pane too, so it follows the
+same rules.
 
 ### Reusing a profile
 
@@ -451,6 +706,11 @@ alone. A ratio survives switching tabs, closing a neighbouring pane, and being
 merged into another tab — **but not a restart.** A split layout is session
 state; every tab starts unsplit when the application starts.
 
+**A dashboard's tab is the exception**, because it has somewhere to put a layout:
+**Save layout to dashboard** writes the panes, the splits and the ratios into the
+dashboard itself, and the next time it is opened they come back exactly as they
+were. See [Arranging and saving the layout](#arranging-and-saving-the-layout).
+
 ### Evening the panes out
 
 Splitting the same pane twice does not give three equal panes: each split halves
@@ -473,6 +733,189 @@ on macOS) moves the active pane back out into a tab of its own, placed right
 after the current one. The same command is in the application menu, and in the
 context menu of the active tab while that tab is split. The session keeps
 running throughout — nothing reconnects.
+
+## Dashboards
+
+A dashboard is a named set of followed files, opened as one tab. The files can
+come from any number of connections — the access log of one web server beside
+the error log of the next beside the queue log of the machine behind them both —
+which is the one thing [a profile's own tail files](#followed-files) cannot do,
+since those belong to a single connection.
+
+Everything on a dashboard tab is a tail pane, so everything about a tail pane
+holds here too: one SSH session each, `tail -n 200 -F`, no keyboard input, no
+files panel, and no port forwardings. Highlighting comes along as well: each
+pane is coloured by the rules in force for the file it names, so a file given
+rules of its own in the profile that follows it brings them onto the dashboard
+too — see [Highlighting a followed file](#highlighting-a-followed-file).
+
+### Creating a dashboard
+
+Dashboards are made in the settings dialog — <kbd>Ctrl</kbd>+<kbd>,</kbd>
+(<kbd>Cmd</kbd>+<kbd>,</kbd> on macOS) — in the **Dashboards** section.
+**Add dashboard** appends one, and each is a collapsible holding:
+
+| Control | What it does |
+| --- | --- |
+| **Name** | What the tab and the start screen call it. Left empty it is filled in for you — *Dashboard*, then *Dashboard 2*, and so on. |
+| **Open at startup** | Opens this dashboard every time rulogman starts; see [Opening at startup and from the command line](#opening-at-startup-and-from-the-command-line). |
+| A row per file | A picker naming one of your saved connections, and the absolute path of the file on it. |
+| **Add file** / **Remove** | Appends a row, and takes one away. |
+| **Remove dashboard** | Forgets the whole dashboard. |
+
+What happens to an incomplete row depends on which half is missing, because the
+two mean different things. **A row with no path is dropped** when the settings
+are saved — a connection with nothing to follow on it asks for nothing. **A row
+with a path but no connection chosen blocks the save**, with the reason in the
+message strip at the bottom of the dialog: a path with no host is not a file
+anybody can open, and dropping it silently would lose what you had typed.
+
+**A row whose connection has since been deleted** reads **(deleted connection)**
+and is kept exactly as it is. It does not block the save, so a profile deleted
+in passing never stands between you and the rest of the settings; point the row
+at another connection when you get to it, or take it out.
+
+Dashboards are stored in `dashboards.json` beside the settings — see
+[Where things are stored](#where-things-are-stored).
+
+### Opening a dashboard
+
+**The start screen lists the dashboards above the saved connections**, and a
+click on one opens it.
+<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd>
+(<kbd>Cmd</kbd>+<kbd>Alt</kbd> on macOS) opens the *n*th of that list, counted in
+the order it is shown in, from wherever you are. A dashboard can also be named on
+the command line, which is the next section.
+
+However it is asked for, one tab opens: named after the dashboard, holding one
+tail pane per file, and with no files panel — there is no shell in it for a panel
+to browse beside.
+
+**Every connection a dashboard names must have its credentials saved.** A
+dashboard is a tab that opens in one click, and a tab that opens in one click
+cannot stop half way through to ask for four passwords. So if any connection
+involved is missing its secret, the tab is not opened at all: the connection
+dialog opens instead, on the first connection that is short of one. Save the
+credentials there and click the dashboard again, and it comes up.
+
+A file whose connection has been *deleted* is skipped, with a line in the log,
+and the rest of the dashboard opens as normal.
+
+```mermaid
+flowchart TD
+    ask["the start screen, the shortcut,<br/>or the command line"] --> creds{"every connection<br/>has its credentials?"}
+    creds -- "no" --> dialog["the connection dialog opens on<br/>the first one that is short;<br/>no tab is opened"]
+    creds -- "yes" --> saved{"a layout saved<br/>on the dashboard?"}
+    saved -- "yes" --> restore["the panes, the splits<br/>and the ratios as saved"]
+    saved -- "no" --> grid["a balanced grid:<br/>two side by side, three as<br/>two over one, four as 2×2"]
+    restore --> tab["one tab, one tail pane per file"]
+    grid --> tab
+```
+
+Without a saved layout the panes are laid out as a **balanced grid**: two files
+sit side by side, three sit as two over one, four as a 2×2. It is a starting
+point rather than a preference, and the next section is how it becomes one.
+
+### Arranging and saving the layout
+
+A dashboard tab is an ordinary split tab while you are in it. Drag the dividers
+to give the busy log more room, close a pane you did not want with
+<kbd>Ctrl</kbd>+<kbd>W</kbd>, add panes as the next section describes — and then
+**Save layout to dashboard**, in the tab's right-click menu or
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd>
+(<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> on macOS).
+
+**That records exactly what is on screen**: which files are on the dashboard — a
+pane you closed leaves it, a pane you added joins it — where each of them sits,
+and every split's direction and ratio. The next time the dashboard is opened it
+comes back that way, down to the ratio you dragged. This is the one layout in
+rulogman that survives a restart; every other tab starts unsplit, as
+[Resizing a split](#resizing-a-split) says.
+
+**Editing the dashboard's file list in the settings afterwards sets the saved
+layout aside**, and the balanced grid is used again the next time it opens. A
+layout describes an arrangement of particular panes, and a list that has grown a
+file no longer matches the one that was saved. Nothing is lost by it — the files
+are all there, in a grid — and one more
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> records the new arrangement over
+the old.
+
+Two things will refuse the save. **Only a tab opened from a dashboard can save a
+layout**, because the layout is saved *into* a dashboard and an ordinary tab has
+none to save into. And **every pane has to be a followed file**: a shell merged
+into the tab has no path to record, so the save is refused rather than writing a
+dashboard that would come back missing a pane.
+
+### Growing a dashboard by hand
+
+A dashboard does not have to be finished in the settings dialog. **The tab's
+right-click menu lists an *Add file — connection* row for every file every saved
+connection follows** — that is, for every path in any profile's
+[Tail files](#followed-files) section — and choosing one opens that file in a new
+pane **below the active one**.
+
+The rows are only offered while the active pane is tall enough to be split; below
+that threshold they disappear, the same way the ordinary split commands do — see
+[Creating a split](#creating-a-split).
+
+A pane added this way is part of the tab, not yet part of the dashboard. It joins
+the dashboard when you save the layout.
+
+### Opening at startup and from the command line
+
+**Open at startup**, the checkbox on the dashboard in the settings, opens it
+every time rulogman starts, in place of the start screen. Several dashboards can
+be marked, and each gets a tab of its own; the last one opened is the tab you
+land in.
+
+**`--dashboard` names one on the command line:**
+
+```bash
+rulogman --dashboard "Morning"
+rulogman --dashboard=Morning --dashboard=Nightly
+```
+
+Both spellings work and the flag can be given more than once, a tab per name, in
+the order given. A name that matches no dashboard is logged and ignored rather
+than failing the launch.
+
+The flag is pulled out of the command line **before the paths are read**, so it
+mixes with them: `rulogman --dashboard Morning /var/log` opens the dashboard and
+a shell in `/var/log`. On Linux it also switches off the launch-directory
+fallback described under
+[Starting somewhere in particular](#starting-somewhere-in-particular) — a launch
+that says what to open is not also asked to guess.
+
+**A URL names one too, running or not.** The flag is read by the launch that
+starts rulogman and by no other — on macOS a second `open -a rulogman` hands the
+application that is already running no command line at all — so there is a
+second spelling that every platform can deliver at any moment:
+
+```bash
+open "rulogman://dashboard/Morning"        # macOS
+xdg-open "rulogman://dashboard/Morning"    # Linux
+start "" "rulogman://dashboard/Morning"    # Windows
+```
+
+The form is `rulogman://dashboard/<name>` and the name is **percent-encoded**,
+the way any URL's path is: a space is `%20`, so *Morning logs* is
+`rulogman://dashboard/Morning%20logs`, and a name in a script other than Latin
+comes through as its UTF-8 escapes. A trailing slash is ignored. Anything else
+under the scheme — another word in place of `dashboard`, no name at all, a
+half-written escape — is logged and ignored, with the accepted form in the
+message.
+
+A URL names a dashboard **the same way the flag does**: matched exactly against
+the saved name, a tab per URL, and a name that matches no dashboard logged and
+ignored rather than failing anything. The installers register the scheme, so a
+URL works from a terminal, a launcher, a browser or a chat window, whether
+rulogman is running or not — if it is not, it starts; if it is, the dashboard
+opens as a new tab in the window you were last in and that window comes to the
+front.
+
+What a URL never does is re-open the **Open at startup** dashboards. Those
+belong to the launch and were opened when rulogman started; a URL arriving an
+hour later opens the one dashboard it names and nothing else.
 
 ## The files panel
 
@@ -1210,8 +1653,9 @@ the remote shell nothing.
 ## Settings
 
 <kbd>Ctrl</kbd>+<kbd>,</kbd> (<kbd>Cmd</kbd>+<kbd>,</kbd> on macOS), or
-**Settings…** in the application menu, opens the settings dialog. It has three
-sections.
+**Settings…** in the application menu, opens the settings dialog. It has five
+sections — four of them below, and **Dashboards**, which is described under
+[Creating a dashboard](#creating-a-dashboard).
 
 ### Appearance
 
@@ -1247,6 +1691,38 @@ elsewhere.
 | **Username** | any string | Pre-filled into the connection form. None by default. |
 | **Keepalive** | seconds, 0 disables | 30 by default. |
 | **Connect timeout** | seconds | How long to wait for the TCP connection. 15 by default. |
+
+### Highlighting
+
+The rules every followed file is coloured by, unless that file carries rules of
+its own. What a rule is made of, and the order they are matched in, is under
+[Highlighting a followed file](#highlighting-a-followed-file); this section is
+where the list itself is written. It opens showing the rules in force as
+editable rows, so a fresh install shows you the five preset rules rather than
+an empty box to guess at.
+
+Each rule is two lines. Across the first sit the pattern, the **Match** /
+**Line** picker and **Remove**; across the second, **Text**, **Background**,
+**Bold**, **Ignore case** and **On**. **Add rule** appends a rule at the
+bottom, **Reset to preset** puts the built-in list back, and a hint under the
+title names a few of the colour slots so the spelling is on screen while you
+are typing one.
+
+**A rule that could not work refuses the save.** A pattern the regular
+expression engine will not compile, or a colour that is neither `#rrggbb` nor a
+slot name, holds **Save** back with the offending text quoted in the message
+strip. Both would otherwise be stored quite happily and then never match, or
+draw in a colour you did not ask for — which looks like a rule that is wrong
+about the log rather than one that is wrong about itself, and is far harder to
+find later than now.
+
+**A preset you did not touch is stored as nothing at all.** Open the section,
+read the five rules, change none of them and save, and `settings.json` keeps
+`highlights.rules` at `null`: no list is written, so a later release's improved
+preset still reaches you. Change anything, and what is on screen becomes the
+list — it replaces the preset outright rather than adding to it. Remove every
+rule, and highlighting is off everywhere except the files that carry rules of
+their own, because an empty list is a decision and is kept as one.
 
 ### Themes and colour schemes
 
@@ -1348,6 +1824,9 @@ profiles, and it is meant to be edited by hand:
 
 - unknown keys are ignored, so a file written by a newer rulogman still opens;
 - missing keys fall back to the documented defaults;
+- `highlights.rules` is the one key whose `null` means something of its own:
+  absent or null is the built-in preset, and an empty list is highlighting
+  turned off — see [Highlighting](#highlighting);
 - out-of-range numbers are **clamped rather than rejected** — an opacity of 0
   loads as 0.5, a font size of 400 as 32, a scrollback of ten million as
   100 000, and a blank string as its default;
@@ -1422,12 +1901,14 @@ files panel are plain <kbd>Cmd</kbd>+<kbd>N</kbd> and <kbd>Cmd</kbd>+<kbd>B</kbd
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> | <kbd>Cmd</kbd>+<kbd>N</kbd> | New window |
 | <kbd>Ctrl</kbd>+<kbd>W</kbd> | <kbd>Cmd</kbd>+<kbd>W</kbd> | Close the active pane, and the tab with its last one |
 | <kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd> | <kbd>Cmd</kbd>+<kbd>1</kbd>…<kbd>9</kbd> | Switch to tab *n* |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd> | <kbd>Cmd</kbd>+<kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd> | Open dashboard *n* |
 | <kbd>Alt</kbd>+<kbd>]</kbd> | <kbd>Cmd</kbd>+<kbd>]</kbd> | Focus the next pane of the tab |
 | <kbd>Alt</kbd>+<kbd>[</kbd> | <kbd>Cmd</kbd>+<kbd>[</kbd> | Focus the previous pane of the tab |
 | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> | Split the active pane to the right, with a new connection to the same host |
 | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> | Split the active pane downwards, with a new connection to the same host |
 | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | Move the active pane into its own tab |
 | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> | Move the active tab into a window of its own |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> | Save the tab's layout to its dashboard |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | <kbd>Cmd</kbd>+<kbd>B</kbd> | Show or hide the files panel |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> | <kbd>Cmd</kbd>+<kbd>C</kbd> | Copy the selection |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> | <kbd>Cmd</kbd>+<kbd>V</kbd> | Paste |
@@ -1505,7 +1986,8 @@ that would be refused is left out rather than shown doing nothing.
 
 | File | Contents |
 | --- | --- |
-| `profiles.json` | Saved connections: name, host, port, user, authentication method, key path, and any session overrides. |
+| `profiles.json` | Saved connections: name, host, port, user, authentication method, key path, any session overrides, the connection's [jump hosts](#jump-hosts), the paths it [follows](#followed-files), and any [highlight rules](#highlighting-a-followed-file) one of those paths carries of its own. |
+| `dashboards.json` | [Dashboards](#dashboards): each one's name, whether it opens at startup, its files as a connection identifier and a path apiece, and the layout last saved to it. |
 | `known_hosts` | Trusted host key fingerprints. |
 | `settings.json` | Everything in the settings dialog. |
 | `themes/*.json` | UI themes of your own, one file per theme. Created on demand; see [Themes and colour schemes](#themes-and-colour-schemes). |
@@ -1531,7 +2013,10 @@ nothing had ever been saved, and you are asked for the secret every time. An
 attempt to *save* a secret in that state is reported in the dialog's message
 strip.
 
-Deleting a profile deletes its keychain entry too.
+**A jump host's secret is a keychain entry of its own**, stored beside the
+profile's under its own account name, since a chain of hops is a chain of
+logins. Removing a hop from a connection deletes what was stored for it, and
+deleting a profile deletes its own entry and every hop's with it.
 
 ### Host key policy
 
@@ -1580,6 +2065,40 @@ detail from the SSH layer:
 **A session stuck in *connecting*** means the server accepted the TCP connection
 and then never answered the pty or shell request. There is no timeout on those,
 so close the tab to cancel it.
+
+### A dashboard will not open
+
+**A click that opens the connection dialog instead of the tab** is the usual
+one, and it is not a failure: a dashboard needs every connection it names to
+have its credentials saved, and the dialog is open on the first one that has
+none. Tick **Remember … in the system keychain**, connect, and click the
+dashboard again. A dashboard spanning four hosts may ask this way once per host
+before it opens in one click for good.
+
+The rest, in order:
+
+1. **A file is missing from the tab.** Its connection has been deleted; the file
+   is skipped and the line is in the log. Open **Settings → Dashboards**, where
+   the row reads **(deleted connection)**, and point it at another connection or
+   take it out.
+2. **The settings will not save.** A row has a path but no connection chosen —
+   the message strip at the bottom of the dialog names it. A row with no path is
+   dropped rather than blocking anything.
+3. **`--dashboard` did nothing.** An unknown name is logged and ignored, so check
+   the spelling against the **Name** field. On macOS, only the first launch reads
+   the flag: asking `open -a rulogman` for a dashboard while a window is already
+   up hands the arguments to the running application, which cannot act on them.
+4. **<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> refuses.** Either the tab was
+   not opened from a dashboard — there is nothing for it to save into — or one of
+   its panes is not a followed file. A shell merged into the tab is the usual
+   cause.
+5. **The layout came back as a grid.** The dashboard's file list has been edited
+   since the layout was saved, which sets the saved layout aside. Arrange the
+   panes and save the layout again.
+
+A dashboard that opens but whose panes all show the overlay card is not a
+dashboard problem: the sessions failed, and each card carries its own reason —
+see [The session fails to connect](#the-session-fails-to-connect).
 
 ### The files panel does not follow `cd`
 
@@ -1691,7 +2210,9 @@ This is the full list. The README's
 **Connecting**
 
 - **No SSH agent support.** The connection dialog offers the option but disables
-  **Connect** and says so; it is not silently ignored.
+  **Connect** and says so; it is not silently ignored. A jump host is not offered
+  it at all — a hop authenticates with a password or a private key, like the
+  target.
 - **No keyboard-interactive authentication**, so MFA-protected servers cannot be
   reached yet.
 - **There is no timeout on the pty and shell requests.** A server that accepts
@@ -1701,9 +2222,12 @@ This is the full list. The README's
 **Panes and the terminal**
 
 - **Panes cannot be rearranged by dragging.** A divider drag changes the
-  proportions of an existing split and nothing else — there is no way to move a
-  pane to another position, and a split layout is not remembered across
-  restarts. Every split starts out even.
+  proportions of an existing split and nothing else. A pane can be added below
+  the active one or closed, and that is the whole of it: there is no way to move
+  one to another position.
+- **An ordinary tab's layout is not remembered across restarts**, and every split
+  starts out even. A [dashboard](#dashboards) is the exception — its tab's panes,
+  splits and ratios can be saved into the dashboard and come back with it.
 - <kbd>Ctrl</kbd>+<kbd>T</kbd>, <kbd>Ctrl</kbd>+<kbd>W</kbd> and the
   <kbd>Alt</kbd> pane shortcuts belong to the application, so the remote shell
   never sees them.

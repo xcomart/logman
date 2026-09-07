@@ -43,6 +43,8 @@ tab:
   split_below: Diviser sous l'onglet actuel
   duplicate_right: Diviser à droite avec une nouvelle connexion
   duplicate_below: Diviser en dessous avec une nouvelle connexion
+  save_layout: Enregistrer la disposition dans le tableau de bord
+  add_tail: "Ajouter %{file} — %{connection}"
   duplicate: Dupliquer l'onglet
   close: Fermer l'onglet
   close_others: Fermer les autres onglets
@@ -130,7 +132,9 @@ files:
 empty:
   hint: Appuyez sur %{shortcut} pour vous connecter à un hôte.
   saved_profiles: Profils enregistrés
+  dashboards: Tableaux de bord
   menu_edit: Modifier…
+  menu_tail: "Suivre %{name}"
 
 statusbar:
   no_session: aucune session
@@ -169,6 +173,38 @@ settings:
   keepalive_hint: secondes (0 désactive)
   timeout: Délai de connexion
   timeout_hint: secondes
+  dashboards:
+    title: Tableaux de bord
+    hint: Un tableau de bord suit plusieurs fichiers distants à la fois, chacun via la connexion qui l'atteint, et les ouvre côte à côte dans un seul onglet.
+    none: aucun fichier
+    one: 1 fichier
+    many: "%{count} fichiers"
+    add: Ajouter un tableau de bord
+    remove: Supprimer le tableau de bord
+    name: Nom
+    open_at_startup: Ouvrir au démarrage
+    profile: Connexion
+    path: Fichier
+    add_pane: Ajouter un fichier
+    remove_pane: Supprimer
+    missing_profile: (connexion supprimée)
+    incomplete: Attribuez une connexion à chaque fichier du tableau de bord, ou supprimez le fichier.
+  highlights:
+    title: Surlignage
+    hint: "Une règle colore chaque ligne d'un fichier suivi qui correspond à son motif, et la première règle qui correspond l'emporte. Une couleur est une valeur hexadécimale comme #7f1d1d ou le nom d'un emplacement du jeu de couleurs du terminal — %{colours} — qui suit le jeu utilisé par la session."
+    pattern: Motif
+    scope_match: Correspondance
+    scope_line: Ligne
+    foreground: Texte
+    background: Arrière-plan
+    bold: Gras
+    ignore_case: Ignorer la casse
+    enabled: Activée
+    add: Ajouter une règle
+    remove: Supprimer
+    reset: Rétablir les règles par défaut
+    bad_pattern: "Expression régulière non valide : %{pattern}"
+    bad_colour: "Couleur inconnue : %{colour}"
   manage:
     duplicate: Dupliquer
     edit: Modifier
@@ -312,6 +348,20 @@ connection:
     charset_default: Par défaut
     inherits_value: "hérite de %{value}"
     inherits_lines: "hérite de %{value} lignes"
+  hops:
+    title: Hôtes de rebond
+    none: connexion directe
+    one: 1 hôte de rebond
+    many: "%{count} hôtes de rebond"
+    hint: La session se connecte à chaque hôte de rebond dans l'ordre, et le dernier ouvre la connexion vers l'hôte cible. Le secret saisi ici est conservé dans le trousseau du système.
+    host: Hôte
+    port: Port
+    username: Utilisateur
+    add: Ajouter un hôte de rebond
+    remove: Supprimer
+    incomplete: Complétez ou supprimez l'hôte de rebond incomplet.
+    secret_save_failed: "Le secret de %{host} n'a pas pu être enregistré (%{error})."
+    secret_delete_failed: "Le secret enregistré de l'hôte de rebond supprimé %{host} n'a pas pu être effacé (%{error})."
   tunnels:
     title: Tunnels SSH
     none: aucun port redirigé
@@ -324,6 +374,16 @@ connection:
     add: Ajouter un tunnel
     remove: Supprimer
     incomplete: Complétez ou supprimez la règle de tunnel incomplète.
+  tails:
+    title: Fichiers suivis
+    none: aucun fichier suivi
+    one: 1 fichier suivi
+    many: "%{count} fichiers suivis"
+    hint: Chaque fichier est suivi, comme le fait `tail -f`, dès que la session est ouverte. Indiquez le chemin absolu sur l'hôte distant.
+    add: Ajouter un fichier
+    remove: Supprimer
+    custom_highlights: Surlignage personnalisé
+    incomplete: "Un fichier suivi possède une règle de surlignage que rulogman ne peut pas utiliser : vérifiez son motif et ses couleurs."
 
 session:
   connecting: connexion
@@ -332,6 +392,8 @@ session:
   failed: "%{kind} : %{message}"
   reconnect: Se reconnecter
   restart: Redémarrer
+  hop_secret_missing: "Aucun secret n'est enregistré pour l'hôte de rebond %{hop}. Saisissez-le à nouveau dans les paramètres de cette connexion."
+  hop_agent_unsupported: "L'hôte de rebond %{hop} s'authentifie par agent SSH, et l'authentification par agent SSH n'est pas encore prise en charge."
   overlay:
     connecting: "Connexion à %{host}..."
     disconnected: "Déconnecté de %{host}"

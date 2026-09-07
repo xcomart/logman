@@ -54,8 +54,11 @@ opens a Linux shell standing in the distribution's own filesystem, which the
 files panel beside it browses as such. Give rulogman a path — on the command
 line, or by opening a folder with it from a file manager — and it starts one
 there instead of showing the start screen, a tab per path, with a file taken to
-mean the directory holding it; on Linux it can also stand in as the desktop's
-default terminal, opening in whatever folder it was launched from. See
+mean the directory holding it; on macOS a right-click on a folder in the Finder
+offers *New rulogman Window Here* and *New rulogman Tab Here* under **Services**
+as well; on Linux it can also stand in as the desktop's default terminal,
+opening in whatever folder it was launched from — and running whatever a *Run in
+terminal* launcher, or a `rulogman -e btop`, names after `-e`. See
 [A shell on this computer](docs/user-guide.md#a-shell-on-this-computer).
 
 **Tabs and split panes.** Every session gets a tab, with its own connection and
@@ -69,6 +72,32 @@ it needs. A pane closes itself when its connection ends, while a session that
 [Tabs and sessions](docs/user-guide.md#tabs-and-sessions) and
 [Split panes](docs/user-guide.md#split-panes).
 
+**Follow a log beside the shell.** A profile can carry a list of absolute paths
+on the server — **Tail files** in the connection dialog — and connecting opens
+the shell with one pane per file in the same tab, the shell on top and the files
+stacked below it at equal heights. Each pane is an SSH session of its own
+running `tail -n 200 -F`, so a file that rotates keeps flowing, and a strip
+above it names the path — shortened from the left when the pane is narrow,
+`/v/l/nginx/access.log`, never in the file name itself, with the whole path on
+hover and the connection's name beside it when a tab mixes hosts. Input to a
+tail pane is ignored, so a stray <kbd>Ctrl</kbd>+<kbd>C</kbd> cannot kill the
+tail, while scrollback, selection and copy work as they do anywhere else. Such
+a pane has no files panel and never takes the profile's forwarded ports, and it
+offers **Reconnect** if the connection drops. A single file can also be followed
+on its own, from the connection row's menu on the start screen or a tab's
+right-click menu. See [Followed files](docs/user-guide.md#followed-files).
+
+**Colour in the log.** Every tail pane recolours what it shows against a list
+of rules — a regular expression, and whether the colour lands on the matched
+text alone or on the whole line it was found on — tried top to bottom, first
+match wins. Out of the box a preset picks out five severity levels, `fatal`
+down to `info`, in slots of the terminal colour scheme rather than fixed hex,
+so it stays legible whichever palette the session is running; the settings
+dialog's **Highlighting** section replaces it with rules of your own. A single
+followed file can override the lot from its row in the connection dialog,
+which is how one noisy log gets its own colours, or none. See
+[Highlighting a followed file](docs/user-guide.md#highlighting-a-followed-file).
+
 **Port forwarding saved with the profile.** Each rule listens on a port of this
 computer and forwards it through the session to a host the server can reach, and
 the rules open as soon as the shell is up. The tab holding them says so with a
@@ -76,6 +105,37 @@ mark that names them, and it is only ever one tab: a second session on the same
 profile connects as usual and leaves the ports where they are, rather than
 fighting for them. When that tab goes, the next session on the profile picks
 them up. See [Port forwarding](docs/user-guide.md#port-forwarding).
+
+**Through a bastion.** The **Jump hosts** section of the connection dialog takes
+an ordered chain of hops, each with its own host, port and user, and its own
+password or private key held in the OS credential store. Connecting then dials
+the way `ssh -J` does: every next hop is reached through a `direct-tcpip`
+channel of the one before it, and each hop's host key is verified under its own
+name. When a hop refuses, the error says which one and what it was asked for —
+*jump host bastion:22 refused the connection to web-01:22 — most likely
+AllowTcpForwarding is disabled* — rather than blaming the destination. Shells,
+followed files and dashboard panes on that profile all travel the same chain.
+See [Jump hosts](docs/user-guide.md#jump-hosts).
+
+**Dashboards: every log, one screen, one click.** A dashboard is a named set of
+followed files spanning any number of connections — the name, the rows of
+connection and path, and whether it opens at startup, all edited in the settings
+dialog's **Dashboards** section. Opening one is a click in the start screen's
+**Dashboards** list, or <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd>,
+or `rulogman --dashboard "Morning"` on the command line, which repeats for as
+many as you want open at once, or `open "rulogman://dashboard/Morning"` from
+anything that can open a URL, running or not. The tab takes the dashboard's
+name and lays its panes out as a balanced grid — two side by side, three as two over one, four as
+2×2. Drag the dividers, close what you are not watching, add any connection's
+followed file below the active pane from the tab menu, and **Save layout to
+dashboard** (<kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd>)
+records that pane set and its geometry for the next open; editing the file list
+in settings sets a saved layout aside for the grid rather than losing anything.
+Every connection involved needs its credentials saved, or the connection dialog
+opens on the first one that lacks them. See
+[Dashboards](docs/user-guide.md#dashboards),
+[Arranging and saving the layout](docs/user-guide.md#arranging-and-saving-the-layout)
+and [Opening at startup and from the command line](docs/user-guide.md#opening-at-startup-and-from-the-command-line).
 
 **Settings that belong to one host.** A profile can override the color scheme,
 the font size, the scrollback depth, `TERM` and the character set for its
@@ -362,6 +422,15 @@ a diff against the upstream tree at that revision shows exactly what is carried:
   `org_kde_kwin_blur`, so a blurred background appearance did nothing on KDE
   X11; `update_blur_region` keeps KWin's `_KDE_NET_WM_BLUR_BEHIND_REGION` in
   step with the window.
+- **`Application::on_service_request`.** macOS lets a bundle declare entries
+  under `NSServices` — the ones in the Finder's right-click *Services* submenu —
+  and choosing one wakes the application with the selection on a pasteboard.
+  gpui knows about `application:openURLs:` and nothing about services, and an
+  application cannot add the missing half itself: the provider has to be
+  registered on `NSApplication` before the run loop starts, which is inside
+  `Platform::run`. This is what puts *New rulogman Window Here* and *New
+  rulogman Tab Here* in that submenu. The core carries a defaulted trait method,
+  so the three non-Apple backends are untouched.
 - **macOS 26 blur behind.** Liquid Glass rebuilds the private layer tree under
   an `NSVisualEffectView`, so upstream's effect-view path on macOS 26 (Tahoe)
   and later leaves a window merely translucent, with nothing blurred behind
@@ -414,11 +483,11 @@ and no external server is needed.
 
 | Crate | Responsibility |
 | --- | --- |
-| `rulogman-core` | Profiles, OS keychain, `known_hosts`, config paths. No SSH, no GUI. |
-| `rulogman-ssh` | russh client: authentication, pty, shell, resize, and the SFTP channel behind the files panel. Owns its own thread and Tokio runtime. |
+| `rulogman-core` | Profiles — jump-host chains and followed files among the data they carry — dashboards in a `dashboards.json` of their own, OS keychain, `known_hosts`, config paths. No SSH, no GUI. |
+| `rulogman-ssh` | russh client: authentication, pty, shell, resize, and the SFTP channel behind the files panel. Dials a chain of jump hosts as a fold over the hops and the target, and can run a command in place of the shell, which is what a followed file is. Owns its own thread and Tokio runtime. |
 | `rulogman-pty` | The local shell transport: a unix pty on one side, a Windows ConPTY on the other, behind one API. |
 | `rulogman-term` | `alacritty_terminal` wrapper: byte stream in, styled snapshot out; key encoding, and the transcoding at both edges for a session that is not UTF-8. No GUI. |
-| `rulogman-app` | The gpui binary: views, terminal rendering, session management. The widgets it draws with come from `rugpui`, the editor surface from `rugpui-editor`, and the window chrome, updater and palette editor from `rugpui-shell`. |
+| `rulogman-app` | The gpui binary: views, terminal rendering, session management, the tail pane and the composition of a dashboard tab. The widgets it draws with come from `rugpui`, the editor surface from `rugpui-editor`, and the window chrome, updater and palette editor from `rugpui-shell`. |
 
 Two boundaries are worth knowing about.
 
@@ -438,7 +507,7 @@ The heavy lifting is done by these projects:
 
 | Library | Role |
 | --- | --- |
-| [gpui](https://github.com/zed-industries/zed/tree/main/crates/gpui) | GPU-accelerated UI framework, from the Zed editor (a pinned git revision, partly [vendored and patched](#gpui-comes-from-git-and-four-of-its-crates-are-vendored)) |
+| [gpui](https://github.com/zed-industries/zed/tree/main/crates/gpui) | GPU-accelerated UI framework, from the Zed editor (a pinned git revision, partly [vendored and patched](#gpui-comes-from-git-and-four-of-its-crates-are-vendored-in-rugpui)) |
 | [russh](https://github.com/warp-tech/russh) | Pure-Rust SSH client: transport, authentication, pty and shell channels |
 | [russh-sftp](https://github.com/AspectUnk/russh-sftp) | SFTP client for the remote files panel, on a channel of the same connection |
 | [alacritty_terminal](https://github.com/alacritty/alacritty) | Terminal emulation: grid, VTE parsing, scrollback — and the unix pty behind a local session |
@@ -477,15 +546,17 @@ caption colors), [raw-window-handle](https://github.com/rust-windowing/raw-windo
 The honest headlines, one line each:
 
 - **No SSH agent support and no keyboard-interactive authentication**, so
-  MFA-protected servers cannot be reached yet.
+  MFA-protected servers cannot be reached yet, and every jump host in a chain
+  needs a password or a key of its own.
 - **IME composition is verified only against the Microsoft Korean IME on
   Windows**, and not at all on the X11 and Wayland input methods.
 - **The files panel cannot change permissions or ownership**, and a transfer or
   a delete cannot be cancelled once it has started.
 - **The editor opens text and nothing else**, up to 10 MB, saves without
   atomicity, and notices nothing that changes the file underneath it.
-- **Panes can be resized but not rearranged**, and neither a split layout nor
-  the files panel's width survives a restart.
+- **Panes can be resized but not dragged to rearrange** — only added below the
+  active pane, or closed — and only a dashboard's layout survives a restart,
+  saved on demand; an ordinary tab's split and the files panel's width do not.
 - **Runtime palette changes are ignored**: a program that redefines colors with
   `OSC 4` or `OSC 10`–`11` renders with the static scheme.
 

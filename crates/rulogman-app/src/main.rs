@@ -14,7 +14,11 @@
 //!
 //! A tab is not one session but a tree of panes ([`rugpui_shell::pane`]), each
 //! showing one session. Most tabs hold a single pane; splitting one is how a
-//! tab comes to show several sessions side by side.
+//! tab comes to show several sessions side by side. A pane may also hold a
+//! followed file — a `tail` running over a session of its own, drawn by
+//! [`tail_view`] — and a dashboard tab is a tree of nothing but those, gathered
+//! across as many connections as the dashboard names and restored from the
+//! layout last saved with it.
 //!
 //! The window's own frame is `rugpui-shell`'s too — the title bar it draws when
 //! the platform will not, the caption buttons, the resize grips, the about and
@@ -33,6 +37,13 @@ mod editor_palette;
 mod editor_pane;
 mod file_panel;
 mod files;
+// The highlight rules of `rulogman-core` compiled: the matcher, and the pass
+// that recolours a terminal snapshot with it before the grid is painted.
+mod highlight;
+// The editor for a list of those rules, shared by the settings dialog's global
+// list and the per-file override on a followed-file row of the connection
+// dialog — one component, because a rule is the same thing in both.
+mod highlight_rules;
 mod i18n;
 mod icons;
 // Which languages a file may be coloured as: the widget's own table, the
@@ -47,6 +58,9 @@ mod launch;
 mod scheme_catalog;
 mod session;
 mod settings_dialog;
+// The pane a followed file is read in: a terminal, and a strip above it naming
+// the file — see [`tail_view`] for why the name is worth a strip of its own.
+mod tail_view;
 mod terminal_view;
 mod theme_store;
 mod update;
@@ -71,11 +85,14 @@ use futures::channel::mpsc;
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, DragMoveEvent, ElementId, Entity, EntityId,
     FocusHandle, Focusable, Global, KeyBinding, Menu, MenuItem, MouseButton, MouseDownEvent,
-    MouseUpEvent, Pixels, Point, QuitMode, ScrollHandle, SharedString, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowHandle, WindowOptions, actions,
-    div, img, point, prelude::*, px, size,
+    MouseUpEvent, Pixels, Point, QuitMode, ScrollHandle, ServiceRequest, SharedString,
+    Subscription, TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowHandle,
+    WindowOptions, actions, div, img, point, prelude::*, px, size,
 };
-use rulogman_core::{FilesSettings, SessionProfile, TitlebarStyle};
+use rulogman_core::{
+    Dashboard, DashboardPane, DashboardStore, FilesSettings, LayoutAxis, LayoutNode,
+    SessionProfile, TitlebarStyle,
+};
 use rulogman_ssh::SshAuth;
 use rulogman_term::Charset;
 use uuid::Uuid;
@@ -102,6 +119,7 @@ use session::{Session, SessionStatus};
 #[cfg(windows)]
 use session::LocalFilesystem;
 use settings_dialog::{SettingsDialog, SettingsDialogEvent};
+use tail_view::TailView;
 use terminal_view::{PaneCaps, PaneCapsSource, PaneFocused, ReconnectRequested, TerminalView};
 
 actions!(
@@ -136,6 +154,9 @@ actions!(
         EqualizeHeights,
         /// Show or hide the remote file panel.
         ToggleFilePanel,
+        /// Capture the active dashboard tab's current arrangement back onto the
+        /// dashboard it was opened from. A no-op on any other tab.
+        SaveDashboardLayout,
         /// Open the settings dialog.
         OpenSettings,
         /// Open the about dialog.
@@ -157,11 +178,26 @@ struct SelectTab(
     usize,
 );
 
+/// Open the saved dashboard at the zero-based index carried by the action.
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = rulogman, no_json)]
+struct OpenDashboard(
+    /// Zero-based index of the dashboard to open, into the saved order.
+    usize,
+);
+
 /// Key context the workspace-wide shortcuts are scoped to.
 const KEY_CONTEXT: &str = "Workspace";
 
 /// Number of tabs reachable through the `Ctrl`/`Cmd` + digit shortcuts.
 const QUICK_SELECT_TABS: usize = 9;
+
+/// Number of dashboards reachable through the numbered shortcuts.
+///
+/// The same nine [`QUICK_SELECT_TABS`] offers, and deliberately: the two are
+/// one gesture at two altitudes — pick the *n*th tab, open the *n*th
+/// dashboard — so the count where they stop counting has to be the same.
+const QUICK_OPEN_DASHBOARDS: usize = 9;
 
 /// What a release archive holds that has to end up on disk.
 ///
@@ -440,6 +476,15 @@ enum PaneView {
     Terminal(Entity<TerminalView>),
     /// A file opened out of the file panel.
     Editor(Entity<EditorPane>),
+    /// A remote file being followed, `tail -f` style, over a session of its own.
+    ///
+    /// A session like any other, which is the whole reason it is not an editor:
+    /// it connects, it can drop, it can be reconnected, and it wears a status
+    /// dot in the strip — so it answers [`PaneView::session`] exactly as a
+    /// terminal does, and every rule written against that answer applies to it
+    /// unchanged. What makes it its own arm rather than a terminal is the strip
+    /// above the grid; see [`TailView`].
+    Tail(Entity<TailView>),
 }
 
 impl PaneView {
@@ -458,6 +503,7 @@ impl PaneView {
         match self {
             Self::Terminal(view) => Self::Terminal(view.clone()),
             Self::Editor(pane) => Self::Editor(pane.clone()),
+            Self::Tail(view) => Self::Tail(view.clone()),
         }
     }
 
@@ -466,6 +512,7 @@ impl PaneView {
         match self {
             Self::Terminal(view) => view.entity_id(),
             Self::Editor(pane) => pane.entity_id(),
+            Self::Tail(view) => view.entity_id(),
         }
     }
 
@@ -474,6 +521,9 @@ impl PaneView {
         match self {
             Self::Terminal(view) => view.read(cx).focus_handle(cx),
             Self::Editor(pane) => pane.read(cx).focus_handle(cx),
+            // The grid's own, handed on by the strip above it: a followed file
+            // is read, selected and copied out of exactly as a shell is.
+            Self::Tail(view) => view.read(cx).focus_handle(cx),
         }
     }
 
@@ -487,6 +537,10 @@ impl PaneView {
         match self {
             Self::Terminal(view) => Some(view.read(cx).session().clone()),
             Self::Editor(_) => None,
+            // A followed file *is* its session, unlike an editor: the tab is
+            // named by its title, dotted by its status, closed when it hangs up
+            // and offered a reconnect when it fails, all through this answer.
+            Self::Tail(view) => Some(view.read(cx).session().clone()),
         }
     }
 
@@ -502,6 +556,9 @@ impl PaneView {
         match self {
             Self::Terminal(_) => None,
             Self::Editor(pane) => Some(pane.read(cx).session().clone()),
+            // Nothing to add: this question is asked by the file panel, and a
+            // pane that answers [`PaneView::session`] has already answered it.
+            Self::Tail(_) => None,
         }
     }
 
@@ -514,6 +571,9 @@ impl PaneView {
                 let pane = pane.read(cx);
                 editor_tab_label(pane.name(), &pane.session().read(cx).title())
             }
+            // Its session's title, which is already `file - connection`; see
+            // [`Session::title`], which is where a followed file is named.
+            Self::Tail(view) => view.read(cx).session().read(cx).title(),
         }
     }
 
@@ -522,6 +582,7 @@ impl PaneView {
         match self {
             Self::Terminal(view) => view.clone().into_any_element(),
             Self::Editor(pane) => pane.clone().into_any_element(),
+            Self::Tail(view) => view.clone().into_any_element(),
         }
     }
 }
@@ -658,6 +719,28 @@ fn panel_opens_with(profile: Option<&SessionProfile>, files: &FilesSettings) -> 
     }
 }
 
+/// The pane-tree axis a saved [`LayoutAxis`] restores to.
+///
+/// The two enums are declared to line up one-to-one — `rulogman-core` keeps its
+/// own copy so nothing GUI leaks into the config layer, see [`LayoutAxis`] — so
+/// this is a rename, written out only because there is no shared type to derive
+/// it from. Its inverse is [`layout_axis_of`].
+fn layout_axis(axis: LayoutAxis) -> Axis {
+    match axis {
+        LayoutAxis::Horizontal => Axis::Horizontal,
+        LayoutAxis::Vertical => Axis::Vertical,
+    }
+}
+
+/// The saved [`LayoutAxis`] for a live pane-tree [`Axis`]. The inverse of
+/// [`layout_axis`], for capturing an arrangement back to disk.
+fn layout_axis_of(axis: Axis) -> LayoutAxis {
+    match axis {
+        Axis::Horizontal => LayoutAxis::Horizontal,
+        Axis::Vertical => LayoutAxis::Vertical,
+    }
+}
+
 /// One pane: the view showing a session, plus the wiring that keeps the
 /// workspace in step with it.
 struct PaneLeaf {
@@ -737,6 +820,29 @@ struct SessionTab {
     /// shell — is what the next session is opened from, and a tab that outlived
     /// the choice is not worth a second place to write it down.
     panel_open: bool,
+    /// A name for the tab that outranks whatever its active pane is showing.
+    ///
+    /// `None` on every tab that was opened as a connection or grown by hand,
+    /// and those are right to be named after their active pane: such a tab *is*
+    /// whichever pane the user is looking at, and a split whose halves went to
+    /// two different hosts would otherwise go on claiming to be the one it
+    /// started as.
+    ///
+    /// A dashboard tab is the other kind of thing. It is a named arrangement
+    /// the user made, opened as a whole and closed as a whole, and naming it
+    /// after whichever of its panes last held focus would leave the strip
+    /// saying `error.log - db-01` for a tab called *Deploy watch* — a label
+    /// that changes as the keyboard moves, for a tab that did not.
+    label: Option<SharedString>,
+    /// The dashboard this tab was opened from, if it is a dashboard tab.
+    ///
+    /// The write-target for *Save layout to dashboard*: a tab that carries an
+    /// id is one whose current arrangement can be captured back onto the stored
+    /// [`Dashboard`], and one that does not — a connection or a hand-grown tab —
+    /// has no dashboard to save to. `None` on every tab but the ones
+    /// [`Workspace::open_dashboard`] opens, which is why it rides alongside
+    /// [`Self::label`] and is set the same way.
+    dashboard: Option<Uuid>,
 }
 
 impl SessionTab {
@@ -753,12 +859,27 @@ impl SessionTab {
             active_pane,
             focus_order: vec![active_pane],
             panel_open: true,
+            label: None,
+            dashboard: None,
         }
     }
 
     /// The same tab, opening with the file panel showing or not.
     fn with_panel(mut self, open: bool) -> Self {
         self.panel_open = open;
+        self
+    }
+
+    /// The same tab, carrying a name of its own. See [`SessionTab::label`].
+    fn with_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// The same tab, remembering the dashboard it was opened from. See
+    /// [`SessionTab::dashboard`].
+    fn with_dashboard(mut self, id: Uuid) -> Self {
+        self.dashboard = Some(id);
         self
     }
 
@@ -915,7 +1036,26 @@ impl SessionTab {
             .into_iter()
             .filter_map(|(_, leaf)| match &leaf.view {
                 PaneView::Editor(pane) => Some(pane.clone()),
-                PaneView::Terminal(_) => None,
+                PaneView::Terminal(_) | PaneView::Tail(_) => None,
+            })
+            .collect()
+    }
+
+    /// Every followed file in this tab, one per tail pane.
+    ///
+    /// The third of the same family, and here for the same reason as
+    /// [`Self::editors`]: a highlight rule that changes has to reach the tails
+    /// of the background tabs too, and only a leaf knows where a pane is.
+    /// Separate from [`Self::sessions`] because the rules are held by the
+    /// *pane* — a tail session answers which rules apply, and the pane is what
+    /// compiles them and hands them to its grid.
+    fn tails(&self) -> Vec<Entity<TailView>> {
+        self.panes
+            .leaves()
+            .into_iter()
+            .filter_map(|(_, leaf)| match &leaf.view {
+                PaneView::Tail(pane) => Some(pane.clone()),
+                PaneView::Terminal(_) | PaneView::Editor(_) => None,
             })
             .collect()
     }
@@ -1079,6 +1219,18 @@ struct Workspace {
     /// browsing state of every session itself and shows whichever one the active
     /// pane belongs to.
     panel: Entity<FilePanel>,
+    /// The saved dashboards, as the welcome screen offers them.
+    ///
+    /// A copy rather than a read of the file per frame: the welcome screen asks
+    /// for the list on every frame it draws, and the answer changes only when
+    /// the settings dialog has been applied — which is the one moment this is
+    /// re-read. See [`Workspace::reload_dashboards`].
+    ///
+    /// Held here rather than behind the connection dialog, as the profiles are:
+    /// no dialog of this window owns dashboards — the settings dialog edits its
+    /// own copy and writes the file — so there is no store to borrow, and a
+    /// window that shows them needs one of its own.
+    dashboards: DashboardStore,
     /// The editor pane whose close is waiting to be confirmed, if any.
     ///
     /// Held by [`PaneId`] rather than by tab index and pane: ids are never
@@ -1126,6 +1278,21 @@ struct Workspace {
     /// moved — or gone — by the time a row of the menu is activated, which is
     /// exactly what duplicating and deleting from it do.
     empty_context: Option<(Uuid, Point<Pixels>)>,
+    /// The followed file a connection dialog is standing between the user and.
+    ///
+    /// [`Workspace::open_tail`] connects on the click when the profile's
+    /// credentials are already known, and otherwise has to send the user
+    /// through the form first — at which point the request itself would be
+    /// lost, because what comes back from the dialog is a
+    /// [`ConnectionDialogEvent::Connect`] and nothing else: the very same event
+    /// that opens a shell. This is the memory of what was actually asked for,
+    /// and the profile's id is carried with the path so that a form the user
+    /// then pointed at *another* connection cannot open the first one's log.
+    ///
+    /// Cleared by [`Workspace::close_overlays`], which every other route into
+    /// the dialog passes through, and by the dialog's own dismissal — a request
+    /// nobody finished is a request nobody made.
+    pending_tail: Option<(Uuid, String)>,
     /// Title bar style currently *on the window*.
     ///
     /// Starts as the style the window was created with and is re-set whenever
@@ -1172,7 +1339,24 @@ impl Workspace {
                 |this, dialog, event, window, cx| match event {
                     ConnectionDialogEvent::Connect { profile, auth } => {
                         dialog.update(cx, |dialog, cx| dialog.close(cx));
-                        this.open_session(profile.clone(), auth.clone(), window, cx);
+                        // The dialog says "connect" and nothing more, so what
+                        // the connection is *for* has to be remembered on this
+                        // side: a form opened by [`Workspace::open_tail`]
+                        // finishes that request rather than opening a shell the
+                        // user never asked for. The id has to match — the form
+                        // can be pointed at another connection while it is up,
+                        // and that is a different request, which discards this
+                        // one rather than following the wrong host's log.
+                        match this.pending_tail.take().filter(|(id, _)| *id == profile.id) {
+                            Some((_, path)) => this.open_tail_session(
+                                profile.clone(),
+                                auth.clone(),
+                                path,
+                                window,
+                                cx,
+                            ),
+                            None => this.open_session(profile.clone(), auth.clone(), window, cx),
+                        }
                     }
                     #[cfg(unix)]
                     ConnectionDialogEvent::ConnectLocal => {
@@ -1192,6 +1376,10 @@ impl Workspace {
                     }
                     ConnectionDialogEvent::Dismissed => {
                         dialog.update(cx, |dialog, cx| dialog.close(cx));
+                        // A followed file the form was opened for is dropped
+                        // with the form: the user answered the question by
+                        // walking away from it.
+                        this.pending_tail = None;
                         this.focus_active(window, cx);
                     }
                 },
@@ -1207,6 +1395,11 @@ impl Workspace {
                 // parts that touch live windows and sessions.
                 SettingsDialogEvent::Applied => {
                     this.apply_settings(window, cx);
+                    // The dashboards are edited in that dialog and written by
+                    // it, so this is the moment the window's copy of them stops
+                    // describing the file. Before the refocus and the redraw,
+                    // so the welcome screen's next frame is the new list.
+                    this.reload_dashboards();
                     // The settings are one answer for the application, not for
                     // the window they were saved in: every other window has to
                     // come back in the new theme and the new language too.
@@ -1293,6 +1486,20 @@ impl Workspace {
         let button_layout = window.observe_button_layout_changed(move |_window, cx| {
             this.update(cx, |_, cx| cx.notify()).ok();
         });
+
+        // Read once, here, for the same reason the profile store is read once
+        // when the connection dialog is built — and skipped in a test build for
+        // the same reason too: `cfg!(test)` compiled into `rulogman-core` is
+        // that crate's build, so only this crate can keep a test from reading
+        // the config directory of whoever is running it.
+        let dashboards = if cfg!(test) {
+            DashboardStore::default()
+        } else {
+            DashboardStore::load().unwrap_or_else(|err| {
+                log::warn!("starting with no dashboards: {err:#}");
+                DashboardStore::default()
+            })
+        };
 
         let panel = cx.new(FilePanel::new);
         // The panel reads the file and decides every refusal itself; what
@@ -1391,6 +1598,7 @@ impl Workspace {
             about,
             update,
             panel,
+            dashboards,
             close_confirm: None,
             sudo_prompt: None,
             menu_open: false,
@@ -1399,6 +1607,7 @@ impl Workspace {
             language_menu: None,
             charset_menu: None,
             empty_context: None,
+            pending_tail: None,
             titlebar,
             #[cfg(windows)]
             wsl_distros: Vec::new(),
@@ -1420,6 +1629,11 @@ impl Workspace {
     /// Every open file the workspace holds, across all tabs and panes.
     fn editors(&self) -> Vec<Entity<EditorPane>> {
         self.tabs.iter().flat_map(SessionTab::editors).collect()
+    }
+
+    /// Every followed file the workspace holds, across all tabs and panes.
+    fn tails(&self) -> Vec<Entity<TailView>> {
+        self.tabs.iter().flat_map(SessionTab::tails).collect()
     }
 
     /// Whether any session other than `except`, opened from profile `id`, is
@@ -1573,9 +1787,23 @@ impl Workspace {
         for editor in self.editors() {
             editor.update(cx, |editor, cx| editor.apply_settings(cx));
         }
+        // And every followed file, which is the third kind of pane and the only
+        // one carrying highlight rules. Nothing about the scheme is baked in
+        // here — a rule naming a slot is resolved against the palette of the
+        // frame it is painted on — so this is only ever about the rule list
+        // itself having changed.
+        for tail in self.tails() {
+            tail.update(cx, |tail, cx| tail.refresh_highlights(cx));
+        }
     }
 
     /// Opens a session for `profile` and makes its tab active.
+    ///
+    /// A profile that also names files to follow — [`SessionProfile::tails`] —
+    /// gets more than the shell: see [`Workspace::open_session_with_tails`],
+    /// which this defers to so that a profile with nothing to follow keeps
+    /// taking the plain, single-pane route through [`Workspace::adopt_session`]
+    /// unchanged.
     fn open_session(
         &mut self,
         profile: SessionProfile,
@@ -1589,8 +1817,401 @@ impl Workspace {
         // one must not ask for them.
         let suppressed = self.tunnels_held_elsewhere(profile.id, None, window, cx);
         let panel_open = Self::panel_opens_for(Some(&profile), cx);
-        let session = cx.new(|cx| Session::new(profile, auth, suppressed, cx));
-        self.adopt_session(session, panel_open, window, cx);
+        if profile.tails.is_empty() {
+            let session = cx.new(|cx| Session::new(profile, auth, suppressed, cx));
+            self.adopt_session(session, panel_open, window, cx);
+            return;
+        }
+        self.open_session_with_tails(profile, auth, suppressed, panel_open, window, cx);
+    }
+
+    /// [`Workspace::open_session`] for a profile that also names files to
+    /// follow: one tab holding the shell *and* one tail pane per rule,
+    /// stacked below it in the rules' own order, rather than the tails each
+    /// getting a tab of their own the way [`Workspace::open_tail`] opens one
+    /// on request.
+    ///
+    /// Builds every pane itself rather than delegating to
+    /// [`Workspace::adopt_session`], because that call is shaped for exactly
+    /// one pane and is left alone for the plain sessions — remote and local —
+    /// that still want it untouched. The actual arrangement of the panes is
+    /// [`Workspace::compose_tailed_tab`], kept separate so it can be tested
+    /// without a transport.
+    ///
+    /// Tunnels are suppressed unconditionally on every tail session, exactly
+    /// as [`Workspace::open_tail_session`] suppresses them: a profile's local
+    /// ports belong to the one session the user is typing into, not to a pane
+    /// that only reads a log alongside it.
+    fn open_session_with_tails(
+        &mut self,
+        profile: SessionProfile,
+        auth: SshAuth,
+        suppressed: bool,
+        panel_open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let caps = Self::pane_caps_source(cx);
+        let session = cx.new(|cx| Session::new(profile.clone(), auth.clone(), suppressed, cx));
+        let view = cx.new(|cx| TerminalView::new(session.clone(), caps.clone(), window, cx));
+        let shell_leaf = self.new_pane(view, session, window, cx);
+
+        let mut tail_leaves = Vec::with_capacity(profile.tails.len());
+        for rule in &profile.tails {
+            let tail_session = cx.new(|cx| {
+                Session::new_tail(profile.clone(), auth.clone(), rule.path.clone(), true, cx)
+            });
+            let terminal =
+                cx.new(|cx| TerminalView::new(tail_session.clone(), caps.clone(), window, cx));
+            let tail_view = cx.new(|cx| {
+                TailView::new(
+                    terminal,
+                    tail_session.clone(),
+                    rule.path.clone(),
+                    // Every pane of this tab is on the one host the shell
+                    // above them is on, so the name would be the same answer
+                    // repeated: the strip carries the path alone.
+                    SharedString::default(),
+                    cx,
+                )
+            });
+            tail_leaves.push(self.new_tail_pane(tail_view, tail_session, window, cx));
+        }
+
+        let tab = Self::compose_tailed_tab(shell_leaf, tail_leaves, panel_open);
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.reveal_active_tab();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Arranges a shell pane and its tail panes into one tab: the shell on
+    /// top, the tails stacked below it in the order they are given, all rows
+    /// the same height.
+    ///
+    /// Split out of [`Workspace::open_session_with_tails`] so it can be
+    /// exercised on leaves built from dormant sessions — see
+    /// `workspace_tests` — rather than only against a real connection: what
+    /// this does is arrange leaves that already exist, not decide what they
+    /// hold.
+    ///
+    /// Each split targets the pane the *previous* split returned — the
+    /// shell's own id for the first tail — rather than always the shell, so
+    /// each new tail lands below the one before it and the stack reads top to
+    /// bottom in the rules' own order instead of growing upward from the
+    /// shell in reverse. The shell pane is left both the active pane and the
+    /// whole of [`SessionTab::focus_order`]: it is what the user asked to
+    /// connect to, and a tail pane nobody has looked at yet has nothing to
+    /// hand the keyboard back to if it were made a candidate.
+    fn compose_tailed_tab(
+        shell_leaf: PaneLeaf,
+        tail_leaves: Vec<PaneLeaf>,
+        panel_open: bool,
+    ) -> SessionTab {
+        let mut tab = SessionTab::single(shell_leaf).with_panel(panel_open);
+        let mut target = tab.panes.first_leaf().0;
+        for leaf in tail_leaves {
+            match tab.panes.split(target, Axis::Vertical, leaf) {
+                Some(pane) => target = pane,
+                None => {
+                    // `target` is either the shell leaf `SessionTab::single`
+                    // just built the tree around, or a pane id this very loop
+                    // got back from `split` a moment ago, so this is
+                    // unreachable; logged rather than ignored because
+                    // reaching it would mean a live tail session has been
+                    // dropped on the floor. Same stance as
+                    // `duplicate_split`'s identical arm.
+                    log::error!(
+                        "the pane to split for a tail rule has vanished; the tail session was dropped"
+                    );
+                }
+            }
+        }
+        tab.panes.equalize(Axis::Vertical);
+        tab
+    }
+
+    /// Arranges `leaves` into one tab as a balanced grid, filled row by row in
+    /// the order they are given.
+    ///
+    /// Balanced meaning as square as the count allows: `ceil(sqrt(n))` columns
+    /// and as many rows as that needs, so eight panes land four-by-two rather
+    /// than in a column eight high that gives each log three lines. The last
+    /// row is the short one, which is what filling row-major leaves over.
+    ///
+    /// The tree is built rows first and cells second, and it has to be that
+    /// way round: a split is aimed at *a pane*, so once a row has been divided
+    /// into cells there is no longer any pane that stands for the whole row to
+    /// aim the next row's split at. So the founding pane is split downward
+    /// `rows - 1` times — each split aimed at the row above's leading pane, so
+    /// the bands come out top to bottom rather than growing upward — and only
+    /// then is each band divided rightward, each cell aimed at the one placed
+    /// before it. Both passes therefore lay leaves down in exactly the order
+    /// they arrived, which is what makes the grid readable as the list the
+    /// dashboard was written as.
+    ///
+    /// Equalising along both axes afterwards is what makes it a grid rather
+    /// than a nest of halves: [`PaneTree::equalize`] shares an area out by how
+    /// many panes each side spans, so a chain of three stacked bands comes out
+    /// in thirds instead of a half and two quarters.
+    ///
+    /// The first leaf keeps the active pane and the whole of
+    /// [`SessionTab::focus_order`], as it does in
+    /// [`Workspace::compose_tailed_tab`]: it is the top-left pane, which is
+    /// where a reader starts, and no other pane has been looked at yet.
+    ///
+    /// Associated rather than a method, and taking leaves that already exist,
+    /// so the arrangement can be exercised on dormant sessions without a
+    /// transport — see `workspace_tests`.
+    ///
+    /// # Panics
+    ///
+    /// If `leaves` is empty. A tab has to have a pane, and the one caller
+    /// returns before this on a dashboard that resolved to none.
+    fn compose_dashboard_tab(leaves: Vec<PaneLeaf>, panel_open: bool) -> SessionTab {
+        let count = leaves.len();
+        let cols = (count as f64).sqrt().ceil() as usize;
+
+        // The rows, as leaves, before any of them is a pane: chunked by hand
+        // rather than with `chunks`, which wants a slice of something `Clone`
+        // and a `PaneLeaf` is neither.
+        let mut bands: Vec<Vec<PaneLeaf>> = Vec::new();
+        for leaf in leaves {
+            match bands.last_mut() {
+                Some(band) if band.len() < cols => band.push(leaf),
+                _ => bands.push(vec![leaf]),
+            }
+        }
+
+        let mut bands = bands.into_iter();
+        let mut first_band = bands
+            .next()
+            .expect("a dashboard tab is composed from at least one pane");
+        let mut tab = SessionTab::single(first_band.remove(0)).with_panel(panel_open);
+
+        // Pass one: the bands. `heads` is the leading pane of each row and
+        // `rests` what still has to go beside it, kept in step so that a split
+        // that could not be made drops its whole row rather than silently
+        // hanging its cells off the row above.
+        let mut heads = vec![tab.panes.first_leaf().0];
+        let mut rests = vec![first_band];
+        for mut band in bands {
+            let previous = heads[heads.len() - 1];
+            match tab.panes.split(previous, Axis::Vertical, band.remove(0)) {
+                Some(pane) => {
+                    heads.push(pane);
+                    rests.push(band);
+                }
+                // `previous` is either the pane `SessionTab::single` founded
+                // the tree on or one this very loop was handed by `split`, so
+                // this cannot happen; logged rather than ignored because
+                // reaching it means a row of live tail sessions has been
+                // dropped on the floor. Same stance as `compose_tailed_tab`.
+                None => log::error!(
+                    "the pane to split for a dashboard row has vanished; a row of tail sessions was dropped"
+                ),
+            }
+        }
+
+        // Pass two: the cells of each band, left to right.
+        for (head, rest) in heads.into_iter().zip(rests) {
+            let mut target = head;
+            for leaf in rest {
+                match tab.panes.split(target, Axis::Horizontal, leaf) {
+                    Some(pane) => target = pane,
+                    None => log::error!(
+                        "the pane to split for a dashboard cell has vanished; the tail session was dropped"
+                    ),
+                }
+            }
+        }
+
+        tab.panes.equalize(Axis::Vertical);
+        tab.panes.equalize(Axis::Horizontal);
+        tab
+    }
+
+    /// Arranges `leaves` into a tab following the saved geometry `layout`,
+    /// divider positions and all, rather than the fresh grid
+    /// [`Workspace::compose_dashboard_tab`] lays down.
+    ///
+    /// `leaves` are in [`Dashboard::panes`] order and a [`LayoutNode::Leaf`]
+    /// names its pane by index into that same order, so leaf `pane` is
+    /// `leaves[pane]`. The caller only reaches here with a `layout` that
+    /// [`Dashboard::valid_layout`] has already confirmed is a permutation of
+    /// `0..leaves.len()`, which is what lets every leaf be placed exactly once
+    /// and read back below without a missing or repeated index.
+    ///
+    /// A geometry that turns out not to match after all — which should be
+    /// impossible past `valid_layout` — is not worth a broken tab: it is logged
+    /// and the grid takes over, so a bug here degrades to the arrangement the
+    /// user would have got before layouts existed.
+    ///
+    /// Windowless-testable like the other composers: it builds the tree and
+    /// nothing that needs a window.
+    fn compose_dashboard_layout(
+        leaves: Vec<PaneLeaf>,
+        layout: &LayoutNode,
+        panel_open: bool,
+    ) -> SessionTab {
+        /// The index of the leftmost pane of `node` — the one that ends up
+        /// top-left of the space `node` fills, and the leaf every enclosing
+        /// split shares as its own first child's head.
+        fn head(node: &LayoutNode) -> usize {
+            let mut node = node;
+            loop {
+                match node {
+                    LayoutNode::Leaf { pane } => return *pane,
+                    LayoutNode::Split { first, .. } => node = first,
+                }
+            }
+        }
+
+        /// Whether the leaves of `node` are exactly `0..count`, each once. The
+        /// same permutation [`Dashboard::valid_layout`] enforces, re-checked
+        /// here against the leaves actually handed over so a build never indexes
+        /// out of range or drops a pane on a caller that skipped the check.
+        fn covers(node: &LayoutNode, count: usize) -> bool {
+            fn walk(node: &LayoutNode, seen: &mut [bool], placed: &mut usize) -> bool {
+                match node {
+                    LayoutNode::Leaf { pane } => match seen.get_mut(*pane) {
+                        Some(slot) if !*slot => {
+                            *slot = true;
+                            *placed += 1;
+                            true
+                        }
+                        _ => false,
+                    },
+                    LayoutNode::Split { first, second, .. } => {
+                        walk(first, seen, placed) && walk(second, seen, placed)
+                    }
+                }
+            }
+            let mut seen = vec![false; count];
+            let mut placed = 0;
+            walk(node, &mut seen, &mut placed) && placed == count
+        }
+
+        /// Grows the placeholder leaf `anchor` into the arrangement `node`.
+        ///
+        /// [`PaneTree`] can only ever attach an incoming subtree as the *second*
+        /// child of a split whose first child is a single existing leaf, so an
+        /// arbitrary tree is built by expanding in place: the split is made
+        /// while its first child is still the lone `anchor`, then each child is
+        /// grown into the leaf it now sits on. The invariant that makes this
+        /// consume every pane exactly once is that `anchor` already holds the
+        /// leaf `head(node)` on entry — seeded once at the root, and re-seeded
+        /// for each split's second child from the pane its right subtree leads
+        /// with.
+        fn expand(
+            panes: &mut PaneTree<PaneLeaf>,
+            anchor: PaneId,
+            node: &LayoutNode,
+            slots: &mut [Option<PaneLeaf>],
+        ) -> bool {
+            let LayoutNode::Split {
+                axis,
+                first,
+                second,
+                ..
+            } = node
+            else {
+                // A leaf: `anchor` was seeded with this pane already, so the
+                // arrangement here is complete.
+                return true;
+            };
+            let Some(second_leaf) = slots.get_mut(head(second)).and_then(Option::take) else {
+                log::error!("a dashboard layout named a pane out of range or twice");
+                return false;
+            };
+            let axis = layout_axis(*axis);
+            let Some(new_id) = panes.split(anchor, axis, second_leaf) else {
+                log::error!("the pane to grow a dashboard layout onto has vanished");
+                return false;
+            };
+            // The first child stays on `anchor`, which still holds `head(first)`
+            // — the same pane as `head(node)`; the second grows onto the leaf
+            // just seeded with `head(second)`.
+            expand(panes, anchor, first, slots) && expand(panes, new_id, second, slots)
+        }
+
+        /// Pairs each split of `spec` with the live split that was built from it
+        /// and records the ratio to restore. The two trees have the same shape
+        /// by construction, so the walk stays in lockstep; a divergence that
+        /// should be impossible is logged and abandons the ratios rather than
+        /// guessing.
+        fn ratios(
+            spec: &LayoutNode,
+            live: &PaneNode<PaneLeaf>,
+            out: &mut Vec<(SplitId, f32)>,
+        ) -> bool {
+            match (spec, live) {
+                (LayoutNode::Leaf { .. }, PaneNode::Leaf { .. }) => true,
+                (
+                    LayoutNode::Split {
+                        ratio,
+                        first,
+                        second,
+                        ..
+                    },
+                    PaneNode::Split {
+                        id,
+                        first: live_first,
+                        second: live_second,
+                        ..
+                    },
+                ) => {
+                    out.push((*id, *ratio));
+                    ratios(first, live_first, out) && ratios(second, live_second, out)
+                }
+                _ => {
+                    log::error!("a dashboard layout diverged from the tree it built");
+                    false
+                }
+            }
+        }
+
+        let count = leaves.len();
+        if !covers(layout, count) {
+            log::error!(
+                "a dashboard layout does not match its panes; falling back to a grid of {count}"
+            );
+            return Self::compose_dashboard_tab(leaves, panel_open);
+        }
+
+        // Consumed by index, since a leaf names its pane by position and the
+        // order is not the tree's own.
+        let mut slots: Vec<Option<PaneLeaf>> = leaves.into_iter().map(Some).collect();
+        // Seed the root with its leftmost pane; `expand` re-seeds each split's
+        // second child in turn, so every pane is placed exactly once.
+        let Some(root_leaf) = slots.get_mut(head(layout)).and_then(Option::take) else {
+            // `covers` just proved the index is in range, so this cannot happen.
+            log::error!("a dashboard layout lost its first pane between checks");
+            // Nothing left to fall back with — the leaves are half-taken — so
+            // rebuild the survivors into a grid rather than panic.
+            let survivors: Vec<PaneLeaf> = slots.into_iter().flatten().collect();
+            return Self::compose_dashboard_tab(survivors, panel_open);
+        };
+        let mut tab = SessionTab::single(root_leaf).with_panel(panel_open);
+        let anchor = tab.panes.first_leaf().0;
+        if !expand(&mut tab.panes, anchor, layout, &mut slots) {
+            // Half the leaves are already in the tree, so the grid is no longer
+            // an option; the tab keeps the shape built so far, which is still a
+            // usable arrangement of the panes that made it in.
+            log::error!("a dashboard layout could not be fully built; showing what was arranged");
+            return tab;
+        }
+
+        // A second pass, because `split` mints its dividers at an even ratio and
+        // the ids to move them are only knowable once the tree exists.
+        let mut wanted = Vec::new();
+        if ratios(layout, tab.panes.root(), &mut wanted) {
+            for (id, ratio) in wanted {
+                tab.panes.set_ratio(id, ratio);
+            }
+        }
+        tab
     }
 
     /// [`panel_opens_with`] asked against the settings this run is on.
@@ -1641,6 +2262,46 @@ impl Workspace {
         self.adopt_session(session, panel_open, window, cx);
     }
 
+    /// Opens a tab running `command` on this machine in `cwd`, and makes it
+    /// active.
+    ///
+    /// What `rulogman -e <command…>` asks for, which is what a desktop entry
+    /// marked *Run in terminal* becomes once KDE has appended the flag — see
+    /// [`launch::split_launch_args`]. Named apart from the Windows
+    /// [`Workspace::open_local_command`] rather than sharing it: that one picks
+    /// between the several shells this platform has and takes a `filesystem` to
+    /// say which tree the shell stands in, and neither question exists here.
+    ///
+    /// The tab is labelled with the program's base name — `btop`, not
+    /// `/usr/bin/btop --utf-force` — because a tab strip has room for a name
+    /// and not for a command line, and because the program is what the user
+    /// asked for. Whatever title the program sets replaces it, as for any other
+    /// local session.
+    #[cfg(unix)]
+    fn open_local_command_at(
+        &mut self,
+        command: Vec<String>,
+        cwd: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The parser never produces one, but the type can hold one and a
+        // program-less command line has nothing to start.
+        let Some(program) = command.first() else {
+            log::warn!("ignoring a launch command that names no program");
+            return;
+        };
+        let label = SharedString::from(std::path::Path::new(program).file_name().map_or_else(
+            || program.clone(),
+            |name| name.to_string_lossy().into_owned(),
+        ));
+
+        log::info!("opening a local session running {}", command.join(" "));
+        let session = cx.new(|cx| Session::new_local_command_at(label, command, cwd, cx));
+        let panel_open = Self::panel_opens_for(None, cx);
+        self.adopt_session(session, panel_open, window, cx);
+    }
+
     /// Opens a shell on this machine standing in `dir`, and makes its tab
     /// active.
     ///
@@ -1671,6 +2332,17 @@ impl Workspace {
         };
         let panel_open = Self::panel_opens_for(None, cx);
         self.adopt_session(session, panel_open, window, cx);
+    }
+
+    /// Whether this workspace is showing the start screen rather than a
+    /// session.
+    ///
+    /// Asked from outside the window, which is why it exists at all: the tabs
+    /// are this type's own business and every other question about them is
+    /// answered in here. The one caller is [`open_start_dirs_in_new_window`],
+    /// looking for a window it may fill instead of opening another beside it.
+    fn has_no_tabs(&self) -> bool {
+        self.tabs.is_empty()
     }
 
     /// Gives a freshly built session a view, a pane and a tab of its own, and
@@ -1796,6 +2468,57 @@ impl Workspace {
             // A file has no connection to offer, so there is no *Reconnect*
             // button on it to carry anywhere.
             _reconnect: None,
+        }
+    }
+
+    /// Wires a freshly created tail pane up as a pane.
+    ///
+    /// [`Workspace::new_pane`] with one entity swapped, and deliberately no
+    /// more than that: a followed file is a connection, so it wants every rule
+    /// a terminal pane gets — the pane retires when the session hangs up, the
+    /// strip repaints on every change to it, and the *Reconnect* button on its
+    /// overlay reaches the workspace that can say whether the profile's
+    /// forwardings are free. The events are the grid's own, re-emitted by
+    /// [`TailView`] under the entity the workspace knows the pane by.
+    fn new_tail_pane(
+        &mut self,
+        view: Entity<TailView>,
+        session: Entity<Session>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PaneLeaf {
+        let observer = cx.observe_in(&session, window, |this, session, window, cx| {
+            if matches!(
+                session.read(cx).status(),
+                SessionStatus::Disconnected { .. }
+            ) {
+                this.close_pane_for_session(session.entity_id(), window, cx);
+            }
+            cx.notify();
+        });
+        let handle = view.read(cx).focus_handle(cx);
+        let id = view.entity_id();
+        let clicked = cx.subscribe(&view, |this, view, _: &PaneFocused, cx| {
+            this.on_pane_focused(view.entity_id(), cx);
+        });
+        let reconnect = cx.subscribe_in(
+            &view,
+            window,
+            |this, view, _: &ReconnectRequested, window, cx| {
+                let session = view.read(cx).session().clone();
+                this.reconnect_session(&session, window, cx);
+            },
+        );
+        let focus = cx.on_focus(&handle, window, move |this, _window, cx| {
+            this.on_pane_focused(id, cx);
+        });
+
+        PaneLeaf {
+            view: PaneView::Tail(view),
+            _observer: Some(observer),
+            _clicked: clicked,
+            _focus: focus,
+            _reconnect: Some(reconnect),
         }
     }
 
@@ -2011,7 +2734,22 @@ impl Workspace {
         let session = session.update(cx, |session, cx| session.duplicate(suppressed, cx));
         let caps = Self::pane_caps_source(cx);
         let view = cx.new(|cx| TerminalView::new(session.clone(), caps, window, cx));
-        let leaf = self.new_pane(view, session, window, cx);
+        // A duplicate of a followed file follows that same file — see
+        // [`Session::duplicate`] — so it belongs in the pane a followed file
+        // belongs in, strip and all, rather than in a bare grid that could not
+        // say which file it was showing.
+        let leaf = match session.read(cx).tail_path().map(str::to_owned) {
+            Some(path) => {
+                // The duplicate opens in a tab of its own, so — like every
+                // other pane that is the only one in its tab — it needs no
+                // name to be told apart by.
+                let tail = cx.new(|cx| {
+                    TailView::new(view, session.clone(), path, SharedString::default(), cx)
+                });
+                self.new_tail_pane(tail, session, window, cx)
+            }
+            None => self.new_pane(view, session, window, cx),
+        };
 
         let at = index + 1;
         self.tabs
@@ -2440,6 +3178,14 @@ impl Workspace {
                     self.new_pane(view, session, window, cx)
                 }
                 PaneView::Editor(pane) => self.new_editor_pane(pane, window, cx),
+                // The same two steps as a terminal, one entity further in: the
+                // grid is what holds the window-bound subscriptions, and the
+                // strip above it holds nothing that a move invalidates.
+                PaneView::Tail(view) => {
+                    let session = view.read(cx).session().clone();
+                    view.update(cx, |view, cx| view.rebind(caps.clone(), window, cx));
+                    self.new_tail_pane(view, session, window, cx)
+                }
             };
             if let Some(slot) = tab.panes.get_mut(id) {
                 *slot = rewired;
@@ -3044,6 +3790,11 @@ impl Workspace {
         self.language_menu = None;
         self.charset_menu = None;
         self.empty_context = None;
+        // Anything that opens an overlay is a fresh intention, and a followed
+        // file nobody got round to is stale by the time the next one arrives —
+        // see [`Workspace::pending_tail`]. Set again, by `open_tail`, *after*
+        // this call.
+        self.pending_tail = None;
         // Cancelled rather than parked. The safe answer to "close it and lose
         // the changes?" is no, and a user who has just reached for a different
         // command has plainly stopped answering this one; leaving it up would
@@ -3114,6 +3865,461 @@ impl Workspace {
         self.dialog
             .update(cx, |dialog, cx| dialog.open_profile(id, cx));
         cx.notify();
+    }
+
+    /// The saved profile `id`, as the store has it right now.
+    ///
+    /// Through the connection dialog because that is where the store lives —
+    /// see [`Workspace::duplicate_profile`] for why there is exactly one — and
+    /// by value because that is what the dialog hands out: the caller is
+    /// usually about to put the profile in a closure that outlives the frame.
+    fn profile(&self, id: Uuid, cx: &App) -> Option<SessionProfile> {
+        self.dialog
+            .read(cx)
+            .profiles()
+            .into_iter()
+            .find(|profile| profile.id == id)
+    }
+
+    /// Opens `path` on `profile` as a followed file, in a tab of its own.
+    ///
+    /// [`Workspace::open_profile`] for the other thing a saved profile can be
+    /// asked for, and it makes the same two decisions in the same order: a
+    /// profile that carries everything the transport needs follows the file on
+    /// the click, and one that does not gets the pre-filled form first. The
+    /// difference is on the far side of that form — the dialog can only say
+    /// *connect*, so the request is put down in [`Workspace::pending_tail`] and
+    /// picked up again when the credentials come back.
+    fn open_tail(
+        &mut self,
+        profile: &SessionProfile,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_overlays(cx);
+        if let Some(auth) = connection::saved_credentials(profile) {
+            self.open_tail_session(profile.clone(), auth, path, window, cx);
+            return;
+        }
+        // After `close_overlays`, which clears this very field: the request is
+        // being made now, and what it clears is whatever request was abandoned
+        // before it.
+        self.pending_tail = Some((profile.id, path));
+        let id = profile.id;
+        self.dialog
+            .update(cx, |dialog, cx| dialog.open_profile(id, cx));
+        cx.notify();
+    }
+
+    /// Follows `path` on `profile` with `auth`, in a tab right after the active
+    /// one.
+    ///
+    /// The tab lands beside the tab it was asked for from, exactly as an opened
+    /// file does and for the same reason — see [`Workspace::open_editor`],
+    /// whose insertion this mirrors — and it opens with the file panel shut
+    /// whatever the profile says about panels: there is no shell on the other
+    /// end to browse a filesystem beside, and [`Session::files`] answers
+    /// nothing for such a session anyway.
+    ///
+    /// The forwardings are suppressed unconditionally. A profile's local ports
+    /// belong to one session at a time, and the one that should hold them is
+    /// the shell the user works in — not a pane that opened to read a log and
+    /// would take them from it, or fail to bind them and say so in yellow over
+    /// the first screen of the file.
+    fn open_tail_session(
+        &mut self,
+        profile: SessionProfile,
+        auth: SshAuth,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        log::info!("following {path} on {}", profile.label());
+        let caps = Self::pane_caps_source(cx);
+        let session = cx.new(|cx| Session::new_tail(profile, auth, path.clone(), true, cx));
+        let terminal = cx.new(|cx| TerminalView::new(session.clone(), caps, window, cx));
+        // Alone in its tab, with nothing to be told apart from.
+        let view = cx
+            .new(|cx| TailView::new(terminal, session.clone(), path, SharedString::default(), cx));
+        let leaf = self.new_tail_pane(view, session, window, cx);
+
+        let at = if self.tabs.is_empty() {
+            0
+        } else {
+            self.active + 1
+        };
+        self.tabs
+            .insert(at, SessionTab::single(leaf).with_panel(false));
+        self.active = at;
+        self.reveal_active_tab();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Follows `path` on the connection `profile_id` in a new pane *below* the
+    /// active pane of the tab at `tab_index`.
+    ///
+    /// [`Workspace::open_tail`] opens a followed file in a tab of its own; this
+    /// opens one in a tab that already exists, which is the difference between
+    /// looking at a log and building an arrangement of them. It is what makes a
+    /// dashboard tab something the user can compose by hand: add a pane, drag
+    /// the divider, add another — and then *Save layout to dashboard* writes
+    /// exactly what is on screen back to the store. Nothing else in the
+    /// application can grow a dashboard tab a pane, so without this the only way
+    /// to change what a dashboard holds is the settings dialog's list.
+    ///
+    /// Below rather than beside, because a log is a wide thing: two half-width
+    /// panes each wrap their lines twice, while two half-height ones each show
+    /// half as many whole lines. Vertical is the axis the pane count can grow
+    /// along without the content becoming unreadable, which is also why the
+    /// default grid [`Workspace::compose_dashboard_tab`] lays down stacks rows.
+    ///
+    /// The focus is left exactly where it was. The user is adding a pane to
+    /// something they are reading, not switching to it, and a followed file has
+    /// no input to take anyway.
+    ///
+    /// A connection with nothing saved gets its form put up and nothing else,
+    /// the same one-more-click answer [`Workspace::open_dashboard`] gives and
+    /// for the same reason: the dialog can only say *connect*, so it cannot
+    /// come back to a pane it was never told about. Unlike
+    /// [`Workspace::open_tail`], no request is parked in
+    /// [`Workspace::pending_tail`] — that field opens a *tab*, and resuming
+    /// through it would put the file somewhere other than the tab that was
+    /// asked about, which is worse than not resuming at all.
+    fn add_tail_to_tab(
+        &mut self,
+        tab_index: usize,
+        profile_id: Uuid,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Also clears any parked `pending_tail`, which this call deliberately
+        // does not set again; see the doc comment.
+        self.close_overlays(cx);
+
+        let Some(profile) = self.profile(profile_id, cx) else {
+            log::warn!("the connection {path} would be followed over no longer exists");
+            return;
+        };
+        let Some(auth) = connection::saved_credentials(&profile) else {
+            log::info!(
+                "{} is waiting on saved credentials before {path} can be added",
+                profile.name
+            );
+            self.dialog
+                .update(cx, |dialog, cx| dialog.open_profile(profile_id, cx));
+            cx.notify();
+            return;
+        };
+        let Some(target) = self.tabs.get(tab_index).map(SessionTab::active_pane) else {
+            // The menu and the tab it speaks for are a frame apart, so the tab
+            // can have closed since the row was drawn.
+            return;
+        };
+        log::info!("adding {path} on {} to a tab", profile.label());
+
+        // Built in the order [`Workspace::open_dashboard`] builds a pane in,
+        // and with the same two decisions: the connection's name rides along,
+        // because a tab grown this way may well mix hosts and two `access.log`s
+        // have to be tellable apart; and the profile's forwardings are
+        // suppressed, because a pane that only reads a log must not take a
+        // profile's local ports from the shell the user works in.
+        let connection = SharedString::from(profile.name.clone());
+        let caps = Self::pane_caps_source(cx);
+        let session = cx.new(|cx| Session::new_tail(profile, auth, path.clone(), true, cx));
+        let terminal = cx.new(|cx| TerminalView::new(session.clone(), caps, window, cx));
+        let view = cx.new(|cx| TailView::new(terminal, session.clone(), path, connection, cx));
+        let leaf = self.new_tail_pane(view, session, window, cx);
+
+        let tab = &mut self.tabs[tab_index];
+        if tab.panes.split(target, Axis::Vertical, leaf).is_none() {
+            // `target` came out of this very tab a moment ago, so this is
+            // unreachable; logged rather than ignored because reaching it would
+            // mean a live session has been dropped on the floor.
+            log::error!("the pane to split has vanished; the followed file was dropped");
+            return;
+        }
+        cx.notify();
+    }
+
+    /// Re-reads the saved dashboards from disk.
+    ///
+    /// A failure keeps the list the window already has, exactly as
+    /// `ConnectionDialog::reload_store` keeps the profiles it already has: the
+    /// alternative is emptying the welcome screen because a write was
+    /// interrupted, which loses the user a click and tells them nothing.
+    fn reload_dashboards(&mut self) {
+        match DashboardStore::load() {
+            Ok(store) => self.dashboards = store,
+            Err(err) => log::warn!("keeping the dashboards already loaded: {err:#}"),
+        }
+    }
+
+    /// Opens the dashboard `id`: every file it names, each followed over the
+    /// connection that reaches it, in one tab arranged as a grid.
+    ///
+    /// This is [`Workspace::open_tail`] several times over, and it makes the
+    /// same two decisions that call makes — resolve, then check the
+    /// credentials — but it has to make them for the whole set before it opens
+    /// anything, because what it opens is a single tab.
+    ///
+    /// A pane whose profile has been deleted is skipped rather than fatal: a
+    /// dangling reference is a state the store keeps on purpose (see
+    /// [`rulogman_core::dashboard`]), and the four logs that *can* be opened
+    /// are worth more than a refusal naming the fifth. A dashboard with nothing
+    /// left to open is the one case that opens no tab.
+    ///
+    /// # Why the credentials are all or nothing
+    ///
+    /// A profile with nothing saved needs the connection form, and the form can
+    /// only answer for one connection: a dashboard spanning three such hosts
+    /// would be three dialogs in a row, each one having to be remembered
+    /// against a tab that does not exist yet. So this version does not open a
+    /// partial tab and does not queue anything. It says which connections are
+    /// unsaved, opens the form pre-filled on the first of them — the fix is one
+    /// *Save* away — and leaves the dashboard to be clicked again. A second
+    /// click is a smaller price than a queue of dialogs, and unlike the queue
+    /// it is a thing the user can see the shape of.
+    fn open_dashboard(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_overlays(cx);
+
+        let Some(dashboard) = self.dashboards.get(id).cloned() else {
+            log::warn!("the dashboard that was asked for is no longer in the store");
+            return;
+        };
+        if dashboard.panes.is_empty() {
+            log::info!("dashboard {} names no files to follow", dashboard.name);
+            return;
+        }
+        log::info!(
+            "opening dashboard {} over {} file(s)",
+            dashboard.name,
+            dashboard.panes.len()
+        );
+
+        let mut resolved: Vec<(SessionProfile, String)> = Vec::with_capacity(dashboard.panes.len());
+        for pane in &dashboard.panes {
+            match self.profile(pane.profile, cx) {
+                Some(profile) => resolved.push((profile, pane.path.clone())),
+                None => log::warn!(
+                    "dashboard {} follows {} over a connection that no longer exists; the pane is skipped",
+                    dashboard.name,
+                    pane.path
+                ),
+            }
+        }
+        if resolved.is_empty() {
+            log::warn!(
+                "dashboard {} has no file left whose connection still exists",
+                dashboard.name
+            );
+            return;
+        }
+
+        // Once per distinct connection rather than once per pane: reading the
+        // keychain, and possibly a key file, is what this asks, and two panes
+        // on one host are asking it the same question.
+        let mut credentials: Vec<(Uuid, SshAuth)> = Vec::new();
+        let mut missing: Vec<(Uuid, String)> = Vec::new();
+        for (profile, _) in &resolved {
+            if credentials.iter().any(|(id, _)| *id == profile.id)
+                || missing.iter().any(|(id, _)| *id == profile.id)
+            {
+                continue;
+            }
+            match connection::saved_credentials(profile) {
+                Some(auth) => credentials.push((profile.id, auth)),
+                None => missing.push((profile.id, profile.name.clone())),
+            }
+        }
+        if let Some(first) = missing.first().map(|(id, _)| *id) {
+            let names: Vec<&str> = missing.iter().map(|(_, name)| name.as_str()).collect();
+            log::info!(
+                "dashboard {} is waiting on saved credentials for {}",
+                dashboard.name,
+                names.join(", ")
+            );
+            self.dialog
+                .update(cx, |dialog, cx| dialog.open_profile(first, cx));
+            cx.notify();
+            return;
+        }
+
+        let caps = Self::pane_caps_source(cx);
+        let mut leaves = Vec::with_capacity(resolved.len());
+        for (profile, path) in resolved {
+            let Some(auth) = credentials
+                .iter()
+                .find(|(id, _)| *id == profile.id)
+                .map(|(_, auth)| auth.clone())
+            else {
+                // Unreachable: the sweep above filed every distinct profile
+                // under one list or the other, and a non-empty `missing` has
+                // already returned.
+                log::error!("a dashboard pane lost the credentials it was just checked for");
+                continue;
+            };
+            // The connection's name, for the pane's own header: it is what
+            // tells two hosts' `access.log`s apart, and this is the only place
+            // that still has the profile to read it from.
+            let connection = SharedString::from(profile.name.clone());
+            // Tunnels suppressed on every one of them, for the reason
+            // [`Workspace::open_tail_session`] suppresses them: a pane that
+            // only reads a log must not take a profile's local ports from the
+            // shell the user works in.
+            let session = cx.new(|cx| Session::new_tail(profile, auth, path.clone(), true, cx));
+            let terminal =
+                cx.new(|cx| TerminalView::new(session.clone(), caps.clone(), window, cx));
+            let view = cx.new(|cx| TailView::new(terminal, session.clone(), path, connection, cx));
+            leaves.push(self.new_tail_pane(view, session, window, cx));
+        }
+
+        if leaves.is_empty() {
+            // Only reachable through the `else` arm above, which is itself
+            // unreachable; the guard is here because the alternative is
+            // composing a tab out of no panes, which panics.
+            log::error!("dashboard {} built no panes to open", dashboard.name);
+            return;
+        }
+
+        // No panel, for the reason a single followed file opens without one:
+        // there is no shell on the other end of any of these panes to browse a
+        // filesystem beside.
+        //
+        // The saved geometry is honoured only when every pane made it in: a
+        // leaf names its pane by position in `dashboard.panes`, and skipping a
+        // pane whose profile is gone would shift those positions out from under
+        // the layout. A short set falls back to the grid, which needs no such
+        // correspondence; `valid_layout` guards the rest.
+        let tab = match dashboard.valid_layout() {
+            Some(layout) if leaves.len() == dashboard.panes.len() => {
+                Self::compose_dashboard_layout(leaves, layout, false)
+            }
+            _ => Self::compose_dashboard_tab(leaves, false),
+        }
+        .with_label(dashboard.name)
+        .with_dashboard(id);
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.reveal_active_tab();
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// Reads the arrangement of `tab` back into the pair a dashboard is stored
+    /// as: the panes it shows, in depth-first layout order, and the geometry
+    /// tree laid over them.
+    ///
+    /// The running pane index and the panes vector are grown together in one
+    /// depth-first walk, so a [`LayoutNode::Leaf`] and its [`DashboardPane`]
+    /// always agree on which pane they mean without a second lookup. Every leaf
+    /// must be a followed file — a session that answers both a profile and a
+    /// tail path — because a dashboard is nothing but followed files; a pane
+    /// that is anything else (a shell the user split in, an opened editor)
+    /// aborts the whole capture with `None`, since saving a partial set would
+    /// silently drop it.
+    ///
+    /// Free of any window, so it is testable the way the composers are.
+    fn capture_tab_layout(tab: &SessionTab, cx: &App) -> Option<(Vec<DashboardPane>, LayoutNode)> {
+        fn walk(
+            node: &PaneNode<PaneLeaf>,
+            panes: &mut Vec<DashboardPane>,
+            cx: &App,
+        ) -> Option<LayoutNode> {
+            match node {
+                PaneNode::Leaf { payload, .. } => {
+                    let session = payload.view.session(cx)?;
+                    let session = session.read(cx);
+                    // Both or neither: a followed file answers a profile and a
+                    // path, and anything missing one is not a pane a dashboard
+                    // can name.
+                    let profile = session.profile_id()?;
+                    let path = session.tail_path()?.to_owned();
+                    let pane = panes.len();
+                    panes.push(DashboardPane { profile, path });
+                    Some(LayoutNode::Leaf { pane })
+                }
+                PaneNode::Split {
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                    ..
+                } => {
+                    // First then second, the same order the panes vector is
+                    // grown in, so leaf indices stay in step with it.
+                    let first = walk(first, panes, cx)?;
+                    let second = walk(second, panes, cx)?;
+                    Some(LayoutNode::Split {
+                        axis: layout_axis_of(*axis),
+                        ratio: *ratio,
+                        first: Box::new(first),
+                        second: Box::new(second),
+                    })
+                }
+            }
+        }
+
+        let mut panes = Vec::new();
+        let layout = walk(tab.panes.root(), &mut panes, cx)?;
+        Some((panes, layout))
+    }
+
+    /// Captures the arrangement of the tab at `index` onto the dashboard it was
+    /// opened from, replacing that dashboard's panes and geometry with what is
+    /// on screen now.
+    ///
+    /// A no-op on a tab that is not a dashboard: there is nowhere to write the
+    /// arrangement, so the command simply says so and stops.
+    ///
+    /// This deliberately captures the *current* pane set, not only the dividers:
+    /// a pane the user closed since opening the dashboard is gone from the save,
+    /// and one they split in that is not a followed file makes the capture
+    /// refuse rather than drop it. Saving the layout is thus also how the user
+    /// prunes or reshuffles a dashboard from the tab itself.
+    ///
+    /// There is no toast surface to report through, so success and every
+    /// failure are logged; the menu entry that invokes this is only offered on a
+    /// dashboard tab, which is the one confirmation the user does see.
+    fn save_tab_layout(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let Some(id) = tab.dashboard else {
+            log::info!("the tab whose layout was asked for is not a dashboard; nothing to save");
+            return;
+        };
+        let Some((panes, layout)) = Self::capture_tab_layout(tab, cx) else {
+            log::warn!(
+                "dashboard {id} has a pane that is not a followed file; its layout was not saved"
+            );
+            return;
+        };
+        let name = tab
+            .label
+            .as_ref()
+            .map(|label| label.to_string())
+            .unwrap_or_default();
+
+        // The stored entry is the one to update; it must still be there, but a
+        // fresh one keeps the id if it somehow is not, rather than losing the
+        // capture.
+        let mut dashboard = self.dashboards.get(id).cloned().unwrap_or_else(|| {
+            log::error!("dashboard {id} vanished from the store before its layout could be saved");
+            let mut fresh = Dashboard::new(name);
+            fresh.id = id;
+            fresh
+        });
+        dashboard.panes = panes;
+        dashboard.layout = Some(layout);
+        self.dashboards.upsert(dashboard);
+        if let Err(err) = self.dashboards.save() {
+            log::error!("could not write dashboards.json after capturing a layout: {err:#}");
+            return;
+        }
+        log::info!("saved the current arrangement to dashboard {id}");
     }
 
     /// Shows the connection dialog with the saved profile `id` loaded into the
@@ -3388,7 +4594,7 @@ impl Workspace {
     fn active_editor(&self) -> Option<&Entity<EditorPane>> {
         match self.tabs.get(self.active)?.active_view() {
             PaneView::Editor(editor) => Some(editor),
-            PaneView::Terminal(_) => None,
+            PaneView::Terminal(_) | PaneView::Tail(_) => None,
         }
     }
 
@@ -3520,6 +4726,21 @@ impl Workspace {
         self.equalize_panes(Axis::Vertical, cx);
     }
 
+    /// Handles the command that saves the active tab's arrangement to its
+    /// dashboard.
+    ///
+    /// The active tab, where the tab context menu's row acts on the tab that
+    /// was right-clicked; both end in the same call, which is a no-op on a tab
+    /// that is not a dashboard.
+    fn save_dashboard_layout_action(
+        &mut self,
+        _: &SaveDashboardLayout,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_tab_layout(self.active, cx);
+    }
+
     /// Handles the shortcut that shows and hides the remote file panel.
     fn toggle_file_panel_action(
         &mut self,
@@ -3563,6 +4784,29 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.select_tab(action.0, window, cx);
+    }
+
+    /// Handles <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>Alt</kbd> + a digit.
+    ///
+    /// A digit past the end of the store does nothing at all — no log, no
+    /// beep. Nine chords are bound whatever the user has saved, so most of them
+    /// name nothing on most installations, and a shortcut that names nothing is
+    /// not a mistake to report: it is a key that is simply not in use yet.
+    fn open_dashboard_action(
+        &mut self,
+        action: &OpenDashboard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self
+            .dashboards
+            .dashboards()
+            .get(action.0)
+            .map(|dashboard| dashboard.id)
+        else {
+            return;
+        };
+        self.open_dashboard(id, window, cx);
     }
 
     /// Handles <kbd>Esc</kbd>: closes whichever overlay is open, or lets the key
@@ -3938,10 +5182,16 @@ impl Workspace {
                 // of them and wears no status dot: the tab is not a connection,
                 // so there is nothing for a dot to report on. See
                 // [`editor_tab_label`] for what such a tab is called.
+                // A tab that carries a name of its own — a dashboard — keeps
+                // it in both arms: the name is the whole point of that tab, and
+                // the status dot is still the active session's to report. See
+                // [`SessionTab::label`].
+                let named = tab.label.clone();
                 match tab.active_session(cx) {
                     Some(session) => {
                         let session = session.read(cx);
-                        let item = TabItem::new(("session-tab", index), session.title())
+                        let title = named.unwrap_or_else(|| session.title());
+                        let item = TabItem::new(("session-tab", index), title)
                             .status(session.tab_status());
                         // Only the session that won the bind reports any, so
                         // the mark appears on exactly one tab per rule: the tab
@@ -3954,7 +5204,10 @@ impl Workspace {
                             None => item,
                         }
                     }
-                    None => TabItem::new(("session-tab", index), tab.active_view().label(cx)),
+                    None => TabItem::new(
+                        ("session-tab", index),
+                        named.unwrap_or_else(|| tab.active_view().label(cx)),
+                    ),
                 }
             })
             .collect();
@@ -4124,6 +5377,24 @@ impl Workspace {
             }
         }
 
+        // The one dashboard-specific command, and the primary way to reach it:
+        // capture what this tab looks like now back onto the dashboard it was
+        // opened from. Offered only on a dashboard tab — the only tab with
+        // somewhere to save to — and acting on the clicked tab whether or not it
+        // is the active one. The chord is named only on the active tab, because
+        // that is the tab the shortcut would save.
+        let mut dashboard_actions = Vec::new();
+        if tab.dashboard.is_some() {
+            let this = this.clone();
+            let mut row = MenuEntry::new(ts!("tab.save_layout")).on_activate(move |_window, cx| {
+                this.update(cx, |workspace, cx| workspace.save_tab_layout(index, cx));
+            });
+            if index == self.active {
+                row = row.shortcut(format!("{SHORTCUT_MODIFIER}+Shift+L"));
+            }
+            dashboard_actions.push(row);
+        }
+
         // Both rows speak for the session the tab label already names, which on
         // a split tab is the active pane's rather than the tab's first. A tab
         // holding nothing but open files names no session, and neither row means
@@ -4156,6 +5427,79 @@ impl Workspace {
                     });
                 }));
             }
+            // The followed files of the profile this session came from, worded
+            // and ordered exactly as the profile row's own menu words them:
+            // a shell on a host is where the user is standing when they want a
+            // log off that host, and having to go back to the welcome screen
+            // for it would be a trip through a screen this window is not even
+            // showing.
+            //
+            // Read out of the profile store rather than off the session, which
+            // holds the profile as it was when the tab was opened: a file added
+            // to the connection since then is a file the user has just asked
+            // for, and a store lookup is what the empty state does too. A
+            // session whose profile has since been forgotten simply offers no
+            // rows.
+            if let Some(profile) = session
+                .profile_id()
+                .and_then(|id| self.profile(id, cx))
+                .filter(|profile| !profile.tails.is_empty())
+            {
+                for rule in &profile.tails {
+                    let path = rule.path.clone();
+                    let label = ts!(
+                        "empty.menu_tail",
+                        name = session::remote_file_name(&path).to_owned()
+                    );
+                    let this = this.clone();
+                    let profile = profile.clone();
+                    connect.push(MenuEntry::new(label).on_activate(move |window, cx| {
+                        let (profile, path) = (profile.clone(), path.clone());
+                        this.update(cx, |workspace, cx| {
+                            workspace.open_tail(&profile, path, window, cx);
+                        });
+                    }));
+                }
+            }
+        }
+
+        // One row per followed file of every saved connection, which is the
+        // group that closes the authoring loop: adding panes to a tab, dragging
+        // the dividers between them and then *Save layout to dashboard* is how
+        // a dashboard is composed by hand, and this is the only thing in the
+        // application that can add the pane. Every connection rather than this
+        // tab's — unlike the `connect` group above, which offers the files of
+        // the session the tab already holds — because an arrangement worth
+        // saving is usually one that spans hosts: the point of a dashboard is
+        // the deploy watched across all of them at once. The list is as long as
+        // the user's own configuration makes it and is not capped; a menu of
+        // twenty rows is a configuration of twenty followed files, and hiding
+        // some of them would only make the missing ones unreachable.
+        //
+        // Offered on the active tab alone, and gated exactly as the split rows
+        // are: the size check can only answer for the *active* pane, so on any
+        // other tab it would be measuring one pane and splitting another. A
+        // pane already too small to split in half does not offer to be.
+        let mut add_tails = Vec::new();
+        if index == self.active && self.can_split_active(Axis::Vertical, cx) {
+            for profile in self.dialog.read(cx).profiles() {
+                for rule in &profile.tails {
+                    let path = rule.path.clone();
+                    let label = ts!(
+                        "tab.add_tail",
+                        file = session::remote_file_name(&path).to_owned(),
+                        connection = profile.name.clone()
+                    );
+                    let this = this.clone();
+                    let profile_id = profile.id;
+                    add_tails.push(MenuEntry::new(label).on_activate(move |window, cx| {
+                        let path = path.clone();
+                        this.update(cx, |workspace, cx| {
+                            workspace.add_tail_to_tab(index, profile_id, path, window, cx);
+                        });
+                    }));
+                }
+            }
         }
 
         let mut close = vec![MenuEntry::new(ts!("tab.close")).on_activate({
@@ -4186,7 +5530,14 @@ impl Workspace {
         }
 
         let mut entries = Vec::new();
-        for group in [splits, break_out, connect, close] {
+        for group in [
+            splits,
+            break_out,
+            dashboard_actions,
+            connect,
+            add_tails,
+            close,
+        ] {
             if group.is_empty() {
                 continue;
             }
@@ -4215,24 +5566,43 @@ impl Workspace {
     /// there is nothing left for the menu to speak for and it draws nothing.
     fn render_empty_context(&self, cx: &mut Context<Self>) -> Option<ContextMenu> {
         let (id, position) = self.empty_context?;
-        let profile = self
-            .dialog
-            .read(cx)
-            .profiles()
-            .into_iter()
-            .find(|profile| profile.id == id)?;
+        let profile = self.profile(id, cx)?;
         let this = cx.entity();
 
-        let entries = vec![
-            MenuEntry::new(ts!("connection.connect")).on_activate({
-                let this = this.clone();
-                move |window, cx| {
-                    let profile = profile.clone();
-                    this.update(cx, |workspace, cx| {
-                        workspace.open_profile(&profile, window, cx);
-                    });
-                }
-            }),
+        let mut entries = vec![MenuEntry::new(ts!("connection.connect")).on_activate({
+            let this = this.clone();
+            let profile = profile.clone();
+            move |window, cx| {
+                let profile = profile.clone();
+                this.update(cx, |workspace, cx| {
+                    workspace.open_profile(&profile, window, cx);
+                });
+            }
+        })];
+
+        // One row per file the profile follows, straight under *Connect*,
+        // because that is what they are: a second way to open this connection,
+        // pointed at a file rather than at a shell. They are named after the
+        // file rather than after the path — a menu row is one line wide and the
+        // last component is what tells two logs apart — and the whole path is
+        // read in the pane the row opens, where there is room for it.
+        for rule in &profile.tails {
+            let path = rule.path.clone();
+            let label = ts!(
+                "empty.menu_tail",
+                name = session::remote_file_name(&path).to_owned()
+            );
+            let this = this.clone();
+            let profile = profile.clone();
+            entries.push(MenuEntry::new(label).on_activate(move |window, cx| {
+                let (profile, path) = (profile.clone(), path.clone());
+                this.update(cx, |workspace, cx| {
+                    workspace.open_tail(&profile, path, window, cx);
+                });
+            }));
+        }
+
+        entries.extend([
             // The ellipsis the dialog's own Edit button does without: from here
             // the form is not on screen yet, so this row promises it.
             MenuEntry::new(ts!("empty.menu_edit")).on_activate({
@@ -4254,7 +5624,7 @@ impl Workspace {
                     this.update(cx, |workspace, cx| workspace.delete_profile(id, cx));
                 }
             }),
-        ];
+        ]);
 
         Some(
             ContextMenu::new("empty-profile-context")
@@ -4677,6 +6047,49 @@ impl Workspace {
         let this = cx.entity();
         let profiles = self.dialog.read(cx).profiles();
 
+        // Above the saved profiles, and deliberately: a dashboard is one click
+        // to every log a deploy is watched through, while a profile below it is
+        // one click to one shell. The aggregate is the bigger thing to be
+        // offered, so it is offered first.
+        let dashboards = (!self.dashboards.is_empty()).then(|| {
+            let rows = self
+                .dashboards
+                .dashboards()
+                .iter()
+                .enumerate()
+                .map(|(index, dashboard)| {
+                    let id = dashboard.id;
+                    Button::new(
+                        ElementId::from(("dashboard", index)),
+                        dashboard.name.clone(),
+                    )
+                    .variant(ButtonVariant::Ghost)
+                    .full_width(true)
+                    .on_click({
+                        let this = this.clone();
+                        move |_, window, cx| {
+                            this.update(cx, |workspace, cx| {
+                                workspace.open_dashboard(id, window, cx)
+                            });
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .w(px(320.))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme.text_muted)
+                        .child(ts!("empty.dashboards")),
+                )
+                .children(rows)
+        });
+
         let saved = (!profiles.is_empty()).then(|| {
             let rows = profiles.into_iter().enumerate().map(|(index, profile)| {
                 let id = ElementId::from(("saved-profile", index));
@@ -4761,6 +6174,7 @@ impl Workspace {
                 ),
             )
             .children(local)
+            .children(dashboards)
             .children(saved);
 
         // The fill goes on the box the helper hands back, which is the whole of
@@ -5375,10 +6789,12 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::duplicate_split_right_action))
             .on_action(cx.listener(Self::duplicate_split_below_action))
             .on_action(cx.listener(Self::toggle_file_panel_action))
+            .on_action(cx.listener(Self::save_dashboard_layout_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::show_about_action))
             .on_action(cx.listener(Self::check_updates_action))
             .on_action(cx.listener(Self::select_tab_action))
+            .on_action(cx.listener(Self::open_dashboard_action))
             .on_action(cx.listener(Self::dismiss_dialog_action))
             .child(toolbar)
             .child(body)
@@ -5581,6 +6997,15 @@ fn bind_shortcuts(cx: &mut App) {
             Some(KEY_CONTEXT),
         ),
         KeyBinding::new(PANEL_SHORTCUT, ToggleFilePanel, Some(KEY_CONTEXT)),
+        // Shifted to stay clear of the shell for the reason the window chord is:
+        // bare `Ctrl+L` is readline's *clear-screen*, and a terminal cannot
+        // encode `Ctrl+Shift+L` distinctly from it, so the shifted chord is free
+        // to take. `L` for layout; a no-op on any tab that is not a dashboard.
+        KeyBinding::new(
+            &format!("{modifier}-shift-l"),
+            SaveDashboardLayout,
+            Some(KEY_CONTEXT),
+        ),
     ];
     for index in 0..QUICK_SELECT_TABS {
         bindings.push(KeyBinding::new(
@@ -5589,8 +7014,53 @@ fn bind_shortcuts(cx: &mut App) {
             Some(KEY_CONTEXT),
         ));
     }
+    // The digits again with `Alt` added, which reads as what it is: the tab
+    // chord one level up — `Ctrl+1` picks the first tab, `Ctrl+Alt+1` opens the
+    // first dashboard. `Alt` is what is left to add: every other chord this
+    // function registers is `{modifier}`, `{pane_modifier}` or one of those
+    // shifted, and none of them is the pair, so nothing in the application is
+    // being taken away from.
+    //
+    // Nor is anything being taken from the remote shell, on either half of the
+    // split. On macOS `cmd` never reaches it at all. Elsewhere the chord is
+    // `Ctrl+Alt+digit`, which a terminal cannot encode distinctly in the first
+    // place — there is no control code for a digit — so what a shell would have
+    // received for it is at most the `ESC digit` of a bare `Alt+digit`, and
+    // that chord is untouched: the two arrive here as different modifier sets
+    // and only the one with `Ctrl` is bound.
+    //
+    // The index is into the saved order of the dashboard store, which is the
+    // order the welcome screen lists them in — so the number to press is the
+    // number of the row the user is already looking at.
+    for index in 0..QUICK_OPEN_DASHBOARDS {
+        bindings.push(KeyBinding::new(
+            &format!("{modifier}-alt-{}", index + 1),
+            OpenDashboard(index),
+            Some(KEY_CONTEXT),
+        ));
+    }
 
     cx.bind_keys(bindings);
+}
+
+/// Something the desktop handed a running rulogman, on its way to the UI
+/// thread.
+///
+/// Both arrive on a platform callback that has no `App` to work with, and both
+/// have to be answered on the thread that owns the windows, so both take the
+/// same channel — and taking the same channel is what keeps them in the order
+/// they were made. What the two have in common is a list of folders; what tells
+/// them apart is that a service also says *where* the folders should be opened,
+/// and that is the whole of why this is an enum rather than a `Vec<String>`.
+enum Arrival {
+    /// URLs from `application:openURLs:`: a `file://` per folder a Finder *Open
+    /// with* named, or a `rulogman://dashboard/<name>`. See
+    /// [`launch::split_open_urls`].
+    Urls(Vec<String>),
+    /// One of the services the bundle declares, with the folders it was invoked
+    /// on and the `NSUserData` saying which entry the user picked. See
+    /// [`launch::service_target`].
+    Service(ServiceRequest),
 }
 
 fn main() {
@@ -5610,7 +7080,18 @@ fn main() {
     // it is filesystem work that wants no window: what is left is a list of
     // directories, and a directory that was named but is not there has already
     // been dropped with a warning by the time the app starts.
-    let start_dirs = launch::start_dirs(std::env::args_os().skip(1));
+    //
+    // The argv is split first, because not everything in it is a path:
+    // `--dashboard <name>` asks for a saved arrangement rather than a folder,
+    // and `-e <command…>` asks for a program to be run in place of the shell,
+    // and all three are answered in different places. See
+    // [`launch::split_launch_args`].
+    let launch::LaunchArgs {
+        paths: path_args,
+        dashboards: dashboard_names,
+        command: launch_command,
+    } = launch::split_launch_args(std::env::args_os().skip(1));
+    let start_dirs = launch::start_dirs(path_args);
     // KDE's *Open Terminal Here* — and any launcher that treats rulogman as
     // the desktop's default terminal — never puts the folder in argv at all:
     // `KTerminalLauncherJob` only knows how to pass `--workdir` to konsole, so
@@ -5618,23 +7099,53 @@ fn main() {
     // unchanged and communicates the folder solely by setting the child's
     // working directory. Without this, that arrives here as zero paths and
     // opens the welcome screen instead of a shell in the folder Dolphin meant.
+    //
+    // A launch that named a dashboard is excluded, and has to be: the working
+    // directory is only a signal *because* the launch said nothing else, and
+    // `rulogman --dashboard morning` typed in a project folder has said
+    // something else. Reading the folder as a request too would open a shell
+    // beside the dashboard that nobody asked for. A launch that named a command
+    // is excluded for exactly that reason — `rulogman -e btop` is the same
+    // desktop asking for something specific — and doubly so, since the command
+    // is itself started in that very directory.
     #[cfg(all(unix, not(target_os = "macos")))]
-    let start_dirs = if start_dirs.is_empty() {
-        launch::implicit_start_dir().into_iter().collect()
-    } else {
-        start_dirs
-    };
+    let start_dirs =
+        if start_dirs.is_empty() && dashboard_names.is_empty() && launch_command.is_none() {
+            launch::implicit_start_dir().into_iter().collect()
+        } else {
+            start_dirs
+        };
 
     // The other half of the same question, and the only half macOS asks. A
-    // Finder *Open with* — or `open -a rulogman /var/log` — reaches the app as
+    // Finder *Open with* — or `open -a rulogman /var/log`, or an `open
+    // "rulogman://dashboard/Morning"` — reaches the app as
     // `application:openURLs:` rather than as an argv, and it does so whether
-    // the app was already running or is starting because of it. The callback
-    // has no `App` to work with, so it does the one thing it can: hands the
-    // URLs to a channel the run closure below drains on the UI thread. On
+    // the app was already running or is starting because of it. It is the only
+    // thing a second launch can say at all: `open -a rulogman` hands a running
+    // application no argv, so a URL is how everything after the first launch
+    // asks for anything.
+    //
+    // The two services the bundle declares come in through the same door and
+    // are the same request but for one word. *New rulogman Window Here* and
+    // *New rulogman Tab Here* — the entries in the Finder's right-click
+    // *Services* submenu — hand over a folder selected in some other
+    // application, in the same `file://` spelling an *Open with* uses, plus the
+    // `NSUserData` of the entry the user picked, which is the only way macOS
+    // says which one it was: the menu title they actually read is localised and
+    // never reaches the application. See [`launch::service_target`].
+    //
+    // The callbacks
+    // have no `App` to work with, so they do the one thing they can: hand what
+    // arrived to a channel the run closure below drains on the UI thread. One
+    // channel rather than two, because what is at the far end is one queue of
+    // requests and answering them out of the order they were made would open
+    // the second folder in the window the first one was still about to make. On
     // Linux and Windows nothing ever sends on it, since both platforms put the
-    // paths in the argv read above; registering it regardless costs a callback
-    // that is never called.
-    let (opened_urls, mut urls) = mpsc::unbounded();
+    // paths — and the `rulogman://` URL a browser or `xdg-open` hands over —
+    // in the argv read above; registering them regardless costs two callbacks
+    // that are never called.
+    let (arrivals, mut arrivals_rx) = mpsc::unbounded();
+    let opened_urls = arrivals.clone();
     // `LastWindowClosed` rather than the default, which is this only away from
     // macOS: there an app whose last window closes stays in the Dock with its
     // menu bar, and *New Window* would still be reachable from it — but there is
@@ -5648,7 +7159,10 @@ fn main() {
     app.on_open_urls(move |urls| {
         // Failing means the receiver is gone, which means the app is on its way
         // out and there is no window left to open a tab in.
-        let _ = opened_urls.unbounded_send(urls);
+        let _ = opened_urls.unbounded_send(Arrival::Urls(urls));
+    });
+    app.on_service_request(move |request| {
+        let _ = arrivals.unbounded_send(Arrival::Service(request));
     });
 
     // The icon set has to be installed before the app runs: `svg()` resolves
@@ -5743,18 +7257,70 @@ fn main() {
         // start screen is what a launch with no paths opens on, and a launch
         // with them should never flash it.
         open_start_dirs(start_dirs, cx);
-        // And a tab per path every *later* launch names, for as long as this
-        // process lives. On macOS a second *Open with* does not start a second
-        // rulogman — it wakes this one — so the paths have to land in a window
-        // that is already open rather than in a new one.
+        // And a tab per dashboard, in the same breath and for the same reason:
+        // a launch that opens a dashboard must not flash the welcome screen
+        // either. After the paths, so that a launch naming both puts the
+        // dashboards where the eye ends up — see [`open_startup_dashboards`].
+        open_startup_dashboards(dashboard_names, cx);
+        // And, last so that it is the tab left in front, whatever `-e` named:
+        // a launch that asked for a program to be run is a launch whose whole
+        // point is that program.
+        open_launch_command(launch_command, cx);
+        // And a tab per path — or per dashboard — every *later* launch names,
+        // for as long as this process lives. On macOS a second *Open with*
+        // does not start a second rulogman — it wakes this one — so what it
+        // asks for has to land in a window that is already open rather than in
+        // a new one.
         cx.spawn(async move |cx| {
-            // The loop ends on its own when the application does: the sender
-            // lives in the `on_open_urls` callback the platform owns, so the
-            // stream closes as the platform is torn down and this task never
-            // reaches an `App` that is no longer there.
-            while let Some(batch) = urls.next().await {
-                let dirs = launch::start_dirs(batch);
-                cx.update(|cx| open_start_dirs(dirs, cx));
+            // The loop ends on its own when the application does: the senders
+            // live in the callbacks the platform owns, so the stream closes as
+            // the platform is torn down and this task never reaches an `App`
+            // that is no longer there.
+            while let Some(arrival) = arrivals_rx.next().await {
+                match arrival {
+                    Arrival::Urls(batch) => {
+                        // The two kinds of request the scheme makes reachable,
+                        // told apart before either is answered: a `file://`
+                        // names a folder, a `rulogman://dashboard/<name>` names
+                        // a dashboard.
+                        let (paths, names) = launch::split_open_urls(batch);
+                        let dirs = launch::start_dirs(paths);
+                        cx.update(|cx| {
+                            open_start_dirs(dirs, cx);
+                            // Names only — never [`open_startup_dashboards`].
+                            // The dashboards marked *open at startup* were
+                            // opened when this process came up; a URL arriving
+                            // an hour later asks for the one dashboard it names
+                            // and nothing else, and reading the marks again
+                            // would pile the morning's tabs on top of it every
+                            // time somebody opened a link.
+                            open_named_dashboards(names, cx);
+                        });
+                    }
+                    Arrival::Service(request) => {
+                        // Folders and nothing else: the bundle declares
+                        // `NSSendFileTypes` = `public.folder` for both entries,
+                        // so a service never carries a `rulogman://` URL and
+                        // there is nothing here to split apart. `start_dirs`
+                        // still stands between the pasteboard and the
+                        // workspace, since a folder can have gone between the
+                        // Finder drawing the menu and the user reading it.
+                        let dirs = launch::start_dirs(request.urls);
+                        // An entry this build does not know is answered as a
+                        // tab rather than dropped: the folders are the request
+                        // and the target is only where to put it, so the worse
+                        // of the two answers is still the right one. See
+                        // [`launch::service_target`], which logs what it saw.
+                        let target = launch::service_target(&request.user_data)
+                            .unwrap_or(launch::ServiceTarget::Tab);
+                        cx.update(|cx| match target {
+                            launch::ServiceTarget::Window => {
+                                open_start_dirs_in_new_window(dirs, cx)
+                            }
+                            launch::ServiceTarget::Tab => open_start_dirs(dirs, cx),
+                        });
+                    }
+                }
             }
         })
         .detach();
@@ -5993,6 +7559,245 @@ fn open_start_dirs(dirs: Vec<PathBuf>, cx: &mut App) {
     });
     if let Err(error) = opened {
         log::warn!("could not open a shell for the paths given: {error}");
+    }
+}
+
+/// Opens a window of its own for the directories a service named, and brings it
+/// forward.
+///
+/// The *New rulogman Window Here* half of the pair the bundle declares, and the
+/// only place in the application where a request from outside makes a window
+/// rather than a tab. [`open_start_dirs`] is the other half, and everything
+/// after the window is chosen is the same in both.
+///
+/// A window with nothing in it is taken over rather than added to. A service
+/// invoked while rulogman is not running starts it, and by the time the request
+/// is drained the run closure has already opened the window every launch opens
+/// — showing the start screen, since the launch itself named no paths. Opening
+/// a second window on top of that leaves the first one standing empty behind it,
+/// which is not what *in a new window* meant: what the user asked for is a
+/// window showing their folder, and an empty one is a window that has yet to be
+/// given anything. Any tabless workspace will do, not merely the one this
+/// launch opened, because a window the user emptied by closing its last tab is
+/// in exactly the same state and equally has nothing to lose.
+///
+/// Nothing at all happens for an empty list. A service whose folders have all
+/// gone since the Finder drew the menu has asked for nothing, and answering it
+/// with an empty window would be the one outcome worse than answering it with
+/// nothing.
+fn open_start_dirs_in_new_window(dirs: Vec<PathBuf>, cx: &mut App) {
+    if dirs.is_empty() {
+        return;
+    }
+    let window = match workspace_windows(cx)
+        .into_iter()
+        .find(|window| window.read(cx).is_ok_and(Workspace::has_no_tabs))
+    {
+        Some(window) => window,
+        None => match open_workspace_window(cx) {
+            Ok(window) => window,
+            Err(error) => {
+                log::warn!("could not open a window for the paths given: {error:#}");
+                return;
+            }
+        },
+    };
+    let opened = window.update(cx, |workspace, window, cx| {
+        for dir in dirs {
+            workspace.open_local_directory(dir, window, cx);
+        }
+        // The application is in the background whenever a service reaches it —
+        // the user was in the Finder — so the window it just made would
+        // otherwise open behind whatever they were looking at.
+        window.activate_window();
+    });
+    if let Err(error) = opened {
+        log::warn!("could not open a shell for the paths given: {error}");
+    }
+}
+
+/// Opens the tab a `-e <command…>` asked for, and brings the window forward.
+///
+/// Shaped like [`open_start_dirs`] and for the same reason: the launch is
+/// answered before the window is shown, so a launch that asked for `btop` never
+/// flashes the start screen on its way to it. There is at most one such tab —
+/// `-e` ends the parse, so a launch names one command or none.
+///
+/// The command runs in this process's working directory, which is where the
+/// launcher put it: see [`launch::command_start_dir`] for why that is read
+/// straight rather than through the home-directory filter a path-less launch
+/// goes through.
+#[cfg(unix)]
+fn open_launch_command(command: Option<Vec<String>>, cx: &mut App) {
+    let Some(command) = command else {
+        return;
+    };
+    let Some(window) = active_workspace_window(cx) else {
+        log::warn!("no window is open to run the command given in");
+        return;
+    };
+    let cwd = launch::command_start_dir();
+    let opened = window.update(cx, |workspace, window, cx| {
+        workspace.open_local_command_at(command, cwd, window, cx);
+        window.activate_window();
+    });
+    if let Err(error) = opened {
+        log::warn!("could not run the command given: {error}");
+    }
+}
+
+/// The Windows answer to the same request, which is to say so in the log.
+///
+/// `-e` is a unix convention — it is what the freedesktop desktop entry spec
+/// and every terminal on that platform mean by *run this* — and nothing on
+/// Windows launches rulogman that way. Parsed there regardless, because the
+/// parser has no business being two parsers, and turned down here rather than
+/// silently swallowed so that a user who typed it learns why nothing happened.
+#[cfg(not(unix))]
+fn open_launch_command(command: Option<Vec<String>>, _cx: &mut App) {
+    if let Some(command) = command {
+        log::warn!(
+            "ignoring -e {}: running a command in place of the shell is a unix convention",
+            command.join(" ")
+        );
+    }
+}
+
+/// The dashboards a launch should open, in the order they should open in.
+///
+/// Two ways of asking, answered as one list. A dashboard the user marked
+/// *open at startup* asks every time, silently and from the store itself; a
+/// `--dashboard <name>` on the command line asks once, for this run. The
+/// marked ones come first because they are the standing arrangement — the
+/// thing the user set up to be there whenever rulogman starts — and what the
+/// command line named is what they asked for *today*, which is the tab they
+/// want to be looking at when the window comes up.
+///
+/// Deduplicated by id, keeping the first appearance, so a dashboard that is
+/// both marked and named opens one tab rather than two identical ones.
+///
+/// Only the launch asks this. What the names alone resolve to is
+/// [`named_dashboards`], which is what a `rulogman://dashboard/<name>` URL
+/// arriving later goes through.
+fn startup_dashboards(store: &DashboardStore, requested: &[String]) -> Vec<Uuid> {
+    let mut ids: Vec<Uuid> = store
+        .dashboards()
+        .iter()
+        .filter(|dashboard| dashboard.open_at_startup)
+        .map(|dashboard| dashboard.id)
+        .collect();
+
+    for id in named_dashboards(store, requested) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+
+    ids
+}
+
+/// The dashboards a list of names asks for, in the order they were asked for.
+///
+/// A name is matched exactly, and against the name alone: dashboard names are
+/// not unique — identity in the store is the id — so two dashboards may answer
+/// to one name and the first in store order takes it. That is a shape the user
+/// can see, since the welcome screen lists the store in the same order; a
+/// fuzzy or case-insensitive match would not be. A name nothing answers to is
+/// warned about and skipped, the same stance a path that is not there gets:
+/// the window still opens, with one tab fewer than asked for.
+///
+/// Deduplicated by id, so naming the same dashboard twice — which a repeated
+/// `--dashboard` or a repeated URL may well do — opens one tab.
+fn named_dashboards(store: &DashboardStore, names: &[String]) -> Vec<Uuid> {
+    let mut ids: Vec<Uuid> = Vec::new();
+
+    for name in names {
+        match store
+            .dashboards()
+            .iter()
+            .find(|dashboard| dashboard.name == *name)
+        {
+            Some(dashboard) if !ids.contains(&dashboard.id) => ids.push(dashboard.id),
+            Some(_) => {}
+            None => log::warn!("ignoring the dashboard {name}: no dashboard is called that"),
+        }
+    }
+
+    ids
+}
+
+/// Opens a tab per dashboard the launch asked for, marked or named.
+///
+/// The launch only, and once: a request that arrives while the application is
+/// running goes through [`open_named_dashboards`] instead, which reads no
+/// marks. Shaped like [`open_start_dirs`], and placed right after it, so that
+/// the whole launch is answered before the window is shown. The store is the one
+/// the window already loaded rather than a second read of the file: two copies
+/// could disagree about what is on disk, and it is the window's copy the
+/// welcome screen lists and the numbered shortcuts index.
+///
+/// Opening order is [`startup_dashboards`] order, and every dashboard lands in
+/// a tab of its own after the ones already there, so the last one opened is the
+/// one left active. That is the intended end state — the newest request is what
+/// the user is looking at — and it is also simply what
+/// [`Workspace::open_dashboard`] does with each tab it appends.
+///
+/// A dashboard whose connections have nothing saved is not opened at all: the
+/// all-or-nothing credential gate in [`Workspace::open_dashboard`] puts the
+/// connection form up instead and leaves the dashboard to be clicked. At
+/// start-up that means a window that comes up on a pre-filled dialog rather
+/// than on the arrangement, which is the right end of the trade — the
+/// alternative is a start-up that queues one modal per unsaved host — and it is
+/// the same answer clicking the dashboard would have given.
+fn open_startup_dashboards(names: Vec<String>, cx: &mut App) {
+    let Some(window) = active_workspace_window(cx) else {
+        // Only worth a word when something was actually asked for on the
+        // command line; a marked dashboard cannot even be looked for without a
+        // window to read the store from.
+        if !names.is_empty() {
+            log::warn!("no window is open to show the dashboards asked for");
+        }
+        return;
+    };
+    let opened = window.update(cx, |workspace, window, cx| {
+        for id in startup_dashboards(&workspace.dashboards, &names) {
+            workspace.open_dashboard(id, window, cx);
+        }
+    });
+    if let Err(error) = opened {
+        log::warn!("could not open the dashboards asked for: {error}");
+    }
+}
+
+/// Opens a tab per dashboard a `rulogman://dashboard/<name>` URL named, in a
+/// window that is already up, and brings that window forward.
+///
+/// The names and nothing else. [`open_startup_dashboards`] answers the launch,
+/// and part of what it answers is the standing arrangement — every dashboard
+/// marked *open at startup* — which was already opened when this process came
+/// up. A URL is a fresh request made of a running application, so it is
+/// answered with exactly what it asked for; reading the marks again would add
+/// the morning's tabs to the window every time a link was opened.
+///
+/// The window is activated for the reason [`open_start_dirs`] activates it: on
+/// macOS the URL woke an application that is otherwise left in the background,
+/// and the user who opened the link is waiting to be shown the dashboard.
+fn open_named_dashboards(names: Vec<String>, cx: &mut App) {
+    if names.is_empty() {
+        return;
+    }
+    let Some(window) = active_workspace_window(cx) else {
+        log::warn!("no window is open to show the dashboards asked for");
+        return;
+    };
+    let opened = window.update(cx, |workspace, window, cx| {
+        for id in named_dashboards(&workspace.dashboards, &names) {
+            workspace.open_dashboard(id, window, cx);
+        }
+        window.activate_window();
+    });
+    if let Err(error) = opened {
+        log::warn!("could not open the dashboards asked for: {error}");
     }
 }
 
@@ -6453,7 +8258,7 @@ mod workspace_tests {
     use super::*;
 
     use gpui::{TestAppContext, VisualTestContext};
-    use rulogman_core::{AppSettings, AuthMethod};
+    use rulogman_core::{AppSettings, AuthMethod, TailRule};
 
     /// A workspace in a window, on settings that say `local_panel` for the
     /// shells that follow it.
@@ -6510,6 +8315,87 @@ mod workspace_tests {
         });
     }
 
+    /// Gives the workspace a tab following `path`, the way
+    /// [`Workspace::open_tail_session`] ends.
+    ///
+    /// The connection is taken out of it exactly as [`open_remote`] takes it
+    /// out of a shell tab, and for the same reason: what is under test is the
+    /// pane the workspace builds, not what is on the other end of it. The
+    /// panel flag is the call's own `false` rather than
+    /// [`Workspace::panel_opens_for`], since a followed file never asks.
+    fn open_tail(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, path: &str) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = profile_showing_files(true);
+            let caps = Workspace::pane_caps_source(cx);
+            let session = cx.new(|cx| Session::dormant_tail(profile, path.to_owned(), cx));
+            let terminal = cx.new(|cx| TerminalView::new(session.clone(), caps, window, cx));
+            let view = cx.new(|cx| {
+                TailView::new(
+                    terminal,
+                    session.clone(),
+                    path.to_owned(),
+                    SharedString::default(),
+                    cx,
+                )
+            });
+            let leaf = workspace.new_tail_pane(view, session, window, cx);
+
+            workspace
+                .tabs
+                .push(SessionTab::single(leaf).with_panel(false));
+            workspace.active = workspace.tabs.len() - 1;
+            workspace.focus_active(window, cx);
+        });
+    }
+
+    /// Gives the workspace a tab for a profile that names `paths` to follow,
+    /// the way [`Workspace::open_session_with_tails`] ends: one tab, the
+    /// shell pane plus one tail pane per path, stacked in the order given.
+    ///
+    /// [`Workspace::open_session_with_tails`] itself dials a real connection
+    /// for the shell and for every tail, so — as `open_remote` and `open_tail`
+    /// already do for their own calls — the sessions here are the dormant
+    /// stand-ins instead. What is under test is
+    /// [`Workspace::compose_tailed_tab`]'s arrangement of the panes, not what
+    /// is on the other end of any of them.
+    fn open_tailed(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, paths: &[&str]) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            let mut profile = profile_showing_files(true);
+            profile.tails = paths.iter().map(|path| TailRule::new(*path)).collect();
+            let panel_open = Workspace::panel_opens_for(Some(&profile), cx);
+            let caps = Workspace::pane_caps_source(cx);
+
+            let session = cx.new(Session::dormant);
+            let view = cx.new(|cx| TerminalView::new(session.clone(), caps.clone(), window, cx));
+            let shell_leaf = workspace.new_pane(view, session, window, cx);
+
+            let tail_leaves = paths
+                .iter()
+                .map(|path| {
+                    let session =
+                        cx.new(|cx| Session::dormant_tail(profile.clone(), (*path).to_owned(), cx));
+                    let terminal =
+                        cx.new(|cx| TerminalView::new(session.clone(), caps.clone(), window, cx));
+                    let view = cx.new(|cx| {
+                        TailView::new(
+                            terminal,
+                            session.clone(),
+                            (*path).to_owned(),
+                            SharedString::default(),
+                            cx,
+                        )
+                    });
+                    workspace.new_tail_pane(view, session, window, cx)
+                })
+                .collect();
+
+            let tab = Workspace::compose_tailed_tab(shell_leaf, tail_leaves, panel_open);
+            workspace.tabs.push(tab);
+            workspace.active = workspace.tabs.len() - 1;
+            workspace.focus_active(window, cx);
+        });
+    }
+
     /// Splits the active tab in two, the way [`Workspace::duplicate_split`] ends.
     ///
     /// Not that call itself: it splits by *duplicating*, and a duplicate starts
@@ -6547,11 +8433,762 @@ mod workspace_tests {
         workspace.read_with(cx, |workspace, _| workspace.tabs[index].panel_open)
     }
 
+    /// Gives the workspace a dashboard tab of `count` followed files under the
+    /// name `name`, the way [`Workspace::open_dashboard`] ends.
+    ///
+    /// The lookups and the keychain are taken out of it exactly as
+    /// [`open_tailed`] takes out the connection, and for the same reason: what
+    /// is under test is [`Workspace::compose_dashboard_tab`]'s arrangement and
+    /// the name the tab wears, neither of which is a question about what is on
+    /// the other end of a pane. One profile for all of them, since the grid is
+    /// the same grid however many hosts the panes came from.
+    fn open_dashboard(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+        name: &str,
+        count: usize,
+    ) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            let profile = profile_showing_files(true);
+            let caps = Workspace::pane_caps_source(cx);
+            let leaves = (0..count)
+                .map(|index| {
+                    let path = format!("/var/log/app-{index}.log");
+                    let session =
+                        cx.new(|cx| Session::dormant_tail(profile.clone(), path.clone(), cx));
+                    let terminal =
+                        cx.new(|cx| TerminalView::new(session.clone(), caps.clone(), window, cx));
+                    let view = cx.new(|cx| {
+                        TailView::new(
+                            terminal,
+                            session.clone(),
+                            path,
+                            SharedString::from(profile.name.clone()),
+                            cx,
+                        )
+                    });
+                    workspace.new_tail_pane(view, session, window, cx)
+                })
+                .collect();
+
+            let tab = Workspace::compose_dashboard_tab(leaves, false).with_label(name.to_owned());
+            workspace.tabs.push(tab);
+            workspace.active = workspace.tabs.len() - 1;
+            workspace.focus_active(window, cx);
+        });
+    }
+
+    /// The active tab's shape: how many panes it holds, and how many of its
+    /// dividers run each way.
+    ///
+    /// Rows and columns are not stored anywhere — the tree is binary — so the
+    /// grid is asserted through the two counts, which pin it down between them:
+    /// `r` rows of `c` columns is `r - 1` splits along [`Axis::Vertical`] and
+    /// one per cell past the first of every row along [`Axis::Horizontal`].
+    fn grid(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> (usize, usize, usize) {
+        workspace.read_with(cx, |workspace, _| {
+            let panes = &workspace.tabs[workspace.active].panes;
+            (
+                panes.leaf_count(),
+                panes.splits_along(Axis::Vertical),
+                panes.splits_along(Axis::Horizontal),
+            )
+        })
+    }
+
+    /// Whether the active tab hands the keyboard to its top-left pane.
+    fn first_pane_is_active(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+        workspace.read_with(cx, |workspace, _| {
+            let tab = &workspace.tabs[workspace.active];
+            tab.active_pane() == tab.panes.first_leaf().0
+        })
+    }
+
     /// Brings the tab at `index` to the front.
     fn select(workspace: &Entity<Workspace>, cx: &mut VisualTestContext, index: usize) {
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.select_tab(index, window, cx);
         });
+    }
+
+    #[gpui::test]
+    fn a_followed_file_is_a_session_tab_that_wants_no_panel(cx: &mut TestAppContext) {
+        // The setting says "open the panel", and so does the profile the tail
+        // is opened from: a followed file has to refuse it whatever either of
+        // them says, there being no shell on the other end to browse a
+        // filesystem beside — and [`Session::files`] answering nothing for such
+        // a session, so a panel here would sit empty for good.
+        let (workspace, cx) = workspace(cx, true);
+        open_tail(&workspace, cx, "/var/log/nginx/access.log");
+
+        assert!(
+            !showing(&workspace, cx),
+            "a followed file opened the file panel"
+        );
+
+        // It is a session like any other, which is the answer every rule about
+        // a pane is written against: the tab strip's label and status dot, the
+        // status bar, the disconnect that retires the pane, the reconnect.
+        let session = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.tabs[workspace.active].active_session(cx)
+            })
+            .expect("a tail pane did not answer as a session");
+
+        // And it is named after the file, not after the connection: two logs on
+        // one host would otherwise wear the same label.
+        assert_eq!(
+            session.read_with(cx, |session, _| session.title()),
+            SharedString::from("access.log - web-01")
+        );
+    }
+
+    #[gpui::test]
+    fn a_profile_with_tails_gets_one_tab_with_the_shell_on_top(cx: &mut TestAppContext) {
+        // Two rules, so the arrangement has to be told apart from "a tail pane
+        // happened to land somewhere" — three leaves in all, and nowhere else
+        // for the other two to have gone but this one tab.
+        let (workspace, cx) = workspace(cx, true);
+        open_tailed(
+            &workspace,
+            cx,
+            &["/var/log/nginx/access.log", "/var/log/nginx/error.log"],
+        );
+
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.tabs.len()),
+            1,
+            "the tail rules opened tabs of their own instead of joining the shell's"
+        );
+
+        let leaf_count = workspace.read_with(cx, |workspace, _| {
+            workspace.tabs[workspace.active].panes.leaf_count()
+        });
+        assert_eq!(
+            leaf_count, 3,
+            "expected the shell pane plus one pane per tail rule"
+        );
+
+        // The shell, not either tail, is what the tab hands the keyboard to on
+        // arrival: a rule nobody has looked at yet has nothing to answer a
+        // keypress with.
+        let active_is_shell = workspace.read_with(cx, |workspace, _| {
+            matches!(
+                workspace.tabs[workspace.active].active_view(),
+                PaneView::Terminal(_)
+            )
+        });
+        assert!(
+            active_is_shell,
+            "a tail pane held the active pane instead of the shell"
+        );
+    }
+
+    #[gpui::test]
+    fn a_dashboard_of_two_files_puts_them_side_by_side(cx: &mut TestAppContext) {
+        // Two panes are one row of two columns, not a column of two: a log is
+        // read across, and halving the width of a terminal costs less than
+        // halving the number of lines of it that are on screen.
+        let (workspace, cx) = workspace(cx, true);
+        open_dashboard(&workspace, cx, "Deploy watch", 2);
+
+        assert_eq!(
+            grid(&workspace, cx),
+            (2, 0, 1),
+            "two files did not open as one row of two"
+        );
+
+        // The setting says "open the panel" and so does the profile behind
+        // every pane; a dashboard refuses it for the reason a single followed
+        // file refuses it, there being no shell here to browse a filesystem
+        // beside.
+        assert!(
+            !showing(&workspace, cx),
+            "a dashboard opened the file panel"
+        );
+        assert!(
+            first_pane_is_active(&workspace, cx),
+            "a dashboard handed the keyboard to something other than its first pane"
+        );
+    }
+
+    #[gpui::test]
+    fn a_dashboard_of_three_files_fills_the_top_row_first(cx: &mut TestAppContext) {
+        // Three into two columns: a full row and a short one. Which of the two
+        // rows is the short one is the whole of what "row-major" means here, so
+        // the tree itself is read rather than only the divider counts — those
+        // would say the same thing about a dashboard that had filled the bottom
+        // row and left a gap at the top.
+        let (workspace, cx) = workspace(cx, true);
+        open_dashboard(&workspace, cx, "Deploy watch", 3);
+
+        assert_eq!(
+            grid(&workspace, cx),
+            (3, 1, 1),
+            "three files did not open as two rows of at most two"
+        );
+
+        let short_row_last = workspace.read_with(cx, |workspace, _| {
+            match workspace.tabs[workspace.active].panes.root() {
+                PaneNode::Split {
+                    axis: Axis::Vertical,
+                    first,
+                    second,
+                    ..
+                } => {
+                    matches!(
+                        **first,
+                        PaneNode::Split {
+                            axis: Axis::Horizontal,
+                            ..
+                        }
+                    ) && matches!(**second, PaneNode::Leaf { .. })
+                }
+                _ => false,
+            }
+        });
+        assert!(
+            short_row_last,
+            "the row with room to spare was not the bottom one"
+        );
+    }
+
+    #[gpui::test]
+    fn a_dashboard_of_four_files_opens_two_by_two(cx: &mut TestAppContext) {
+        // The case the whole shape exists for: four panes are a square, not a
+        // stack of four and not a row of four.
+        let (workspace, cx) = workspace(cx, true);
+        open_dashboard(&workspace, cx, "Deploy watch", 4);
+
+        assert_eq!(
+            grid(&workspace, cx),
+            (4, 1, 2),
+            "four files did not open two by two"
+        );
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.tabs.len()),
+            1,
+            "the dashboard's files opened tabs of their own instead of one tab"
+        );
+    }
+
+    #[gpui::test]
+    fn a_dashboard_tab_is_named_after_the_dashboard(cx: &mut TestAppContext) {
+        // Not after whichever pane holds the keyboard, which is what every
+        // other tab is named after: a dashboard is a named arrangement, and a
+        // strip that renamed it as the focus moved would be reporting on the
+        // wrong thing.
+        let (workspace, cx) = workspace(cx, true);
+        open_dashboard(&workspace, cx, "Deploy watch", 4);
+
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.tabs[workspace.active]
+                .label
+                .clone()),
+            Some(SharedString::from("Deploy watch"))
+        );
+
+        // And the name it is *not* wearing is a real one: the active pane has a
+        // session with a title of its own, which is what the strip would have
+        // used had the tab carried no name.
+        let title = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.tabs[workspace.active].active_session(cx)
+            })
+            .expect("a dashboard pane did not answer as a session")
+            .read_with(cx, |session, _| session.title());
+        assert_eq!(title, SharedString::from("app-0.log - web-01"));
+    }
+
+    /// A [`LayoutNode::Split`], spelled out so the layout tests read as trees.
+    fn layout_split(
+        axis: LayoutAxis,
+        ratio: f32,
+        first: LayoutNode,
+        second: LayoutNode,
+    ) -> LayoutNode {
+        LayoutNode::Split {
+            axis,
+            ratio,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    /// A dashboard of `count` followed files named `/var/log/app-N.log`, each on
+    /// a profile of its own, optionally carrying a saved `layout`.
+    fn dashboard_of(name: &str, count: usize, layout: Option<LayoutNode>) -> Dashboard {
+        let mut dashboard = Dashboard::new(name);
+        for index in 0..count {
+            dashboard.panes.push(DashboardPane {
+                profile: Uuid::new_v4(),
+                path: format!("/var/log/app-{index}.log"),
+            });
+        }
+        dashboard.layout = layout;
+        dashboard
+    }
+
+    /// Opens `dashboard` into a tab the way [`Workspace::open_dashboard`] ends,
+    /// making the same layout-or-grid decision the real opener makes and taking
+    /// the lookups and the keychain out for the reason [`open_dashboard`] does.
+    ///
+    /// Each pane's session carries the very profile id and path the dashboard
+    /// names, so what [`Workspace::capture_tab_layout`] reads back off the tab is
+    /// exactly what went in. The dashboard is also placed in the store, so the
+    /// opened tab's [`SessionTab::dashboard`] resolves to a real entry.
+    fn open_dashboard_tab(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+        dashboard: &Dashboard,
+    ) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            let caps = Workspace::pane_caps_source(cx);
+            let leaves: Vec<PaneLeaf> = dashboard
+                .panes
+                .iter()
+                .map(|pane| {
+                    let mut profile = profile_showing_files(true);
+                    profile.id = pane.profile;
+                    let path = pane.path.clone();
+                    let session =
+                        cx.new(|cx| Session::dormant_tail(profile.clone(), path.clone(), cx));
+                    let terminal =
+                        cx.new(|cx| TerminalView::new(session.clone(), caps.clone(), window, cx));
+                    let view = cx.new(|cx| {
+                        TailView::new(
+                            terminal,
+                            session.clone(),
+                            path,
+                            SharedString::from(profile.name.clone()),
+                            cx,
+                        )
+                    });
+                    workspace.new_tail_pane(view, session, window, cx)
+                })
+                .collect();
+
+            let tab = match dashboard.valid_layout() {
+                Some(layout) if leaves.len() == dashboard.panes.len() => {
+                    Workspace::compose_dashboard_layout(leaves, layout, false)
+                }
+                _ => Workspace::compose_dashboard_tab(leaves, false),
+            }
+            .with_label(dashboard.name.clone())
+            .with_dashboard(dashboard.id);
+
+            workspace.dashboards.upsert(dashboard.clone());
+            workspace.tabs.push(tab);
+            workspace.active = workspace.tabs.len() - 1;
+            workspace.focus_active(window, cx);
+        });
+    }
+
+    /// The followed paths of the active tab's panes, in depth-first layout
+    /// order, for asserting where each leaf landed.
+    fn leaf_paths(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.tabs[workspace.active]
+                .panes
+                .leaves()
+                .into_iter()
+                .map(|(_, leaf)| {
+                    leaf.view
+                        .session(cx)
+                        .and_then(|session| {
+                            session.read(cx).tail_path().map(|path| path.to_owned())
+                        })
+                        .expect("a dashboard pane is a followed file")
+                })
+                .collect()
+        })
+    }
+
+    /// A store of dashboards named `names`, in that order, with the ones whose
+    /// name appears in `marked` flagged to open at start-up.
+    ///
+    /// Ids are the store's own, so the assertions below have to go back through
+    /// the store to name what they expect — which is the point: what
+    /// [`startup_dashboards`] answers with is ids, and a name is only ever the
+    /// way in.
+    fn dashboard_store(names: &[&str], marked: &[&str]) -> DashboardStore {
+        let mut store = DashboardStore::default();
+        for name in names {
+            let mut dashboard = Dashboard::new(*name);
+            dashboard.open_at_startup = marked.contains(name);
+            store.upsert(dashboard);
+        }
+        store
+    }
+
+    /// The id of the first dashboard called `name`, which is the one a request
+    /// for that name resolves to.
+    fn dashboard_id(store: &DashboardStore, name: &str) -> Uuid {
+        store
+            .dashboards()
+            .iter()
+            .find(|dashboard| dashboard.name == name)
+            .expect("the fixture has no such dashboard")
+            .id
+    }
+
+    #[test]
+    fn the_marked_dashboards_open_at_startup_in_saved_order() {
+        let store = dashboard_store(&["morning", "deploy", "night"], &["night", "morning"]);
+
+        assert_eq!(
+            startup_dashboards(&store, &[]),
+            vec![
+                dashboard_id(&store, "morning"),
+                dashboard_id(&store, "night")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dashboard_named_on_the_command_line_opens_after_the_marked_ones() {
+        let store = dashboard_store(&["morning", "deploy", "night"], &["morning"]);
+
+        assert_eq!(
+            startup_dashboards(&store, &["night".to_owned(), "deploy".to_owned()]),
+            vec![
+                dashboard_id(&store, "morning"),
+                dashboard_id(&store, "night"),
+                dashboard_id(&store, "deploy"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dashboard_both_marked_and_named_opens_once() {
+        let store = dashboard_store(&["morning", "deploy"], &["morning"]);
+
+        assert_eq!(
+            startup_dashboards(&store, &["morning".to_owned(), "morning".to_owned()]),
+            vec![dashboard_id(&store, "morning")]
+        );
+    }
+
+    #[test]
+    fn a_name_no_dashboard_answers_to_is_skipped() {
+        let store = dashboard_store(&["morning"], &[]);
+
+        assert!(startup_dashboards(&store, &["Morning".to_owned()]).is_empty());
+        assert!(startup_dashboards(&store, &["morning ".to_owned()]).is_empty());
+        assert_eq!(
+            startup_dashboards(&store, &["gone".to_owned(), "morning".to_owned()]),
+            vec![dashboard_id(&store, "morning")]
+        );
+    }
+
+    #[test]
+    fn a_launch_that_asks_for_nothing_opens_no_dashboard() {
+        assert!(startup_dashboards(&dashboard_store(&["morning"], &[]), &[]).is_empty());
+        assert!(startup_dashboards(&DashboardStore::default(), &["morning".to_owned()]).is_empty());
+    }
+
+    #[test]
+    fn two_dashboards_of_one_name_are_reached_by_the_first() {
+        // Names are not unique — identity in the store is the id — so the
+        // command line can only ever name the first of them, which is the one
+        // the welcome screen lists first too.
+        let store = dashboard_store(&["morning", "morning"], &[]);
+
+        assert_eq!(
+            startup_dashboards(&store, &["morning".to_owned()]),
+            vec![store.dashboards()[0].id]
+        );
+    }
+
+    #[gpui::test]
+    fn a_dashboard_restores_its_saved_layout(cx: &mut TestAppContext) {
+        // A three-pane arrangement with real shape: pane 0 fills the top, and
+        // the two below it share a row. The tree, the axis at each split and the
+        // ratio the divider sits at all have to come back exactly, or the saved
+        // geometry was not honoured.
+        let (workspace, cx) = workspace(cx, true);
+        let layout = layout_split(
+            LayoutAxis::Vertical,
+            0.3,
+            LayoutNode::Leaf { pane: 0 },
+            layout_split(
+                LayoutAxis::Horizontal,
+                0.6,
+                LayoutNode::Leaf { pane: 1 },
+                LayoutNode::Leaf { pane: 2 },
+            ),
+        );
+        let dashboard = dashboard_of("Tuned", 3, Some(layout));
+        open_dashboard_tab(&workspace, cx, &dashboard);
+
+        workspace.read_with(cx, |workspace, _| {
+            let PaneNode::Split {
+                axis: Axis::Vertical,
+                ratio,
+                first,
+                second,
+                ..
+            } = workspace.tabs[workspace.active].panes.root()
+            else {
+                panic!("the root was not the saved vertical split");
+            };
+            assert!((*ratio - 0.3).abs() < 1e-6, "the top divider moved");
+            assert!(
+                matches!(**first, PaneNode::Leaf { .. }),
+                "the top of the split was not a single pane"
+            );
+            let PaneNode::Split {
+                axis: Axis::Horizontal,
+                ratio,
+                first,
+                second,
+                ..
+            } = &**second
+            else {
+                panic!("the bottom of the split was not a horizontal split");
+            };
+            assert!((*ratio - 0.6).abs() < 1e-6, "the lower divider moved");
+            assert!(
+                matches!(**first, PaneNode::Leaf { .. })
+                    && matches!(**second, PaneNode::Leaf { .. }),
+                "the lower split did not hold two panes"
+            );
+        });
+
+        // And the panes landed in the order the leaves named them: 0 on top,
+        // then 1 and 2 across the row below.
+        assert_eq!(
+            leaf_paths(&workspace, cx),
+            vec![
+                "/var/log/app-0.log".to_owned(),
+                "/var/log/app-1.log".to_owned(),
+                "/var/log/app-2.log".to_owned(),
+            ],
+            "the panes did not restore in their saved positions"
+        );
+        assert!(
+            first_pane_is_active(&workspace, cx),
+            "a restored dashboard handed the keyboard to something other than its first pane"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tab_layout_round_trips_through_the_store(cx: &mut TestAppContext) {
+        // Build a tab from a known arrangement, read it back the way
+        // *Save layout* does, and confirm the pair a dashboard is stored as
+        // comes out matching: the panes in depth-first order and the very tree
+        // that built the tab.
+        let (workspace, cx) = workspace(cx, true);
+        let layout = layout_split(
+            LayoutAxis::Vertical,
+            0.3,
+            LayoutNode::Leaf { pane: 0 },
+            layout_split(
+                LayoutAxis::Horizontal,
+                0.6,
+                LayoutNode::Leaf { pane: 1 },
+                LayoutNode::Leaf { pane: 2 },
+            ),
+        );
+        let dashboard = dashboard_of("Tuned", 3, Some(layout.clone()));
+        open_dashboard_tab(&workspace, cx, &dashboard);
+
+        let (panes, captured) = workspace
+            .read_with(cx, |workspace, cx| {
+                Workspace::capture_tab_layout(&workspace.tabs[workspace.active], cx)
+            })
+            .expect("every pane of a dashboard tab is a followed file");
+
+        // Depth-first order: 0, 1, 2 — the same order the leaves were named in.
+        assert_eq!(
+            panes
+                .iter()
+                .map(|pane| pane.path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "/var/log/app-0.log".to_owned(),
+                "/var/log/app-1.log".to_owned(),
+                "/var/log/app-2.log".to_owned(),
+            ]
+        );
+        // And each pane kept the profile the dashboard named it on.
+        assert_eq!(
+            panes.iter().map(|pane| pane.profile).collect::<Vec<_>>(),
+            dashboard
+                .panes
+                .iter()
+                .map(|pane| pane.profile)
+                .collect::<Vec<_>>()
+        );
+        // The tree is the one that built the tab, ratios and all.
+        assert_eq!(captured, layout);
+
+        // What *Save layout* writes minus the disk: the captured pair upserted
+        // over the stored dashboard and read straight back.
+        let mut store = DashboardStore::default();
+        let mut updated = dashboard.clone();
+        updated.panes = panes;
+        updated.layout = Some(captured);
+        store.upsert(updated);
+        let stored = store
+            .get(dashboard.id)
+            .expect("the dashboard is in the store");
+        assert_eq!(stored.layout, Some(layout));
+    }
+
+    #[gpui::test]
+    fn saving_a_tab_layout_writes_the_new_arrangement_to_the_store_file(cx: &mut TestAppContext) {
+        // The whole of *Save layout*, disk included: open a dashboard on a known
+        // geometry, drag one divider, invoke the command, and read the file back
+        // off the filesystem rather than out of the store that wrote it.
+        //
+        // The real configuration directory is never in play, and by construction
+        // rather than by assertion: the workspace's store is replaced with one
+        // built by `DashboardStore::at` over a temporary directory, so
+        // `save_tab_layout`'s `self.dashboards.save()` has nowhere else it could
+        // land. (`Workspace::new` already starts a test build on an empty store
+        // rather than reading the config file, so nothing is read either.)
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("dashboards.json");
+
+        let (workspace, cx) = workspace(cx, true);
+        let saved = layout_split(
+            LayoutAxis::Vertical,
+            0.3,
+            LayoutNode::Leaf { pane: 0 },
+            layout_split(
+                LayoutAxis::Horizontal,
+                0.6,
+                LayoutNode::Leaf { pane: 1 },
+                LayoutNode::Leaf { pane: 2 },
+            ),
+        );
+        let dashboard = dashboard_of("Tuned", 3, Some(saved));
+
+        // Before the tab is opened: `open_dashboard_tab` upserts the dashboard
+        // into whatever store the workspace holds, and this is the store it must
+        // land in.
+        workspace.update(cx, |workspace, _| {
+            workspace.dashboards = DashboardStore::at(&path);
+        });
+        open_dashboard_tab(&workspace, cx, &dashboard);
+
+        // Drag the outer divider, the way `Splitter` reports one being dropped.
+        let root_split = workspace.read_with(cx, |workspace, _| {
+            match workspace.tabs[workspace.active].panes.root() {
+                PaneNode::Split { id, .. } => *id,
+                PaneNode::Leaf { .. } => panic!("a three-pane dashboard opened as a single pane"),
+            }
+        });
+        let index = workspace.read_with(cx, |workspace, _| workspace.active);
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.set_split_ratio(root_split, 0.75, cx);
+            workspace.save_tab_layout(index, cx);
+        });
+
+        // Off the disk, through the same reader the application starts with.
+        let stored = DashboardStore::load_from(&path).expect("the store file was written");
+        assert_eq!(
+            stored.len(),
+            1,
+            "the save did not write exactly one dashboard"
+        );
+        let stored = stored
+            .get(dashboard.id)
+            .expect("the saved layout landed on the dashboard it was opened from");
+        assert_eq!(
+            stored.name, "Tuned",
+            "the dashboard was renamed by the save"
+        );
+
+        // The dragged divider is what came back, with the untouched inner one
+        // still where the opener put it.
+        assert_eq!(
+            stored.layout,
+            Some(layout_split(
+                LayoutAxis::Vertical,
+                0.75,
+                LayoutNode::Leaf { pane: 0 },
+                layout_split(
+                    LayoutAxis::Horizontal,
+                    0.6,
+                    LayoutNode::Leaf { pane: 1 },
+                    LayoutNode::Leaf { pane: 2 },
+                ),
+            )),
+            "the file does not hold the arrangement that was on screen"
+        );
+
+        // And the panes are in depth-first layout order, which is the order the
+        // leaf indices above are counted in.
+        assert_eq!(
+            stored
+                .panes
+                .iter()
+                .map(|pane| pane.path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "/var/log/app-0.log".to_owned(),
+                "/var/log/app-1.log".to_owned(),
+                "/var/log/app-2.log".to_owned(),
+            ]
+        );
+        assert_eq!(
+            stored
+                .panes
+                .iter()
+                .map(|pane| pane.profile)
+                .collect::<Vec<_>>(),
+            dashboard
+                .panes
+                .iter()
+                .map(|pane| pane.profile)
+                .collect::<Vec<_>>(),
+            "a pane lost the connection the dashboard named it on"
+        );
+        // The written geometry is one the opener would honour again.
+        assert!(
+            stored.valid_layout().is_some(),
+            "the saved layout does not match its own pane list"
+        );
+    }
+
+    #[gpui::test]
+    fn a_dashboard_without_a_layout_opens_as_a_grid(cx: &mut TestAppContext) {
+        // No saved geometry is the ordinary state, and it must lay out as the
+        // fresh grid `compose_dashboard_tab` builds: three panes are two rows of
+        // at most two, one split each way.
+        let (workspace, cx) = workspace(cx, true);
+        let dashboard = dashboard_of("Plain", 3, None);
+        open_dashboard_tab(&workspace, cx, &dashboard);
+
+        assert_eq!(
+            grid(&workspace, cx),
+            (3, 1, 1),
+            "a layout-less dashboard did not open as the grid"
+        );
+    }
+
+    #[gpui::test]
+    fn a_drifted_layout_falls_back_to_the_grid(cx: &mut TestAppContext) {
+        // A layout that no longer matches its panes — here it names only two of
+        // the three — is caught by `valid_layout` and the grid takes over, so a
+        // pane edit that outdated the geometry costs nothing but the tuning.
+        let (workspace, cx) = workspace(cx, true);
+        let stale = layout_split(
+            LayoutAxis::Horizontal,
+            0.5,
+            LayoutNode::Leaf { pane: 0 },
+            LayoutNode::Leaf { pane: 1 },
+        );
+        let dashboard = dashboard_of("Drifted", 3, Some(stale));
+        open_dashboard_tab(&workspace, cx, &dashboard);
+
+        assert_eq!(
+            grid(&workspace, cx),
+            (3, 1, 1),
+            "a drifted layout was honoured instead of falling back to the grid"
+        );
     }
 
     #[gpui::test]
@@ -6702,7 +9339,7 @@ mod workspace_tests {
         workspace.read_with(cx, |workspace, _| {
             match &workspace.tabs[index].panes.first_leaf().1.view {
                 PaneView::Terminal(view) => view.clone(),
-                PaneView::Editor(_) => unreachable!("the tab was opened as a shell"),
+                _ => unreachable!("the tab was opened as a shell"),
             }
         })
     }

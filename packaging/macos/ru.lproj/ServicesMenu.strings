@@ -1,0 +1,8 @@
+/* The Services menu titles, keyed by the English strings the `NSMenuItem`
+   `default` values in Info.plist carry. AppKit looks a service's menu title up
+   in this file, in the bundle's localisation for the user's language, and falls
+   back to the `default` in Info.plist when there is no entry — which is why the
+   keys are those strings verbatim rather than identifiers, and why renaming one
+   in Info.plist means renaming it in all eight of these. */
+"New rulogman Window Here" = "Открыть новое окно rulogman здесь";
+"New rulogman Tab Here" = "Открыть новую вкладку rulogman здесь";
