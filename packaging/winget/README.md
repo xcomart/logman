@@ -29,6 +29,18 @@ The filenames are not decorative. winget-pkgs requires that they be
 `<PackageIdentifier>.locale.<locale>.yaml`, so the directory here can be copied
 into a fork verbatim.
 
+The installer manifest also declares a dependency on
+`Microsoft.VCRedist.2015+.x64`. `rulogman.exe` links the MSVC runtime
+dynamically, and neither the installer nor the zip carries it, so a machine
+without that redistributable already installed fails to launch it at all —
+which is what happened on the winget-pkgs validation VM before the release
+build started statically linking the CRT (see `.github/workflows/release.yml`).
+The dependency stays declared as a safety net even so, since it costs nothing
+on a machine that already has the runtime. Because `wingetcreate update` edits
+a copy of the previously merged manifest rather than regenerating one from
+scratch, this declaration carries forward to every release automatically —
+nothing here needs to repeat it by hand when bumping the version below.
+
 The manifests are written against **manifest schema 1.12.0**, which is the
 newest schema winget-pkgs actually merges against.
 

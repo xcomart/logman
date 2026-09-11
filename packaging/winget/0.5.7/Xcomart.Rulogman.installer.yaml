@@ -12,6 +12,16 @@ InstallModes:
 - silent
 - silentWithProgress
 UpgradeBehavior: install
+# rulogman.exe links the MSVC runtime dynamically (VCRUNTIME140.dll and the
+# api-ms-win-crt-* forwarders), and Inno Setup ships nothing but the exe, so a
+# machine without the VC redistributable fails at load with STATUS_DLL_NOT_FOUND
+# (0xC0000135) — which is exactly what the winget-pkgs validation VM did.
+# Declaring the dependency makes winget install the runtime first. Kept even
+# after the release build went crt-static (see release.yml): harmless when the
+# runtime is already there, and a safety net if a build ever drops the flag.
+Dependencies:
+  PackageDependencies:
+  - PackageIdentifier: Microsoft.VCRedist.2015+.x64
 # 1970-01-01 is a placeholder: this manifest is written before the release it
 # describes exists, so neither the date nor the hash below can be real yet.
 # Both are filled in by hand for the first submission — see
